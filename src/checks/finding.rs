@@ -67,6 +67,18 @@ pub enum Check {
     ComposeMissing,
     /// `[compose] file` names a file that does not exist.
     ComposeFileMissing,
+    /// `devslot.toml` sets a managed port variable in `[env]`.
+    EnvForcesPort,
+    /// A compose port published through a variable whose name does not end in `PORT`.
+    PortVariableUnmanaged,
+    /// A committed `[env]` key that `.env` and `.env.example` do not declare.
+    EnvKeyUndeclared,
+    /// `devslot.local.toml` is tracked by git.
+    LocalConfigTracked,
+    /// A forced port belongs to another instance.
+    ForcedPortConflict,
+    /// The registered range no longer matches the slot of the current settings.
+    SlotGeometryChanged,
 }
 
 /// One problem found in the project.

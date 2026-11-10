@@ -2,5 +2,6 @@
 
 pub mod args;
 pub mod exit_code;
+pub mod output;
 pub mod render;
 pub mod style;

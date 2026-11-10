@@ -5,6 +5,7 @@ use std::path::Path;
 use super::finding::{Check, Finding, Level};
 use crate::compose::probe::ProbedCompose;
 use crate::docker::PROBE_PROJECT;
+use crate::project_config::has_port_suffix;
 
 const DOTENV_FILE: &str = ".env";
 const BIND_MOUNT: &str = "bind";
@@ -15,6 +16,8 @@ pub struct ComposeCheckContext<'a> {
     pub root: &'a Path,
     /// The managed port variables, in discovery order.
     pub managed_variables: &'a [String],
+    /// The compose variables `[ports] ignore` leaves alone.
+    pub ignored_variables: &'a [String],
 }
 
 /// Runs every compose check on `probed`, the configuration of `file`.
@@ -27,6 +30,7 @@ pub fn check_compose(
     findings.extend(check_container_names(file, probed));
     findings.extend(check_explicit_names(file, probed));
     findings.extend(check_published_ports(file, probed));
+    findings.extend(check_unmanaged_port_variables(file, probed, context));
     findings.extend(check_env_file_ports(file, probed, context));
     findings.extend(check_bind_mounts(file, probed, context));
     findings
@@ -102,6 +106,45 @@ fn check_published_ports(file: &str, probed: &ProbedCompose) -> Vec<Finding> {
                 published,
                 mapping.target,
             ));
+        }
+    }
+    findings
+}
+
+fn check_unmanaged_port_variables(
+    file: &str,
+    probed: &ProbedCompose,
+    context: &ComposeCheckContext<'_>,
+) -> Vec<Finding> {
+    let mut findings: Vec<Finding> = Vec::new();
+    for (service_name, service) in &probed.config.services {
+        for mapping in &service.ports {
+            let Some(variable) = probed.variable_published_by(mapping) else {
+                continue;
+            };
+            let is_known = findings.iter().any(|found| {
+                found.service.as_deref() == Some(service_name)
+                    && found.key.as_deref() == Some(variable)
+            });
+            if has_port_suffix(variable)
+                || is_known
+                || context
+                    .ignored_variables
+                    .iter()
+                    .any(|name| name == variable)
+            {
+                continue;
+            }
+            findings.push(
+                Finding::new(
+                    Level::Warning,
+                    Check::PortVariableUnmanaged,
+                    format!("{variable} is not managed: rename it to end in _PORT so devslot can assign it"),
+                )
+                .in_file(file)
+                .in_service(service_name)
+                .for_key(variable),
+            );
         }
     }
     findings
@@ -234,7 +277,7 @@ mod tests {
     const ROOT: &str = "/work/app";
 
     fn probed(variables: &[(&str, &str)], config: &str) -> ProbedCompose {
-        probe(&FakeComposeCli::new(variables, config), &[], &|_| None).unwrap()
+        probe(&FakeComposeCli::new(variables, config), &[], &|_| None, &[]).unwrap()
     }
 
     fn run(variables: &[(&str, &str)], config: &str, managed: &[&str]) -> Vec<Finding> {
@@ -245,6 +288,7 @@ mod tests {
             &ComposeCheckContext {
                 root: Path::new(ROOT),
                 managed_variables: &managed,
+                ignored_variables: &[],
             },
         )
     }
@@ -437,5 +481,48 @@ mod tests {
         let config = r#"{"services":{"app":{"volumes":[{"type":"bind","source":"/work/app-other","target":"/d"}]}}}"#;
 
         assert_eq!(checks_of(&run(&[], config, &[])), vec![Check::BindMount]);
+    }
+
+    const PSQLRC_CONFIG: &str =
+        r#"{"services":{"postgres":{"ports":[{"target":5432,"published":"61000"}]}}}"#;
+
+    #[test]
+    fn should_warn_naming_file_service_and_variable_when_a_published_port_variable_does_not_end_in_port()
+     {
+        let findings = run(&[("PSQLRC", "")], PSQLRC_CONFIG, &[]);
+
+        assert_eq!(
+            findings
+                .iter()
+                .map(|f| (
+                    f.level,
+                    f.check,
+                    f.file.as_deref(),
+                    f.service.as_deref(),
+                    f.key.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            [(
+                Level::Warning,
+                Check::PortVariableUnmanaged,
+                Some("compose.yml"),
+                Some("postgres"),
+                Some("PSQLRC")
+            )]
+        );
+    }
+
+    #[test]
+    fn should_not_report_a_hardcoded_port_too_when_the_variable_is_unmanaged() {
+        let findings = run(&[("PSQLRC", "")], PSQLRC_CONFIG, &[]);
+
+        assert!(!checks_of(&findings).contains(&Check::HardcodedPort));
+    }
+
+    #[test]
+    fn should_not_warn_when_the_variable_ends_in_port() {
+        let findings = run(&[("DB_PORT", "")], PSQLRC_CONFIG, &["DB_PORT"]);
+
+        assert!(!checks_of(&findings).contains(&Check::PortVariableUnmanaged));
     }
 }

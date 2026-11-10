@@ -6,7 +6,7 @@ use crate::compose::probe::ProbedCompose;
 use crate::compose::sentinels::usual_value;
 use crate::project::dotenv::{EnvFile, lookup_value};
 use crate::project::vite::{DEFAULT_HMR_PORT, HMR_PORT_VARIABLE, ViteDetection};
-use crate::project_config::ProjectConfig;
+use crate::project_config::{ProjectConfig, has_port_suffix};
 
 const APP_PORT_VARIABLE: &str = "PORT";
 const DOTENV_FILE: &str = ".env";
@@ -20,6 +20,23 @@ pub enum PortKind {
     Web,
     /// A port published by a compose service.
     Service,
+}
+
+impl PortKind {
+    /// The word the registry and the JSON output use.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::Service => "service",
+        }
+    }
+
+    /// The kind written as `word`, when it is one.
+    pub fn from_word(word: &str) -> Option<Self> {
+        [Self::Web, Self::Service]
+            .into_iter()
+            .find(|kind| kind.word() == word)
+    }
 }
 
 /// Where the variable was found.
@@ -154,6 +171,9 @@ fn add_compose_ports(input: &DiscoveryInput<'_>, ports: &mut Vec<ManagedPort>) {
             let Some(variable) = probed.variable_published_by(mapping) else {
                 continue;
             };
+            if !has_port_suffix(variable) {
+                continue;
+            }
             if input
                 .config
                 .ignored_ports
@@ -215,7 +235,7 @@ mod tests {
 
     fn probed(variables: &[(&str, &str)], config: &str) -> ProbedCompose {
         let cli = FakeComposeCli::new(variables, config);
-        probe(&cli, &[], &|_| None).unwrap()
+        probe(&cli, &[], &|_| None, &[]).unwrap()
     }
 
     const POSTGRES: &str =

@@ -8,16 +8,80 @@ pub const ERROR: u8 = 1;
 pub const USAGE: u8 = 2;
 /// The tool itself failed: Docker or git unavailable, unreadable file, timeout.
 pub const TOOL_FAILURE: u8 = 2;
+/// `run`: the command was found but could not be executed.
+pub const COMMAND_NOT_EXECUTABLE: u8 = 126;
+/// `run`: the command was not found.
+pub const COMMAND_NOT_FOUND: u8 = 127;
+
+fn format_codes(codes: &[(u8, &str)]) -> String {
+    codes
+        .iter()
+        .map(|(code, meaning)| format!("  {code:<3}  {meaning}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// The exit codes in the form the top-level `--help` shows them.
 pub fn describe_exit_codes() -> String {
     [
         (SUCCESS, "success"),
-        (ERROR, "error (for doctor: at least one error was found)"),
+        (
+            ERROR,
+            "error (doctor: at least one error was found; env: checkout not registered; run: refused to start the command)",
+        ),
         (USAGE, "invalid usage, or the tool itself failed"),
     ]
     .map(|(code, meaning)| format!("  {code}  {meaning}"))
     .join("\n")
+}
+
+/// The exit codes in the form `ds env --help` shows them.
+pub fn describe_env_exit_codes() -> String {
+    format_codes(&[
+        (SUCCESS, "the environment was printed"),
+        (ERROR, "this checkout is not registered"),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed (unreadable config or registry, invalid [env]), or invalid usage",
+        ),
+    ])
+}
+
+/// The exit codes in the form `ds info --help` shows them.
+pub fn describe_info_exit_codes() -> String {
+    format_codes(&[
+        (
+            SUCCESS,
+            "the information was printed (also for an unregistered checkout)",
+        ),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed (unreadable config or registry), or invalid usage",
+        ),
+    ])
+}
+
+/// The exit codes in the form `ds run --help` shows them.
+pub fn describe_run_exit_codes() -> String {
+    format_codes(&[
+        (
+            SUCCESS,
+            "the command's own exit code, whatever it is (1 can also mean ds refused to start it)",
+        ),
+        (
+            ERROR,
+            "ds refused to start the command: the checks found an error, or no slot or port is free",
+        ),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed (Docker or git unavailable, registry locked, unreadable file), or invalid usage",
+        ),
+        (
+            COMMAND_NOT_EXECUTABLE,
+            "the command was found but cannot be executed (permission denied, no interpreter)",
+        ),
+        (COMMAND_NOT_FOUND, "the command was not found"),
+    ])
 }
 
 /// The exit codes in the form `ds doctor --help` shows them.
@@ -47,6 +111,33 @@ mod tests {
                 .iter()
                 .all(|code| description.contains(&format!("  {code}  ")))
         );
+    }
+
+    #[test]
+    fn should_list_the_shell_codes_when_describing_run_exit_codes() {
+        let description = describe_run_exit_codes();
+
+        assert!(
+            [
+                SUCCESS,
+                ERROR,
+                TOOL_FAILURE,
+                COMMAND_NOT_EXECUTABLE,
+                COMMAND_NOT_FOUND
+            ]
+            .iter()
+            .all(|code| description.contains(&format!("  {code}  ")))
+        );
+    }
+
+    #[test]
+    fn should_list_the_unregistered_code_when_describing_env_exit_codes() {
+        assert!(describe_env_exit_codes().contains("  1    this checkout is not registered"));
+    }
+
+    #[test]
+    fn should_list_success_for_an_unregistered_checkout_when_describing_info_exit_codes() {
+        assert!(describe_info_exit_codes().contains("unregistered"));
     }
 
     #[test]

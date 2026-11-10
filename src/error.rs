@@ -6,7 +6,11 @@ use thiserror::Error;
 
 use crate::checkout::CheckoutError;
 use crate::docker::DockerError;
+use crate::environment::EnvironmentError;
+use crate::global_config::GlobalConfigError;
+use crate::paths::PathsError;
 use crate::project_config::ConfigError;
+use crate::registry::RegistryError;
 
 /// Something that stops `ds` from answering. Maps to exit code 2.
 #[derive(Debug, Error)]
@@ -20,6 +24,18 @@ pub enum ToolError {
     /// A devslot config file is unusable.
     #[error(transparent)]
     Config(#[from] ConfigError),
+    /// The global config file is unusable.
+    #[error(transparent)]
+    GlobalConfig(#[from] GlobalConfigError),
+    /// The devslot files cannot be placed.
+    #[error(transparent)]
+    Paths(#[from] PathsError),
+    /// The registry is unreadable, malformed, locked or cannot be written.
+    #[error(transparent)]
+    Registry(#[from] RegistryError),
+    /// The `[env]` values cannot be built.
+    #[error(transparent)]
+    Environment(#[from] EnvironmentError),
     /// Docker is unavailable, timed out or answered nonsense.
     #[error(transparent)]
     Docker(#[from] DockerError),

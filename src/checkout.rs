@@ -7,12 +7,16 @@ use std::process::{Command, Output};
 
 use thiserror::Error;
 
+use crate::instance_name::repository_name_from_common_dir;
+
 const GIT_PROGRAM: &str = "git";
 const NOT_A_REPOSITORY_MESSAGE: &str = "not a git repository";
 const WORKTREE_PREFIX: &str = "worktree ";
 const BARE_MARKER: &str = "bare";
 const IGNORED_EXIT_CODE: i32 = 0;
 const NOT_IGNORED_EXIT_CODE: i32 = 1;
+const TRACKED_EXIT_CODE: i32 = 0;
+const NOT_TRACKED_EXIT_CODE: i32 = 1;
 
 /// Why the checkout cannot be examined. These are tool failures.
 #[derive(Debug, Error)]
@@ -69,6 +73,36 @@ impl Checkout {
         })
     }
 
+    /// The name of the repository this checkout belongs to: the same for every
+    /// worktree. Outside git, the name of the folder.
+    pub fn repository_name(&self) -> Result<String, CheckoutError> {
+        if !self.is_git {
+            return Ok(folder_name(&self.root));
+        }
+        let output = run_git(
+            &self.root,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        if !output.status.success() {
+            return Err(git_failure("rev-parse", &output));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(repository_name_from_common_dir(Path::new(
+            text.trim_end_matches('\n'),
+        )))
+    }
+
+    /// Whether git tracks `file`, given relative to the root. Only meaningful
+    /// inside git.
+    pub fn is_tracked(&self, file: &str) -> Result<bool, CheckoutError> {
+        let output = run_git(&self.root, &["ls-files", "--error-unmatch", "--", file])?;
+        match output.status.code() {
+            Some(TRACKED_EXIT_CODE) => Ok(true),
+            Some(NOT_TRACKED_EXIT_CODE) => Ok(false),
+            _ => Err(git_failure("ls-files", &output)),
+        }
+    }
+
     /// Whether git ignores `.env` at the root. Only meaningful inside git.
     pub fn is_env_ignored(&self) -> Result<bool, CheckoutError> {
         let output = run_git(&self.root, &["check-ignore", "-q", "--", ".env"])?;
@@ -78,6 +112,12 @@ impl Checkout {
             _ => Err(git_failure("check-ignore", &output)),
         }
     }
+}
+
+fn folder_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn canonicalize(path: &Path) -> Result<PathBuf, CheckoutError> {
@@ -276,5 +316,66 @@ mod tests {
             checkout.main_root,
             Some(repository.path().canonicalize().unwrap())
         );
+    }
+
+    #[test]
+    fn should_name_the_repository_after_the_folder_when_the_checkout_is_not_in_git() {
+        let directory = tempfile::tempdir().unwrap();
+        let checkout = Checkout::locate(directory.path()).unwrap();
+
+        assert_eq!(
+            checkout.repository_name().unwrap(),
+            folder_name(&directory.path().canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn should_name_the_repository_after_the_main_folder_when_the_checkout_is_a_linked_worktree() {
+        let repository = initialized_repository();
+        git(
+            repository.path(),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "init",
+            ],
+        );
+        let linked = repository.path().join("linked");
+        git(
+            repository.path(),
+            &["worktree", "add", "-q", linked.to_str().unwrap()],
+        );
+
+        let checkout = Checkout::locate(&linked).unwrap();
+
+        assert_eq!(
+            checkout.repository_name().unwrap(),
+            folder_name(&repository.path().canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn should_report_tracked_when_the_file_is_added_to_the_index() {
+        let repository = initialized_repository();
+        std::fs::write(repository.path().join("devslot.local.toml"), "").unwrap();
+        git(repository.path(), &["add", "devslot.local.toml"]);
+        let checkout = Checkout::locate(repository.path()).unwrap();
+
+        assert!(checkout.is_tracked("devslot.local.toml").unwrap());
+    }
+
+    #[test]
+    fn should_report_not_tracked_when_the_file_is_only_in_the_folder() {
+        let repository = initialized_repository();
+        std::fs::write(repository.path().join("devslot.local.toml"), "").unwrap();
+        let checkout = Checkout::locate(repository.path()).unwrap();
+
+        assert!(!checkout.is_tracked("devslot.local.toml").unwrap());
     }
 }

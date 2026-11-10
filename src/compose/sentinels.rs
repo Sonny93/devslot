@@ -3,11 +3,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::reserved_names::is_reserved;
+
 /// The first sentinel: outside the slot range and above the Linux ephemeral range.
 pub const SENTINEL_BASE: u16 = 61000;
-
-const RESERVED_NAMES: [&str; 6] = ["PATH", "HOME", "PWD", "SHELL", "USER", "TMPDIR"];
-const RESERVED_PREFIXES: [&str; 5] = ["LD_", "DOCKER_", "COMPOSE_", "BUILDX_", "XDG_"];
 
 /// The sentinel given to each candidate variable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -60,15 +59,6 @@ pub fn usual_value(
         return from_env_files();
     }
     Some(compose_default.to_owned())
-}
-
-/// Whether the name steers the process or Docker itself: such a variable must
-/// never be overridden, even in a probe.
-pub fn is_reserved(name: &str) -> bool {
-    RESERVED_NAMES.contains(&name)
-        || RESERVED_PREFIXES
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
 }
 
 /// A variable is a candidate when its usual value is a number or empty.

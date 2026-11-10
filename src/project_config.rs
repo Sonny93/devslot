@@ -10,6 +10,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::project::bounded_read::{BoundedRead, Unreadable, read_bounded};
+use crate::reserved_names::is_reserved;
 
 /// The committed configuration file.
 pub const CONFIG_FILE: &str = "devslot.toml";
@@ -43,6 +44,34 @@ pub enum ConfigError {
         /// What the parser reports.
         message: String,
     },
+    /// A `[ports]` name cannot be a port variable.
+    #[error("invalid [ports] name {name:?} in {file}: {reason}")]
+    InvalidPortName {
+        /// The file name.
+        file: &'static str,
+        /// The name at fault.
+        name: String,
+        /// What is wrong with it.
+        reason: &'static str,
+    },
+    /// An `[env]` value is neither a string nor an integer. The value is never quoted.
+    #[error("the value of {key} in {file} must be a string or an integer")]
+    EnvValueType {
+        /// The file name.
+        file: &'static str,
+        /// The key at fault.
+        key: String,
+    },
+    /// An `[env]` entry cannot be exported. The value is never quoted.
+    #[error("invalid [env] key {key:?} in {file}: {reason}")]
+    InvalidEnv {
+        /// The file name.
+        file: &'static str,
+        /// The key at fault.
+        key: String,
+        /// What is wrong with it.
+        reason: &'static str,
+    },
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -52,7 +81,15 @@ struct RawConfig {
     #[serde(default)]
     ports: RawPorts,
     #[serde(default)]
-    env: BTreeMap<String, String>,
+    env: BTreeMap<String, RawEnvValue>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawEnvValue {
+    Text(String),
+    Integer(i64),
+    Unsupported(serde::de::IgnoredAny),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -75,17 +112,30 @@ pub struct VariableList {
     pub file: Option<&'static str>,
 }
 
+/// One `[env]` entry and the file whose value won.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvSetting {
+    /// The variable name.
+    pub key: String,
+    /// The value as written; may hold a secret, never printed.
+    pub value: String,
+    /// The file that set it: the local file wins over the committed one.
+    pub file: &'static str,
+}
+
 /// The merged configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectConfig {
     /// `[compose] file`: the dev compose file to use instead of detecting one.
     pub compose_file: Option<String>,
+    /// The file that set `[compose] file`.
+    pub compose_file_origin: Option<&'static str>,
     /// `[ports] extra`: variables to manage in addition to `PORT`.
     pub extra_ports: VariableList,
     /// `[ports] ignore`: compose variables to leave as they are.
     pub ignored_ports: VariableList,
-    /// `[env]`: the keys rebuilt from the assigned ports.
-    pub env_keys: Vec<String>,
+    /// `[env]`: the values built from the assigned ports, local over committed per key.
+    pub env: Vec<EnvSetting>,
 }
 
 impl ProjectConfig {
@@ -94,6 +144,11 @@ impl ProjectConfig {
         let base = read_layer(root, CONFIG_FILE)?;
         let local = read_layer(root, LOCAL_CONFIG_FILE)?;
         Ok(Self::merge(base, local))
+    }
+
+    /// The keys of `[env]`, in merge order.
+    pub fn env_keys(&self) -> Vec<String> {
+        self.env.iter().map(|setting| setting.key.clone()).collect()
     }
 
     /// Parses the text of a `devslot.toml`.
@@ -111,6 +166,7 @@ impl ProjectConfig {
         for (file, layer) in layers {
             if layer.compose.file.is_some() {
                 config.compose_file = layer.compose.file;
+                config.compose_file_origin = Some(file);
             }
             if let Some(names) = layer.ports.extra {
                 config.extra_ports = VariableList {
@@ -124,13 +180,21 @@ impl ProjectConfig {
                     file: Some(file),
                 };
             }
-            for key in layer.env.into_keys() {
-                if !config.env_keys.contains(&key) {
-                    config.env_keys.push(key);
-                }
+            for (key, value) in layer.env {
+                let RawEnvValue::Text(value) = value else {
+                    continue;
+                };
+                config.set_env(EnvSetting { key, value, file });
             }
         }
         config
+    }
+
+    fn set_env(&mut self, setting: EnvSetting) {
+        match self.env.iter_mut().find(|known| known.key == setting.key) {
+            Some(known) => *known = setting,
+            None => self.env.push(setting),
+        }
     }
 }
 
@@ -160,10 +224,97 @@ fn read_layer(
 }
 
 fn parse(text: &str, file: &'static str) -> Result<RawConfig, ConfigError> {
-    toml_edit::de::from_str(text).map_err(|error| ConfigError::Parse {
+    let mut raw: RawConfig = toml_edit::de::from_str(text).map_err(|error| ConfigError::Parse {
         file,
         message: error.message().to_owned(),
-    })
+    })?;
+    check_port_names(&raw.ports, file)?;
+    check_committed_extra_names(&raw.ports, file)?;
+    for (key, value) in &mut raw.env {
+        let text = match value {
+            RawEnvValue::Text(text) => text.clone(),
+            RawEnvValue::Integer(number) => number.to_string(),
+            RawEnvValue::Unsupported(_) => {
+                return Err(ConfigError::EnvValueType {
+                    file,
+                    key: key.clone(),
+                });
+            }
+        };
+        check_env_entry(key, &text).map_err(|reason| ConfigError::InvalidEnv {
+            file,
+            key: key.clone(),
+            reason,
+        })?;
+        *value = RawEnvValue::Text(text);
+    }
+    Ok(raw)
+}
+
+fn check_committed_extra_names(ports: &RawPorts, file: &'static str) -> Result<(), ConfigError> {
+    if file != CONFIG_FILE {
+        return Ok(());
+    }
+    let mut names = ports.extra.iter().flatten();
+    match names.find(|name| !has_port_suffix(name)) {
+        Some(name) => Err(ConfigError::InvalidPortName {
+            file,
+            name: name.clone(),
+            reason: "a port variable of the committed file must end in PORT",
+        }),
+        None => Ok(()),
+    }
+}
+
+fn check_port_names(ports: &RawPorts, file: &'static str) -> Result<(), ConfigError> {
+    let names = ports.extra.iter().chain(&ports.ignore).flatten();
+    for name in names {
+        check_variable_name(name).map_err(|reason| ConfigError::InvalidPortName {
+            file,
+            name: name.clone(),
+            reason,
+        })?;
+    }
+    Ok(())
+}
+
+const PORT_SUFFIX: &str = "PORT";
+
+/// Whether the name ends in `PORT`, in any case. A managed port variable must:
+/// its value is a bare number that tools may read as something else (a config
+/// file path, for example) under any other name.
+pub fn has_port_suffix(name: &str) -> bool {
+    name.len() >= PORT_SUFFIX.len()
+        && name.as_bytes()[name.len() - PORT_SUFFIX.len()..]
+            .eq_ignore_ascii_case(PORT_SUFFIX.as_bytes())
+}
+
+/// Whether `name` matches `[A-Za-z_][A-Za-z0-9_]*`.
+pub fn is_valid_variable_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+/// Checks that `name` can be exported and is not a reserved or denied name.
+pub fn check_variable_name(name: &str) -> Result<(), &'static str> {
+    if !is_valid_variable_name(name) {
+        return Err("not a valid variable name ([A-Za-z_][A-Za-z0-9_]*)");
+    }
+    if is_reserved(name) {
+        return Err("the name is reserved (it steers the process, Docker, devslot or a shell)");
+    }
+    Ok(())
+}
+
+fn check_env_entry(key: &str, value: &str) -> Result<(), &'static str> {
+    check_variable_name(key)?;
+    if value.contains('\0') {
+        return Err("the value contains a NUL character");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -229,7 +380,7 @@ mod tests {
     #[test]
     fn should_keep_the_base_list_and_name_its_file_when_the_local_file_does_not_set_it() {
         let root = tempfile::tempdir().unwrap();
-        write(root.path(), CONFIG_FILE, "[ports]\nextra = [\"A\"]\n");
+        write(root.path(), CONFIG_FILE, "[ports]\nextra = [\"A_PORT\"]\n");
         write(
             root.path(),
             LOCAL_CONFIG_FILE,
@@ -247,7 +398,7 @@ mod tests {
     #[test]
     fn should_replace_the_list_when_the_local_file_sets_it() {
         let root = tempfile::tempdir().unwrap();
-        write(root.path(), CONFIG_FILE, "[ports]\nextra = [\"A\"]\n");
+        write(root.path(), CONFIG_FILE, "[ports]\nextra = [\"A_PORT\"]\n");
         write(root.path(), LOCAL_CONFIG_FILE, "[ports]\nextra = [\"B\"]\n");
 
         let config = ProjectConfig::load(root.path()).unwrap();
@@ -267,7 +418,102 @@ mod tests {
 
         let config = ProjectConfig::load(root.path()).unwrap();
 
-        assert_eq!(config.env_keys, vec!["A", "B", "C"]);
+        assert_eq!(config.env_keys(), vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn should_keep_the_value_and_the_file_that_won_when_the_local_file_overrides_a_key() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), CONFIG_FILE, "[env]\nA = \"x\"\nB = \"y\"\n");
+        write(root.path(), LOCAL_CONFIG_FILE, "[env]\nB = \"z\"\n");
+
+        let config = ProjectConfig::load(root.path()).unwrap();
+
+        assert_eq!(
+            config.env,
+            vec![
+                EnvSetting {
+                    key: "A".to_owned(),
+                    value: "x".to_owned(),
+                    file: CONFIG_FILE
+                },
+                EnvSetting {
+                    key: "B".to_owned(),
+                    value: "z".to_owned(),
+                    file: LOCAL_CONFIG_FILE
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn should_name_the_file_that_set_the_compose_file() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            LOCAL_CONFIG_FILE,
+            "[compose]\nfile = \"b.yml\"\n",
+        );
+
+        let config = ProjectConfig::load(root.path()).unwrap();
+
+        assert_eq!(config.compose_file_origin, Some(LOCAL_CONFIG_FILE));
+    }
+
+    fn invalid_env_reason(file: &str, text: &str) -> String {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), file, text);
+        match ProjectConfig::load(root.path()).unwrap_err() {
+            ConfigError::InvalidEnv { key, .. } => key,
+            other => panic!("unexpected error {other}"),
+        }
+    }
+
+    #[test]
+    fn should_refuse_an_env_key_that_is_not_a_variable_name_naming_the_key() {
+        assert_eq!(
+            invalid_env_reason(CONFIG_FILE, "[env]\n\"A-B\" = \"x\"\n"),
+            "A-B"
+        );
+    }
+
+    #[test]
+    fn should_refuse_an_env_key_that_starts_with_a_digit() {
+        assert_eq!(
+            invalid_env_reason(CONFIG_FILE, "[env]\n\"1A\" = \"x\"\n"),
+            "1A"
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_reserved_env_key_in_the_committed_file() {
+        assert_eq!(
+            invalid_env_reason(CONFIG_FILE, "[env]\nCOMPOSE_PROJECT_NAME = \"x\"\n"),
+            "COMPOSE_PROJECT_NAME"
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_reserved_env_key_in_the_local_file() {
+        assert_eq!(
+            invalid_env_reason(LOCAL_CONFIG_FILE, "[env]\nPATH = \"x\"\n"),
+            "PATH"
+        );
+    }
+
+    #[test]
+    fn should_refuse_an_env_value_with_a_nul_character_without_printing_it() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            CONFIG_FILE,
+            "[env]\nA = \"fake-secret\\u0000\"\n",
+        );
+
+        let error = ProjectConfig::load(root.path()).unwrap_err();
+
+        assert!(matches!(error, ConfigError::InvalidEnv { .. }));
+        assert!(!error.to_string().contains("fake-secret"));
     }
 
     #[test]
@@ -307,5 +553,121 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn should_refuse_an_extra_port_name_that_carries_shell_code() {
+        let error = ProjectConfig::from_text("[ports]\nextra = [\"A;id\"]\n").unwrap_err();
+
+        assert!(matches!(error, ConfigError::InvalidPortName { ref name, .. } if name == "A;id"));
+    }
+
+    #[test]
+    fn should_refuse_a_reserved_extra_port_name() {
+        assert!(matches!(
+            ProjectConfig::from_text("[ports]\nextra = [\"PATH\"]\n").unwrap_err(),
+            ConfigError::InvalidPortName { .. }
+        ));
+    }
+
+    #[test]
+    fn should_refuse_an_invalid_ignored_port_name_in_the_local_file() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            LOCAL_CONFIG_FILE,
+            "[ports]\nignore = [\"A B\"]\n",
+        );
+
+        let error = ProjectConfig::load(root.path()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidPortName {
+                file: LOCAL_CONFIG_FILE,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn should_refuse_a_denied_env_key_in_both_files() {
+        for file in [CONFIG_FILE, LOCAL_CONFIG_FILE] {
+            assert_eq!(
+                invalid_env_reason(file, "[env]\nGIT_CONFIG_COUNT = \"1\"\n"),
+                "GIT_CONFIG_COUNT"
+            );
+        }
+    }
+
+    #[test]
+    fn should_accept_an_integer_env_value_as_its_decimal_text() {
+        let config = ProjectConfig::from_text("[env]\nPORT_FALLBACK = 3333\n").unwrap();
+
+        assert_eq!(config.env[0].value, "3333");
+    }
+
+    #[test]
+    fn should_refuse_a_float_env_value_without_quoting_it() {
+        let error = ProjectConfig::from_text("[env]\nPIN = 1.5\n").unwrap_err();
+
+        assert!(matches!(error, ConfigError::EnvValueType { .. }));
+        assert_eq!(
+            error.to_string(),
+            "the value of PIN in devslot.toml must be a string or an integer"
+        );
+    }
+
+    #[test]
+    fn should_not_quote_a_table_env_value_in_the_error() {
+        let error = ProjectConfig::from_text("[env]\nA = { secret = 98765432 }\n").unwrap_err();
+
+        assert!(!error.to_string().contains("98765432"));
+    }
+
+    #[test]
+    fn should_refuse_a_committed_extra_port_that_does_not_end_in_port() {
+        let error = ProjectConfig::from_text("[ports]\nextra = [\"KUBECONFIG\"]\n").unwrap_err();
+
+        assert!(
+            matches!(error, ConfigError::InvalidPortName { ref name, .. } if name == "KUBECONFIG")
+        );
+    }
+
+    #[test]
+    fn should_accept_a_committed_extra_port_that_ends_in_port_in_any_case() {
+        assert!(
+            ProjectConfig::from_text("[ports]\nextra = [\"front_port\", \"FRONT_PORT\"]\n").is_ok()
+        );
+    }
+
+    #[test]
+    fn should_accept_a_local_extra_port_that_does_not_end_in_port() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            LOCAL_CONFIG_FILE,
+            "[ports]\nextra = [\"KUBECONFIG\"]\n",
+        );
+
+        assert!(ProjectConfig::load(root.path()).is_ok());
+    }
+
+    #[test]
+    fn should_still_refuse_a_reserved_local_extra_port() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            LOCAL_CONFIG_FILE,
+            "[ports]\nextra = [\"GIT_PORT\"]\n",
+        );
+
+        assert!(ProjectConfig::load(root.path()).is_err());
+    }
+
+    #[test]
+    fn should_detect_the_port_suffix_in_any_case() {
+        assert!(has_port_suffix("PORT") && has_port_suffix("db_port"));
+        assert!(!has_port_suffix("PSQLRC") && !has_port_suffix("PO"));
     }
 }

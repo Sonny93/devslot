@@ -6,7 +6,10 @@ use std::path::PathBuf;
 
 use super::model::{ComposeConfig, PortMapping};
 use super::sentinels::{SentinelPlan, plan_for};
-use crate::docker::{ComposeCli, DockerError};
+use crate::docker::{ComposeCli, DockerError, PROBE_PROJECT};
+use crate::environment::{INSTANCE_VARIABLE, PROJECT_NAME_VARIABLE};
+use crate::project_config::EnvSetting;
+use crate::references::substitute_references;
 
 /// The merged configuration of a probe and what is needed to interpret it.
 #[derive(Debug)]
@@ -39,15 +42,20 @@ impl ProbedCompose {
 }
 
 /// Runs the two probes on `files`. `from_env_files` gives a variable's value
-/// in `.env` (devslot block stripped), else `.env.example`.
+/// in `.env` (devslot block stripped), else `.env.example`. `configured` are
+/// the `[env]` values `ds run` will inject: the configuration probe sees them
+/// too, under the sentinels.
 pub fn probe(
     cli: &dyn ComposeCli,
     files: &[PathBuf],
     from_env_files: &dyn Fn(&str) -> Option<String>,
+    configured: &[EnvSetting],
 ) -> Result<ProbedCompose, DockerError> {
     let defaults = cli.variables(files)?;
     let plan = plan_for(&defaults, from_env_files);
-    let text = cli.config_json(files, &plan.environment())?;
+    let mut environment = configured_environment(configured, &plan, &defaults);
+    environment.extend(plan.environment());
+    let text = cli.config_json(files, &environment)?;
     let config = ComposeConfig::from_json(&text)
         .map_err(|_| DockerError::UnexpectedOutput { stage: "config" })?;
     Ok(ProbedCompose {
@@ -55,6 +63,32 @@ pub fn probe(
         plan,
         defaults,
     })
+}
+
+/// The `[env]` values as the probe sees them: each `${NAME}` becomes the
+/// sentinel of NAME, else its compose default, else nothing. The compose
+/// project and the instance name stand for the probe project.
+fn configured_environment(
+    configured: &[EnvSetting],
+    plan: &SentinelPlan,
+    defaults: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let sentinels = plan.environment();
+    let resolve = |name: &str| {
+        let value = sentinels.get(name).cloned().or_else(|| {
+            [PROJECT_NAME_VARIABLE, INSTANCE_VARIABLE]
+                .contains(&name)
+                .then(|| PROBE_PROJECT.to_owned())
+        });
+        Some(value.unwrap_or_else(|| defaults.get(name).cloned().unwrap_or_default()))
+    };
+    configured
+        .iter()
+        .map(|setting| {
+            let value = substitute_references(&setting.value, &resolve).unwrap_or_default();
+            (setting.key.clone(), value)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -129,9 +163,12 @@ mod tests {
     fn should_hand_the_sentinels_to_compose_when_probing() {
         let cli = FakeComposeCli::new(&[("DB_PORT", ""), ("DB_USER", "")], POSTGRES_CONFIG);
 
-        probe(&cli, &[PathBuf::from("dev.compose.yml")], &|name| {
-            (name == "DB_USER").then(|| "root".to_owned())
-        })
+        probe(
+            &cli,
+            &[PathBuf::from("dev.compose.yml")],
+            &|name| (name == "DB_USER").then(|| "root".to_owned()),
+            &[],
+        )
         .unwrap();
 
         assert_eq!(
@@ -144,7 +181,7 @@ mod tests {
     fn should_map_a_published_sentinel_to_its_variable_when_the_port_carries_one() {
         let cli = FakeComposeCli::new(&[("DB_PORT", "")], POSTGRES_CONFIG);
 
-        let probed = probe(&cli, &[], &no_env_files).unwrap();
+        let probed = probe(&cli, &[], &no_env_files, &[]).unwrap();
 
         let port = &probed.config.services["postgres"].ports[0];
         assert_eq!(probed.variable_published_by(port), Some("DB_PORT"));
@@ -155,7 +192,7 @@ mod tests {
         let config = r#"{"services":{"postgres":{"ports":[{"target":5432,"published":"5432"}]}}}"#;
         let cli = FakeComposeCli::new(&[("DB_PORT", "")], config);
 
-        let probed = probe(&cli, &[], &no_env_files).unwrap();
+        let probed = probe(&cli, &[], &no_env_files, &[]).unwrap();
 
         let port = &probed.config.services["postgres"].ports[0];
         assert_eq!(probed.variable_published_by(port), None);
@@ -166,7 +203,7 @@ mod tests {
         let config = r#"{"services":{"web":{"ports":[{"target":61000,"published":"8080"}]}}}"#;
         let cli = FakeComposeCli::new(&[("INNER_PORT", "3000")], config);
 
-        let probed = probe(&cli, &[], &no_env_files).unwrap();
+        let probed = probe(&cli, &[], &no_env_files, &[]).unwrap();
 
         let port = &probed.config.services["web"].ports[0];
         assert_eq!(probed.container_port(port), Some(3000));
@@ -176,7 +213,7 @@ mod tests {
     fn should_return_the_target_unchanged_when_it_is_not_a_sentinel() {
         let cli = FakeComposeCli::new(&[("DB_PORT", "")], POSTGRES_CONFIG);
 
-        let probed = probe(&cli, &[], &no_env_files).unwrap();
+        let probed = probe(&cli, &[], &no_env_files, &[]).unwrap();
 
         let port = &probed.config.services["postgres"].ports[0];
         assert_eq!(probed.container_port(port), Some(5432));
@@ -186,7 +223,7 @@ mod tests {
     fn should_report_a_rejection_when_compose_refuses_the_files() {
         let cli = FakeComposeCli::rejecting();
 
-        let error = probe(&cli, &[], &no_env_files).unwrap_err();
+        let error = probe(&cli, &[], &no_env_files, &[]).unwrap_err();
 
         assert!(error.is_rejection());
     }
@@ -195,8 +232,71 @@ mod tests {
     fn should_report_unexpected_output_when_the_config_is_not_json() {
         let cli = FakeComposeCli::new(&[], "not json");
 
-        let error = probe(&cli, &[], &no_env_files).unwrap_err();
+        let error = probe(&cli, &[], &no_env_files, &[]).unwrap_err();
 
         assert!(matches!(error, DockerError::UnexpectedOutput { .. }));
+    }
+
+    fn setting(key: &str, value: &str) -> EnvSetting {
+        EnvSetting {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            file: "devslot.toml",
+        }
+    }
+
+    #[test]
+    fn should_hand_the_env_values_to_the_configuration_probe() {
+        let cli = FakeComposeCli::new(&[("DB_PORT", "")], POSTGRES_CONFIG);
+
+        probe(
+            &cli,
+            &[],
+            &no_env_files,
+            &[setting("DB_VOLUME", "other_pgdata")],
+        )
+        .unwrap();
+
+        assert_eq!(
+            cli.received_sentinels
+                .borrow()
+                .get("DB_VOLUME")
+                .map(String::as_str),
+            Some("other_pgdata")
+        );
+    }
+
+    #[test]
+    fn should_let_a_sentinel_win_over_an_env_key_of_the_same_name() {
+        let cli = FakeComposeCli::new(&[("DB_PORT", "")], POSTGRES_CONFIG);
+
+        probe(&cli, &[], &no_env_files, &[setting("DB_PORT", "5432")]).unwrap();
+
+        assert_eq!(
+            cli.received_sentinels
+                .borrow()
+                .get("DB_PORT")
+                .map(String::as_str),
+            Some("61000")
+        );
+    }
+
+    #[test]
+    fn should_replace_a_reference_with_the_sentinel_then_the_default_then_nothing() {
+        let cli = FakeComposeCli::new(&[("DB_PORT", ""), ("HOST", "db")], POSTGRES_CONFIG);
+        let configured = [setting(
+            "URL",
+            "${DB_PORT}/${HOST}/${UNKNOWN}/${COMPOSE_PROJECT_NAME}",
+        )];
+
+        probe(&cli, &[], &no_env_files, &configured).unwrap();
+
+        assert_eq!(
+            cli.received_sentinels
+                .borrow()
+                .get("URL")
+                .map(String::as_str),
+            Some("61000/db//devslot-probe")
+        );
     }
 }

@@ -80,11 +80,21 @@ impl Style {
     /// The style for this process: reads the environment and asks whether
     /// stdout is a terminal.
     pub fn for_process(color_choice: ColorChoice) -> Self {
+        Self::for_stream(color_choice, std::io::stdout().is_terminal())
+    }
+
+    /// The style for messages on stderr: like [`Style::for_process`], but asks
+    /// whether stderr is a terminal.
+    pub fn for_stderr(color_choice: ColorChoice) -> Self {
+        Self::for_stream(color_choice, std::io::stderr().is_terminal())
+    }
+
+    fn for_stream(color_choice: ColorChoice, is_terminal: bool) -> Self {
         let no_color = std::env::var(NO_COLOR_VARIABLE).ok();
         let term = std::env::var(TERM_VARIABLE).ok();
         Self::detect(&StyleEnvironment {
             color_choice,
-            stdout_is_terminal: std::io::stdout().is_terminal(),
+            stdout_is_terminal: is_terminal,
             no_color: no_color.as_deref(),
             term: term.as_deref(),
         })

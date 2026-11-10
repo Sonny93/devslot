@@ -2,7 +2,7 @@
 
 Run several instances of the same dev stack on one machine: each checkout or worktree gets its own block of ports and its own compose project.
 
-**Status:** in development, nothing is released. Only `ds doctor` exists so far.
+**Status:** in development, nothing is released. `ds doctor`, `ds run`, `ds env` and `ds info` exist so far; `ds run` does not write the `.env` block yet.
 
 ## Why
 

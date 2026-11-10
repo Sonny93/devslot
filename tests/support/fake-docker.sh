@@ -4,6 +4,9 @@
 # from fixture files keyed by the first `-f` file name:
 #   $DOCKER_FAKE_FIXTURES/<file>.variables.json and <file>.config.json
 # The placeholder __ROOT__ in the config fixture becomes the current directory.
+# When $DB_VOLUME is set and $DOCKER_FAKE_FIXTURES/<file>.config.$DB_VOLUME.json
+# exists, that config is answered instead: it lets a test make the answer depend
+# on a variable the probe environment carries.
 # Files named in $DOCKER_FAKE_FAIL (space separated) are rejected, with
 # $DOCKER_FAKE_STDERR (when set) on stderr.
 
@@ -31,7 +34,14 @@ done
 
 case "$mode" in
   variables) cat "$fixtures/$first_file.variables.json" ;;
-  config) sed "s|__ROOT__|$(pwd -P)|g" "$fixtures/$first_file.config.json" ;;
+  config)
+    config_file="$fixtures/$first_file.config.json"
+    variant="$fixtures/$first_file.config.${DB_VOLUME:-}.json"
+    if [ -n "${DB_VOLUME:-}" ] && [ -f "$variant" ]; then
+      config_file="$variant"
+    fi
+    sed "s|__ROOT__|$(pwd -P)|g" "$config_file"
+    ;;
   *)
     echo "fake docker: unsupported call" >&2
     exit 64

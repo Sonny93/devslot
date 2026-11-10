@@ -5,7 +5,7 @@ use std::fmt::Write;
 use super::style::{Style, Tone};
 use crate::checks::finding::{Finding, Level};
 use crate::discovery::ManagedPort;
-use crate::report::DoctorReport;
+use crate::report::{DoctorReport, InfoReport, RegisteredInfo};
 
 const LEVEL_WORD_WIDTH: usize = 7;
 const NO_VALUE: &str = "-";
@@ -51,9 +51,11 @@ fn render_ports(ports: &[ManagedPort]) -> String {
         return "  none found\n".to_owned();
     }
     let header = ["VARIABLE", "SOURCE", "DEFAULT", "SERVICE"].map(str::to_owned);
-    let rows: Vec<[String; 4]> = std::iter::once(header)
-        .chain(ports.iter().map(port_row))
-        .collect();
+    render_table(header, ports.iter().map(port_row).collect())
+}
+
+fn render_table(header: [String; 4], body: Vec<[String; 4]>) -> String {
+    let rows: Vec<[String; 4]> = std::iter::once(header).chain(body).collect();
     let widths: [usize; 4] =
         std::array::from_fn(|column| rows.iter().map(|row| row[column].len()).max().unwrap_or(0));
     let mut output = String::new();
@@ -68,7 +70,8 @@ fn render_ports(ports: &[ManagedPort]) -> String {
     output
 }
 
-fn render_findings(findings: &[Finding], style: Style) -> String {
+/// The findings as indented lines, one each; "none" when there is no finding.
+pub fn render_findings(findings: &[Finding], style: Style) -> String {
     if findings.is_empty() {
         return "  none\n".to_owned();
     }
@@ -92,6 +95,62 @@ fn render_finding(finding: &Finding, style: Style) -> String {
         (None, _) => String::new(),
     };
     format!("{} {location}{}", style.paint(tone, &word), finding.message)
+}
+
+/// Renders the answer of `ds info` as text.
+pub fn render_info_text(report: &InfoReport) -> String {
+    match report {
+        InfoReport::Registered(info) => render_registered_info(info),
+        InfoReport::Unregistered(info) => format!(
+            "Path:          {}\nThis checkout is not registered. Run ds up to register it.\n",
+            info.path
+        ),
+    }
+}
+
+fn render_registered_info(info: &RegisteredInfo) -> String {
+    let compose = match (&info.compose_file, &info.compose_file_origin) {
+        (Some(file), Some(origin)) => format!("{file} ({origin})"),
+        (Some(file), None) => file.clone(),
+        (None, _) => "none".to_owned(),
+    };
+    let mut output = String::new();
+    let _ = writeln!(output, "Name:          {}", info.name);
+    let _ = writeln!(output, "Path:          {}", info.path);
+    let _ = writeln!(
+        output,
+        "Slot:          {} ({}-{})",
+        info.slot, info.range[0], info.range[1]
+    );
+    let _ = writeln!(output, "Compose file:  {compose}");
+    output.push_str("\nPorts\n");
+    output.push_str(&render_info_ports(info));
+    output
+}
+
+fn render_info_ports(info: &RegisteredInfo) -> String {
+    if info.ports.is_empty() {
+        return "  none\n".to_owned();
+    }
+    let header = ["VARIABLE", "PORT", "KIND", "SERVICE"].map(str::to_owned);
+    let rows = info
+        .ports
+        .iter()
+        .map(|port| {
+            let target = match (&port.service, port.target) {
+                (Some(service), Some(target)) => format!("{service}:{target}"),
+                (Some(service), None) => service.clone(),
+                (None, _) => NO_VALUE.to_owned(),
+            };
+            [
+                port.variable.clone(),
+                port.port.to_string(),
+                port.kind.word().to_owned(),
+                target,
+            ]
+        })
+        .collect();
+    render_table(header, rows)
 }
 
 #[cfg(test)]
@@ -168,6 +227,80 @@ mod tests {
         assert!(text.contains("Compose file:  none\n"));
         assert!(text.contains("Ports\n  none found\n"));
         assert!(text.ends_with("Problems\n  none\n\n0 errors, 0 warnings\n"));
+    }
+
+    fn registered_info() -> RegisteredInfo {
+        RegisteredInfo {
+            version: 1,
+            registered: true,
+            name: "app-3f2a".to_owned(),
+            path: "/work/app".to_owned(),
+            slot: 1,
+            range: [20050, 20099],
+            compose_file: Some("dev.compose.yml".to_owned()),
+            compose_file_origin: Some("detected".to_owned()),
+            ports: vec![
+                crate::report::InfoPort {
+                    variable: "PORT".to_owned(),
+                    port: 20050,
+                    kind: PortKind::Web,
+                    service: None,
+                    target: None,
+                },
+                crate::report::InfoPort {
+                    variable: "DB_PORT".to_owned(),
+                    port: 20052,
+                    kind: PortKind::Service,
+                    service: Some("postgres".to_owned()),
+                    target: Some(5432),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn should_render_the_registered_info_when_the_instance_has_ports() {
+        let text = render_info_text(&InfoReport::Registered(registered_info()));
+
+        assert_eq!(
+            text,
+            "Name:          app-3f2a\n\
+             Path:          /work/app\n\
+             Slot:          1 (20050-20099)\n\
+             Compose file:  dev.compose.yml (detected)\n\
+             \n\
+             Ports\n\
+             \x20 VARIABLE  PORT   KIND     SERVICE\n\
+             \x20 PORT      20050  web      -\n\
+             \x20 DB_PORT   20052  service  postgres:5432\n"
+        );
+    }
+
+    #[test]
+    fn should_say_none_when_the_instance_has_no_compose_file_and_no_port() {
+        let mut info = registered_info();
+        info.compose_file = None;
+        info.compose_file_origin = None;
+        info.ports.clear();
+
+        let text = render_info_text(&InfoReport::Registered(info));
+
+        assert!(text.contains("Compose file:  none\n"));
+        assert!(text.ends_with("Ports\n  none\n"));
+    }
+
+    #[test]
+    fn should_suggest_ds_up_when_the_checkout_is_not_registered() {
+        let text = render_info_text(&InfoReport::Unregistered(crate::report::UnregisteredInfo {
+            version: 1,
+            registered: false,
+            path: "/work/app".to_owned(),
+        }));
+
+        assert_eq!(
+            text,
+            "Path:          /work/app\nThis checkout is not registered. Run ds up to register it.\n"
+        );
     }
 
     #[test]

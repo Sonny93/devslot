@@ -1,130 +1,106 @@
 //! `ds doctor`: checkout, config, discovery and checks, without writing anything.
 
-use std::path::{Path, PathBuf};
-
+use crate::analysis::{CheckoutAnalysis, DOTENV_FILE, ProbeScope, selection_findings};
 use crate::checkout::Checkout;
-use crate::checks::compose::{ComposeCheckContext, check_compose};
 use crate::checks::env::{EnvCheckInput, check_env};
-use crate::checks::finding::{Check, Finding, Level, Summary};
+use crate::checks::env_config::check_forced_port_conflicts;
+use crate::checks::finding::{Finding, Summary};
+use crate::checks::slot::{SlotCheckInput, check_slot_geometry};
 use crate::checks::vite::check_vite;
-use crate::compose::probe::{ProbedCompose, probe};
-use crate::compose::selection::{
-    DevComposeSelection, default_named_compose, existing_overrides, scan_set, select_dev_compose,
-};
-use crate::discovery::{DiscoveryInput, ManagedPort, discover_ports};
-use crate::docker::{ComposeCli, DockerError};
+use crate::cli::exit_code;
+use crate::cli::output::write_stdout;
+use crate::cli::render::render_text;
+use crate::cli::style::{ColorChoice, Style};
+use crate::commands::machine::{Machine, locate_checkout};
+use crate::docker::{ComposeCli, DockerCompose};
 use crate::error::ToolError;
-use crate::project::dotenv::{EnvFile, EnvRead, lookup_value, read_env_file};
-use crate::project::vite::detect_vite;
-use crate::project_config::ProjectConfig;
+use crate::global_config::GlobalConfig;
+use crate::registry::record::Registry;
 use crate::report::{DoctorReport, REPORT_VERSION};
 
-const DOTENV_FILE: &str = ".env";
-const DOTENV_EXAMPLE_FILE: &str = ".env.example";
-const DOTENV_TEST_FILE: &str = ".env.test";
-
-enum ProbeOutcome {
-    Read(ProbedCompose),
-    Rejected,
-}
-
-struct ProbedFile {
-    name: String,
-    outcome: ProbeOutcome,
-}
-
-struct EnvFiles {
-    env: EnvRead,
-    example: EnvRead,
-    test: EnvRead,
-}
-
-impl EnvFiles {
-    fn read(root: &Path) -> Result<Self, ToolError> {
-        Ok(Self {
-            env: read_named(root, DOTENV_FILE)?,
-            example: read_named(root, DOTENV_EXAMPLE_FILE)?,
-            test: read_named(root, DOTENV_TEST_FILE)?,
-        })
-    }
-
-    fn env_file(&self) -> Option<&EnvFile> {
-        parsed(&self.env)
-    }
-
-    fn example_file(&self) -> Option<&EnvFile> {
-        parsed(&self.example)
-    }
-}
-
-fn parsed(read: &EnvRead) -> Option<&EnvFile> {
-    match read {
-        EnvRead::Parsed(file) => Some(file),
-        EnvRead::Missing | EnvRead::Invalid(_) => None,
-    }
-}
-
-fn read_named(root: &Path, name: &str) -> Result<EnvRead, ToolError> {
-    read_env_file(&root.join(name)).map_err(|source| ToolError::ReadFile {
-        file: name.to_owned(),
-        source,
+/// Runs `ds doctor` on the current folder and prints the report.
+pub fn run_doctor_command(color: ColorChoice, as_json: bool) -> Result<u8, ToolError> {
+    let checkout = locate_checkout()?;
+    let machine = Machine::from_process()?;
+    let geometry = GlobalConfig::load(&machine.paths.config_file)?.slots;
+    let registry = machine.store.read()?;
+    let slot_check = registry
+        .find(&checkout.root)
+        .map(|instance| SlotCheckInput { instance, geometry });
+    let compose = DockerCompose::from_environment(&checkout.root);
+    let report = run_doctor(&checkout, &compose, slot_check, Some(&registry))?;
+    let text = if as_json {
+        let mut json = serde_json::to_string_pretty(&report)
+            .map_err(|error| ToolError::WriteReport(std::io::Error::other(error)))?;
+        json.push('\n');
+        json
+    } else {
+        render_text(&report, Style::for_process(color))
+    };
+    write_stdout(&text)?;
+    Ok(if report.has_errors() {
+        exit_code::ERROR
+    } else {
+        exit_code::SUCCESS
     })
 }
 
-/// Reviews `checkout`.
+/// Reviews `checkout`. `slot_check` is given when the checkout is registered.
 pub fn run_doctor(
     checkout: &Checkout,
     compose: &dyn ComposeCli,
+    slot_check: Option<SlotCheckInput<'_>>,
+    registry: Option<&Registry>,
 ) -> Result<DoctorReport, ToolError> {
-    let config = ProjectConfig::load(&checkout.root)?;
-    let env_files = EnvFiles::read(&checkout.root)?;
-    let vite = detect_vite(&checkout.root);
-    let selection = select_dev_compose(&checkout.root, config.compose_file.as_deref());
-    let dev_file = match &selection {
-        DevComposeSelection::Selected(file) => Some(file.as_str()),
-        DevComposeSelection::ConfiguredMissing(_) | DevComposeSelection::NoneFound => None,
-    };
-    let probed_files = probe_scanned_files(&checkout.root, dev_file, &env_files, compose)?;
-    let dev_probe = dev_file.and_then(|file| read_probe(&probed_files, file));
-    let ports = discover_ports(&DiscoveryInput {
-        env: env_files.env_file(),
-        example: env_files.example_file(),
-        config: &config,
-        vite: &vite,
-        dev_compose: dev_file.zip(dev_probe),
-    });
-
+    let analysis = CheckoutAnalysis::analyze(checkout, compose, ProbeScope::AllScannedFiles)?;
     let mut findings = Vec::new();
-    findings.extend(selection_findings(&selection));
-    findings.extend(compose_findings(
-        &checkout.root,
-        dev_file,
-        &probed_files,
-        &ports,
-    ));
-    findings.extend(check_env(&EnvCheckInput {
-        env: &env_files.env,
-        example: &env_files.example,
-        test: &env_files.test,
-        main_checkout_has_env: main_checkout_has_env(checkout),
-        is_env_ignored: if checkout.is_git {
-            Some(checkout.is_env_ignored()?)
-        } else {
-            None
-        },
-        managed: &ports,
-        env_config_keys: &config.env_keys,
-    }));
-    findings.extend(check_vite(&checkout.root, &vite));
-
+    findings.extend(selection_findings(&analysis.selection));
+    for file in &analysis.probed_files {
+        findings.extend(analysis.compose_file_findings(&checkout.root, file));
+    }
+    findings.extend(env_findings(checkout, &analysis)?);
+    findings.extend(analysis.config_findings());
+    findings.extend(forced_port_findings(checkout, &analysis, registry));
+    findings.extend(check_vite(&checkout.root, &analysis.vite));
+    findings.extend(slot_check.and_then(check_slot_geometry));
     Ok(DoctorReport {
         version: REPORT_VERSION,
         checkout: checkout.root.display().to_string(),
-        compose_file: dev_file.map(str::to_owned),
+        compose_file: analysis.dev_file().map(str::to_owned),
         summary: Summary::of(&findings),
-        ports,
+        ports: analysis.ports,
         findings,
     })
+}
+
+fn forced_port_findings(
+    checkout: &Checkout,
+    analysis: &CheckoutAnalysis,
+    registry: Option<&Registry>,
+) -> Vec<Finding> {
+    registry.map_or_else(Vec::new, |registry| {
+        check_forced_port_conflicts(&analysis.config, &analysis.ports, registry, &checkout.root)
+    })
+}
+
+fn env_findings(
+    checkout: &Checkout,
+    analysis: &CheckoutAnalysis,
+) -> Result<Vec<Finding>, ToolError> {
+    let is_env_ignored = if checkout.is_git {
+        Some(checkout.is_env_ignored()?)
+    } else {
+        None
+    };
+    Ok(check_env(&EnvCheckInput {
+        env: &analysis.env_files.env,
+        example: &analysis.env_files.example,
+        test: &analysis.env_files.test,
+        main_checkout_has_env: main_checkout_has_env(checkout),
+        is_env_ignored,
+        managed: &analysis.ports,
+        env_config_keys: &analysis.config.env_keys(),
+    }))
 }
 
 fn main_checkout_has_env(checkout: &Checkout) -> bool {
@@ -134,143 +110,20 @@ fn main_checkout_has_env(checkout: &Checkout) -> bool {
         .is_some_and(|main| main.join(DOTENV_FILE).is_file())
 }
 
-fn read_probe<'a>(files: &'a [ProbedFile], name: &str) -> Option<&'a ProbedCompose> {
-    files
-        .iter()
-        .find(|file| file.name == name)
-        .and_then(|file| match &file.outcome {
-            ProbeOutcome::Read(probed) => Some(probed),
-            ProbeOutcome::Rejected => None,
-        })
-}
-
-fn selection_findings(selection: &DevComposeSelection) -> Option<Finding> {
-    match selection {
-        DevComposeSelection::Selected(_) => None,
-        DevComposeSelection::ConfiguredMissing(file) => Some(
-            Finding::new(
-                Level::Error,
-                Check::ComposeFileMissing,
-                "the compose file named by [compose] file does not exist",
-            )
-            .in_file(file),
-        ),
-        DevComposeSelection::NoneFound => Some(Finding::new(
-            Level::Info,
-            Check::ComposeMissing,
-            "no compose file found at the checkout root: the compose checks are skipped",
-        )),
-    }
-}
-
-fn files_to_probe(
-    root: &Path,
-    file: &str,
-    dev_file: Option<&str>,
-    overrides: &[String],
-) -> Vec<PathBuf> {
-    let merges_overrides =
-        dev_file == Some(file) || default_named_compose(root).as_deref() == Some(file);
-    let merged = if merges_overrides { overrides } else { &[] };
-    std::iter::once(file)
-        .chain(merged.iter().map(String::as_str))
-        .map(PathBuf::from)
-        .collect()
-}
-
-fn files_to_scan(root: &Path, dev_file: Option<&str>) -> Vec<String> {
-    let mut files = scan_set(root);
-    if let Some(dev) = dev_file.filter(|dev| !files.iter().any(|file| file == dev)) {
-        files.insert(0, dev.to_owned());
-    }
-    files
-}
-
-fn probe_scanned_files(
-    root: &Path,
-    dev_file: Option<&str>,
-    env_files: &EnvFiles,
-    compose: &dyn ComposeCli,
-) -> Result<Vec<ProbedFile>, ToolError> {
-    let overrides = existing_overrides(root);
-    let from_env_files = |name: &str| {
-        lookup_value(env_files.env_file(), env_files.example_file(), name).map(str::to_owned)
-    };
-    let mut probed_files = Vec::new();
-    for name in files_to_scan(root, dev_file) {
-        let files = files_to_probe(root, &name, dev_file, &overrides);
-        let outcome = match probe(compose, &files, &from_env_files) {
-            Ok(probed) => ProbeOutcome::Read(probed),
-            Err(DockerError::Rejected) => ProbeOutcome::Rejected,
-            Err(error) => return Err(error.into()),
-        };
-        probed_files.push(ProbedFile { name, outcome });
-    }
-    Ok(probed_files)
-}
-
-fn compose_findings(
-    root: &Path,
-    dev_file: Option<&str>,
-    probed_files: &[ProbedFile],
-    ports: &[ManagedPort],
-) -> Vec<Finding> {
-    let managed_variables: Vec<String> = ports.iter().map(|port| port.variable.clone()).collect();
-    let context = ComposeCheckContext {
-        root,
-        managed_variables: &managed_variables,
-    };
-    let mut findings = Vec::new();
-    for file in probed_files {
-        match &file.outcome {
-            ProbeOutcome::Read(probed) => {
-                findings.extend(check_compose(&file.name, probed, &context));
-            }
-            ProbeOutcome::Rejected => {
-                findings.push(rejection_finding(&file.name, dev_file));
-            }
-        }
-    }
-    findings
-}
-
-/// Wraps `text` in single quotes so a shell reads it as one literal word.
-fn shell_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-
-fn rejection_finding(file: &str, dev_file: Option<&str>) -> Finding {
-    let hint = format!(
-        "run docker compose -f {} config --quiet to see why",
-        shell_quote(file)
-    );
-    if dev_file == Some(file) {
-        return Finding::new(
-            Level::Error,
-            Check::ComposeUnreadable,
-            format!("docker compose cannot read the dev compose file; {hint}"),
-        )
-        .in_file(file);
-    }
-    Finding::new(
-        Level::Warning,
-        Check::ComposeSkipped,
-        format!("skipped, docker compose cannot read it on its own; {hint}"),
-    )
-    .in_file(file)
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
 
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use crate::checks::finding::{Check, Level};
+    use crate::docker::DockerError;
 
     fn run_in(root: &Path, compose: &dyn ComposeCli) -> Result<DoctorReport, ToolError> {
-        run_doctor(&Checkout::locate(root)?, compose)
+        run_doctor(&Checkout::locate(root)?, compose, None, None)
     }
 
     struct ScriptedCompose {
@@ -496,32 +349,62 @@ mod tests {
     }
 
     #[test]
-    fn should_wrap_a_plain_name_in_single_quotes() {
-        assert_eq!(shell_quote("dev.compose.yml"), "'dev.compose.yml'");
+    fn should_report_the_geometry_warning_when_the_registered_range_differs_from_its_slot() {
+        let root = project(&[(".env", "A=1\n")]);
+        let checkout = Checkout::locate(root.path()).unwrap();
+        let instance = crate::registry::record::InstanceRecord {
+            path: checkout.root.clone(),
+            name: "x".to_owned(),
+            slot: 1,
+            range: crate::port_range::PortRange {
+                first: 30000,
+                last: 30049,
+            },
+            ports: vec![],
+        };
+        let slot_check = SlotCheckInput {
+            instance: &instance,
+            geometry: crate::global_config::SlotGeometry::default(),
+        };
+
+        let report = run_doctor(
+            &checkout,
+            &ScriptedCompose::answering("{}"),
+            Some(slot_check),
+            None,
+        )
+        .unwrap();
+
+        assert!(checks_of(&report).contains(&Check::SlotGeometryChanged));
     }
 
     #[test]
-    fn should_keep_a_space_inside_the_quotes() {
-        assert_eq!(shell_quote("my file.yml"), "'my file.yml'");
-    }
+    fn should_report_an_error_when_the_committed_config_forces_a_managed_port() {
+        let root = project(&[
+            (".env", "PORT=3333\n"),
+            ("devslot.toml", "[env]\nPORT = \"3333\"\n"),
+        ]);
 
-    #[test]
-    fn should_leave_a_command_substitution_inert() {
+        let report = run_in(root.path(), &ScriptedCompose::answering("{}")).unwrap();
+
         assert_eq!(
-            shell_quote("x$(id>pwned).compose.yml"),
-            "'x$(id>pwned).compose.yml'"
+            (
+                checks_of(&report).contains(&Check::EnvForcesPort),
+                report.summary.errors
+            ),
+            (true, 1)
         );
     }
 
     #[test]
-    fn should_escape_a_single_quote_inside_the_name() {
-        assert_eq!(shell_quote("it's.yml"), "'it'\\''s.yml'");
-    }
+    fn should_not_report_the_forced_port_when_it_comes_from_the_local_config() {
+        let root = project(&[
+            (".env", "PORT=3333\n"),
+            ("devslot.local.toml", "[env]\nPORT = \"3333\"\n"),
+        ]);
 
-    #[test]
-    fn should_quote_the_file_name_in_the_hint_of_a_rejection() {
-        let finding = rejection_finding("a$(id).yml", None);
+        let report = run_in(root.path(), &ScriptedCompose::answering("{}")).unwrap();
 
-        assert!(finding.message.contains("-f 'a$(id).yml' config --quiet"));
+        assert!(!checks_of(&report).contains(&Check::EnvForcesPort));
     }
 }
