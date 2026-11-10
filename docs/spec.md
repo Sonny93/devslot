@@ -68,14 +68,14 @@ All commands act on the instance of the current folder, except `ls` and `prune`,
 | --- | --- |
 | `ds up` | Registers the checkout if needed, creates `.env` if it is missing, writes the `.env` block and starts the compose services. If `devslot.toml` has a `run` key, then runs that command in the foreground. Ctrl+C stops the app; the services keep running. |
 | `ds run -- <cmd>` | Registers the checkout if needed, creates `.env` if it is missing, writes the block and runs any command with the instance environment, without starting the compose. E.g. `ds run -- just dev`, `ds run -- node ace migration:run`. |
-| `ds ensure` | Makes sure the checkout is registered, idempotent and never starting services. Registered checkout: reads the registry only, with no Docker call, so it is fast. Unregistered checkout with a dev compose: registers it, allocates its slot, creates `.env` if it is missing and writes the block. Repo without a compose file: exits immediately, no-op. Meant for the plugin hook. |
+| `ds ensure` | Makes sure the checkout is registered, idempotent and never starting services. Registered checkout: reads the registry only, with no Docker call, so it is fast. Unregistered checkout with a dev compose: registers it, allocates its slot, creates `.env` if it is missing and writes the block. Repo without a compose file, checkout outside the `[auto]` scope, or checkout opted out by `ds rm`: exits immediately, no-op. Meant for the plugin hook. |
 | `ds doctor` | Reviews the project without starting or writing anything, and lists the errors and warnings described in Checks. Also works on an unregistered checkout. `--json` for agents. |
 | `ds env` | Prints the instance environment. `--format sh` (for `eval`) or `json`. |
 | `ds info` | Name, path, ports and state of the current instance. `--json` for agents. On an unregistered checkout, says so and suggests `ds up`. |
 | `ds ls` | All instances on the machine. `--json` for scripts and Tunneler. |
 | `ds down` | Stops the instance services, without touching the data. |
 | `ds reset [service]` | Resets the instance data: deletes the volumes of its compose services. |
-| `ds rm` | Brings the checkout back to its base configuration: stops the services, deletes its containers and volumes, removes the `.env` block and releases its slot. Asks for confirmation, except with `--yes`. |
+| `ds rm` | Brings the checkout back to its base configuration: stops the services, deletes its containers and volumes, removes the `.env` block and releases its slot. The checkout is then marked as opted out in the registry, so `ds ensure` leaves it alone until an explicit `ds up` or `ds run`. Asks for confirmation, except with `--yes`. |
 | `ds prune` | Removes the instances whose folder no longer exists, and offers to delete their containers and volumes. |
 
 **Launching the app.** `ds up` guesses nothing: it runs the `run` command of `devslot.toml`, for example `node ace serve --hmr`. Without a `run` key, `up` stops after the services; `ds run -- <cmd>` then runs any process, in Node, Python, Go or anything else.
@@ -206,7 +206,7 @@ DB_PORT=20052
 - `ds up`, `ds run` and `ds ensure` refuse to write the block into a `.env` that git does not ignore (`git check-ignore`): it would end up in a commit. `ds doctor` reports it as an error. A warning reports a `.env.test` that redefines a managed variable.
 - If a managed variable already exists higher up in the file (`PORT=3333`), the original line is left untouched. Compose, dotenv and the Adonis `EnvParser` all keep the last value of a duplicated key, so the block at the end wins.
 - A block deleted by hand is rewritten on the next `ds up`, `ds run` or `ds ensure`. The real way out is `ds rm`.
-- `ds rm` removes the block. The checkout then goes back to the default ports and the compose `name:`.
+- `ds rm` removes the block. The checkout then goes back to the default ports and the compose `name:`, and stays there: it is recorded as opted out, so the `ds ensure` hook does not register it again. Only an explicit `ds up` or `ds run` registers it again and clears the mark. `ds prune` forgets opted-out checkouts whose folder no longer exists.
 - Writing can be turned off in the global config or in `[write]` of `devslot.toml`. In that case, only commands launched by `ds run` have the instance values.
 
 **Values that contain a hardcoded port**, like `DATABASE_URL=postgres://u:p@localhost:5432/app`: a warning reports them when a local host is followed by the default port of a managed variable. The `[env]` section of the config lets you rebuild them from the assigned ports; they then also go in the block.
@@ -385,6 +385,7 @@ No open question remains for v1.
 - A missing `.env` is created from the main checkout's `.env` (block stripped), otherwise `.env.example`. Error only when neither exists.
 - `ds up`, `ds run` and `ds ensure` refuse to write into a `.env` that git does not ignore. `ds doctor` reports it as an error.
 - Duplicate keys in `.env`: the block stays at the end, original lines are untouched, and the comment and restore mechanism is removed.
+- `ds rm` marks the checkout as opted out: the `ds ensure` hook skips it, and only an explicit `ds up` or `ds run` registers it again.
 - Prototype checks answered: the sentinel method works, and my-links has `container_name`.
 - Existing tools (worktree-compose, Docktree) evaluated and not adopted. devslot is built. Copying `.env` from the main checkout comes from worktree-compose.
 
