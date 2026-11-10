@@ -128,7 +128,7 @@ The same checks serve `ds up` and `ds doctor`. An error blocks `ds up`; a warnin
 | `.env.test` that redefines a managed variable | warning | Tests would target other ports than the app. |
 | Value that contains a local host (`localhost`, `127.0.0.1`, `0.0.0.0`, `[::1]`) followed by the default port of a managed variable (`DATABASE_URL=postgres://u:p@localhost:5432/app`) | warning | It does not follow the assigned port, unless `[env]` rebuilds it. Hosts that are not local are ignored, so an external SMTP or database server is not reported. |
 
-**Rule for `env_file`**: the block values are host-side ports. A container that loads `.env` must therefore pin its internal ports in `environment:`, which takes precedence over `env_file`. This is the case for the `app` service of your template's `compose.yml`: without these two lines, a `just prod` run in a checkout that uses `ds` gives the app `PORT=20050` and `DB_PORT=20052`, and it becomes unreachable. The rule is necessary for `just prod` to work, not sufficient: see the limitation below.
+**Rule for `env_file`**: the block values are host-side ports. A container that loads `.env` must therefore pin its internal ports in `environment:`, which takes precedence over `env_file`. This is the case for the `app` service of your template's `compose.yml`: without the `DB_PORT` and `PORT` lines, a `just prod` run in a checkout that uses `ds` gives the app `PORT=20050` and `DB_PORT=20052`, and it becomes unreachable. The rule is necessary for `just prod` to work, not sufficient: see the limitation below.
 
 ```yaml
   app:
@@ -264,7 +264,7 @@ enabled = true             # false: nothing is written to .env
 
 [auto]
 include = []                    # path globs; empty means everywhere
-exclude = ["~/dev/scratch/**"]  # wins over include
+exclude = []                    # wins over include, e.g. ["~/clones/**"]
 ```
 
 The `run` key is the only process the file can declare: a single command, in the foreground. `ds info` shows the origin of each value: command line, file or detection.
@@ -405,4 +405,4 @@ No open question remains for v1.
 - No `CLAUDE_ENV_FILE` or `PreToolUse` hook in v1.
 - Removed: `ds nuke`, `ds release`, `ds skill`, the `dotenv` format of `ds env`, the automatic second slot, `ds init` (`docker init` already does that job).
 
-**Revision 2, still valid**: no service sharing in v1; `run` key in `devslot.toml`; sharing in v2 with `DB_PORT` and `COMPOSE_FILE` always written together; the devslot name; slots of 50 ports; TOML config files.
+**Revision 2, still valid**: no service sharing in v1; `run` key in `devslot.toml`; sharing in v2 with `DB_PORT` and `COMPOSE_FILE` always written together (see the unresolved problem in After v1); the devslot name; slots of 50 ports; TOML config files.
