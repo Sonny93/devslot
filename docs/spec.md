@@ -1,117 +1,117 @@
-# Spec v1 : outil d'isolation des stacks de dev (révision 3)
+# Spec v1: dev stack isolation tool (revision 3)
 
 Nov 9, 2026 · @Sonny
 
-Révision du 9 novembre, après la revue de la [révision 2](https://claude.ai/artifact/7yfSVj6xwfQ4wfj2HuMMCd) : un bloc délimité dans `.env` remplace `.env.local`, `ds` écrase toujours ses propres variables, `ds rm` ramène un checkout à sa configuration de base, et il ne reste plus de question ouverte pour la v1.
+Revision of November 9, after the review of [revision 2](https://claude.ai/artifact/7yfSVj6xwfQ4wfj2HuMMCd): a delimited block in `.env` replaces `.env.local`, `ds` always overwrites its own variables, `ds rm` brings a checkout back to its base configuration, and no open question remains for v1.
 
-## Problème et objectifs
+## Problem and goals
 
-L'outil permet de faire tourner plusieurs instances de la même stack sur une machine (plusieurs projets, ou plusieurs worktrees d'un projet) sans conflit de ports ni de projets compose.
+The tool runs several instances of the same stack on one machine (several projects, or several worktrees of one project) without port or compose project conflicts.
 
-Aujourd'hui, chaque checkout publie les mêmes ports (Adonis 3333, Postgres 5432, HMR Vite 24678) et partage le même nom de projet compose. Deux agents dans deux worktrees se marchent dessus : mêmes conteneurs, même volume, et `migration:fresh` efface la base de l'autre.
+Today, every checkout publishes the same ports (Adonis 3333, Postgres 5432, Vite HMR 24678) and shares the same compose project name. Two agents in two worktrees step on each other: same containers, same volume, and `migration:fresh` wipes the other one's database.
 
-Objectifs de la v1 :
+Goals of v1:
 
-- Chaque checkout reçoit des ports stables, attribués automatiquement, et son propre projet compose.
-- Chaque instance a ses propres services et ses propres données. Rien n'est partagé entre instances en v1.
-- Une fois le checkout inscrit, les services et l'app démarrent avec les bonnes valeurs, qu'on passe par `ds` ou non.
-- `ds rm` ramène le checkout à sa configuration de base : ports par défaut, rien d'écrit par l'outil.
-- Les agents savent utiliser l'outil grâce à un plugin Claude Code livré avec lui.
-- On peut lister toutes les instances de la machine, en texte et en JSON.
+- Each checkout gets stable, automatically assigned ports and its own compose project.
+- Each instance has its own services and its own data. Nothing is shared between instances in v1.
+- Once the checkout is registered, the services and the app start with the right values, whether or not you go through `ds`.
+- `ds rm` brings the checkout back to its base configuration: default ports, nothing written by the tool.
+- Agents know how to use the tool thanks to a Claude Code plugin shipped with it.
+- All instances on the machine can be listed, as text and as JSON.
 
-## Contraintes
+## Constraints
 
-1. **Un repo marche pareil avec ou sans l'outil.** Après un clone, ou après un `ds rm`, `just dev` fonctionne avec les ports par défaut.
-2. **Une seule modification du projet, et elle est recommandée, pas imposée.** Pour qu'un port de service soit géré, le compose doit l'écrire `${VAR:-défaut}`. Un port en dur reste tel quel, avec un avertissement.
-3. **L'app tourne hors Docker**, comme aujourd'hui.
-4. **Une seule écriture dans le projet** : le bloc délimité de `.env`. Chaque écriture est annoncée dans la sortie, avec le chemin du fichier.
-5. **Les intégrations sont optionnelles.** Tunneler, un proxy ou un gestionnaire de process sont proposés, jamais imposés.
+1. **A repo works the same with or without the tool.** After a clone, or after a `ds rm`, `just dev` works with the default ports.
+2. **A single change to the project, and it is recommended, not required.** For a service port to be managed, the compose file must write it as `${VAR:-default}`. A hardcoded port stays as it is, with a warning.
+3. **The app runs outside Docker**, as it does today.
+4. **A single write in the project**: the delimited block of `.env`. Every write is announced in the output, with the file path.
+5. **Integrations are optional.** Tunneler, a proxy or a process manager are offered, never imposed.
 
-Syntaxe conseillée dans les composes de dev : `127.0.0.1:${DB_PORT:-5432}:5432`. Avec la valeur par défaut, le compose marche toujours seul.
+Recommended syntax in dev compose files: `127.0.0.1:${DB_PORT:-5432}:5432`. With the default value, the compose file still works on its own.
 
-**Hors v1** : services partagés entre instances, process en arrière-plan, URLs nommées, intégration Tunneler, ports en dur remappés, Windows et macOS (le code reste portable, mais rien n'est testé dessus).
+**Out of v1**: services shared between instances, background processes, named URLs, Tunneler integration, remapped hardcoded ports, Windows and macOS (the code stays portable, but nothing is tested on them).
 
-## Nom de l'outil
+## Tool name
 
-Nom retenu pour la v1 : **devslot**, alias court `ds`, pour « un emplacement de dev par checkout ». Il peut encore changer tant que rien n'est publié.
+Name chosen for v1: **devslot**, short alias `ds`, for "one dev slot per checkout". It can still change as long as nothing is published.
 
-Alternatives libres sur crates.io : portlane (`pl`), berthing (`bt`), dockslot (`dk`). Déjà pris : berth, quay, pier, moor, slip, wharf, bollard. Vérifié le 9 novembre 2026 ; devslot semble aussi libre sur npm et GitHub.
+Free alternatives on crates.io: portlane (`pl`), berthing (`bt`), dockslot (`dk`). Already taken: berth, quay, pier, moor, slip, wharf, bollard. Checked on November 9, 2026; devslot also looks free on npm and GitHub.
 
 ## Concepts
 
-- **Checkout** : un dossier qui contient une copie de travail du repo, que ce soit le clone principal ou un worktree. Trois worktrees plus le clone principal font quatre checkouts.
-- **Instance** : un checkout inscrit dans le registre, identifié par son chemin canonique. C'est la racine git du dossier courant (`git rev-parse --show-toplevel`, distincte pour chaque worktree), ou le dossier courant hors git.
-- **Nom d'instance** : `<repo>-<dossier>` plus 4 caractères d'un hash du chemin, par exemple `my-links-feat-auth-3f2a`. Le nom du repo vient du dossier de `git rev-parse --git-common-dir`, le même pour tous les worktrees. Le nom est mis en minuscules et réduit aux caractères que Compose accepte (`a-z`, `0-9`, `-`, `_`). Il sert de `COMPOSE_PROJECT_NAME`.
-- **Slot** : un bloc de 50 ports consécutifs (taille réglable dans la config globale, jusqu'à 100). Le slot N couvre `20000 + 50×N` à `+49`. Une instance a un seul slot. Le slot 0 reste réservé aux serveurs partagés de la v2, pour que la v2 n'ait pas à déplacer les instances existantes.
-- **Registre** : un fichier global à la machine qui garde, pour chaque instance, son chemin, son nom, son slot et le port attribué à chaque variable.
+- **Checkout**: a folder that holds a working copy of the repo, whether it is the main clone or a worktree. Three worktrees plus the main clone make four checkouts.
+- **Instance**: a checkout registered in the registry, identified by its canonical path. This is the git root of the current folder (`git rev-parse --show-toplevel`, distinct for each worktree), or the current folder outside git.
+- **Instance name**: `<repo>-<folder>` plus 4 characters of a hash of the path, for example `my-links-feat-auth-3f2a`. The repo name comes from the folder of `git rev-parse --git-common-dir`, the same for all worktrees. The name is lowercased and reduced to the characters Compose accepts (`a-z`, `0-9`, `-`, `_`). It is used as `COMPOSE_PROJECT_NAME`.
+- **Slot**: a block of 50 consecutive ports (size adjustable in the global config, up to 100). Slot N covers `20000 + 50×N` to `+49`. An instance has a single slot. Slot 0 stays reserved for the shared servers of v2, so that v2 does not have to move existing instances.
+- **Registry**: a machine-wide file that keeps, for each instance, its path, its name, its slot and the port assigned to each variable.
 
-Le nom du projet compose dépend du chemin, pas du slot. Un slot libéré puis donné à un autre worktree ne récupère donc jamais les volumes de l'ancien.
+The compose project name depends on the path, not on the slot. A slot that is released and then given to another worktree therefore never picks up the old one's volumes.
 
-## Commandes
+## Commands
 
-Toutes les commandes agissent sur l'instance du dossier courant, sauf `ls` et `prune` qui couvrent la machine. Seuls `up` et `run` inscrivent un checkout, attribuent des ports et écrivent le bloc de `.env` ; les autres commandes ne modifient rien.
+All commands act on the instance of the current folder, except `ls` and `prune`, which cover the machine. Only `up` and `run` register a checkout, assign ports and write the `.env` block; the other commands change nothing.
 
-| Commande | Effet |
+| Command | Effect |
 | --- | --- |
-| `ds up` | Inscrit le checkout si besoin, écrit le bloc de `.env` et démarre les services du compose. Si le `devslot.toml` a une clé `run`, lance ensuite cette commande au premier plan. Ctrl+C arrête l'app ; les services continuent. |
-| `ds run -- <cmd>` | Inscrit le checkout si besoin, écrit le bloc et lance n'importe quelle commande avec l'environnement de l'instance, sans démarrer le compose. Ex. : `ds run -- just dev`, `ds run -- node ace migration:run`. |
-| `ds doctor` | Passe le projet en revue sans rien démarrer ni écrire, et liste les erreurs et avertissements décrits dans Vérifications. Marche aussi sur un checkout non inscrit. `--json` pour les agents. |
-| `ds env` | Affiche l'environnement de l'instance. `--format sh` (pour `eval`) ou `json`. |
-| `ds info` | Nom, chemin, ports et état de l'instance courante. `--json` pour les agents. Sur un checkout non inscrit, le dit et propose `ds up`. |
-| `ds ls` | Toutes les instances de la machine. `--json` pour les scripts et Tunneler. |
-| `ds down` | Arrête les services de l'instance, sans toucher aux données. |
-| `ds reset [service]` | Remet à zéro les données de l'instance : supprime les volumes de ses services compose. |
-| `ds rm` | Ramène le checkout à sa configuration de base : arrête les services, supprime ses conteneurs et ses volumes, retire le bloc de `.env` et libère son slot. Demande confirmation, sauf avec `--yes`. |
-| `ds prune` | Retire les instances dont le dossier n'existe plus, et propose de supprimer leurs conteneurs et volumes. |
+| `ds up` | Registers the checkout if needed, writes the `.env` block and starts the compose services. If `devslot.toml` has a `run` key, then runs that command in the foreground. Ctrl+C stops the app; the services keep running. |
+| `ds run -- <cmd>` | Registers the checkout if needed, writes the block and runs any command with the instance environment, without starting the compose. E.g. `ds run -- just dev`, `ds run -- node ace migration:run`. |
+| `ds doctor` | Reviews the project without starting or writing anything, and lists the errors and warnings described in Checks. Also works on an unregistered checkout. `--json` for agents. |
+| `ds env` | Prints the instance environment. `--format sh` (for `eval`) or `json`. |
+| `ds info` | Name, path, ports and state of the current instance. `--json` for agents. On an unregistered checkout, says so and suggests `ds up`. |
+| `ds ls` | All instances on the machine. `--json` for scripts and Tunneler. |
+| `ds down` | Stops the instance services, without touching the data. |
+| `ds reset [service]` | Resets the instance data: deletes the volumes of its compose services. |
+| `ds rm` | Brings the checkout back to its base configuration: stops the services, deletes its containers and volumes, removes the `.env` block and releases its slot. Asks for confirmation, except with `--yes`. |
+| `ds prune` | Removes the instances whose folder no longer exists, and offers to delete their containers and volumes. |
 
-**Lancement de l'app.** `ds up` ne devine rien : il lance la commande `run` du `devslot.toml`, par exemple `node ace serve --hmr`. Sans clé `run`, `up` s'arrête après les services ; `ds run -- <cmd>` lance alors n'importe quel process, en Node, Python, Go ou autre.
+**Launching the app.** `ds up` guesses nothing: it runs the `run` command of `devslot.toml`, for example `node ace serve --hmr`. Without a `run` key, `up` stops after the services; `ds run -- <cmd>` then runs any process, in Node, Python, Go or anything else.
 
-**Pourquoi `run` ne lance que l'app.** C'est `ds` qui gère les services du compose. La clé `run` doit lancer l'app seule, pas une recette qui refait un `docker compose up`. En v1 ce serait sans danger, mais cette règle prépare le partage de la v2.
+**Why `run` only launches the app.** `ds` manages the compose services. The `run` key must launch the app alone, not a recipe that runs `docker compose up` again. In v1 this would be harmless, but this rule prepares for the sharing of v2.
 
-`ds up` ne lance pas le Justfile tout seul, parce qu'une recette peut déjà gérer le compose. Pour garder ta commande habituelle : `ds run -- just dev`, ou simplement `just dev` une fois le bloc écrit.
+`ds up` does not run the Justfile by itself, because a recipe may already manage the compose. To keep your usual command: `ds run -- just dev`, or simply `just dev` once the block is written.
 
-## Découverte des ports
+## Port discovery
 
-L'outil trouve seul les variables de port, en lisant le compose et le `.env`, sans config.
+The tool finds the port variables on its own, by reading the compose file and the `.env`, without config.
 
-1. **Fichier compose** : celui de la config, sinon le premier qui existe parmi `dev.compose.yaml`, `dev.compose.yml`, `compose.dev.yaml`, `compose.dev.yml`, `docker-compose.dev.yaml`, `docker-compose.dev.yml`, puis les noms que Docker prend par défaut (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`). Si le fichier retenu n'est pas l'un de ces quatre derniers, `ds` met aussi `COMPOSE_FILE` dans l'environnement et dans le bloc de `.env`, avec le `compose.override.*` du projet s'il existe. Un `docker compose` lancé sans `-f` vise ainsi le même fichier.
-2. **Ports des services, par la méthode des sentinelles** :
-   1. `docker compose config --variables` liste les variables du modèle et leurs valeurs par défaut.
-   2. `docker compose config --format json` est lancé avec interpolation, en donnant à chaque variable candidate une valeur sentinelle unique (un port hors de la plage, différent pour chacune).
-   3. Chaque champ `published` qui contient une sentinelle donne une variable gérée, avec son service et son port conteneur. C'est Docker qui fusionne les `include`, `extends` et fichiers multiples, et qui interprète `${VAR:-défaut}`. On évite `--no-interpolate`, connu pour mal rendre certaines syntaxes de ports.
-3. **Ports en dur** (`"5432:5432"`) : un avertissement qui propose la syntaxe `${VAR:-5432}`. Ils ne sont pas gérés en v1.
-4. **Port de l'app** : `PORT`, lu dans `.env`, sinon `.env.example`, plus les variables listées dans `[ports] extra`. Les autres `*_PORT` du `.env` ne sont pas touchées : elles peuvent viser un serveur externe (SMTP, base distante).
-5. **HMR Vite** : `VITE_HMR_PORT` est ajoutée si `vite` est dans le `package.json`.
-6. **Ce qui casserait l'isolation** : `ds up` refuse de démarrer si la config fusionnée contient un `container_name`, un volume ou un réseau avec un `name:` explicite ou `external: true`. Ces ressources seraient partagées entre instances malgré le projet compose distinct. Le message nomme le service et la clé en cause. Un bind mount en chemin absolu donne un avertissement. La liste complète est dans Vérifications.
+1. **Compose file**: the one from the config, otherwise the first that exists among `dev.compose.yaml`, `dev.compose.yml`, `compose.dev.yaml`, `compose.dev.yml`, `docker-compose.dev.yaml`, `docker-compose.dev.yml`, then the names Docker takes by default (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`). If the chosen file is not one of these last four, `ds` also puts `COMPOSE_FILE` in the environment and in the `.env` block, with the project's `compose.override.*` if it exists. A `docker compose` run without `-f` then targets the same file.
+2. **Service ports, by the sentinel method**:
+   1. `docker compose config --variables` lists the variables of the model and their default values.
+   2. `docker compose config --format json` is run with interpolation, giving each candidate variable a unique sentinel value (a port outside the range, different for each one).
+   3. Each `published` field that contains a sentinel yields a managed variable, with its service and its container port. Docker merges the `include`, `extends` and multiple files, and interprets `${VAR:-default}`. We avoid `--no-interpolate`, known to render some port syntaxes badly.
+3. **Hardcoded ports** (`"5432:5432"`): a warning that suggests the `${VAR:-5432}` syntax. They are not managed in v1.
+4. **App port**: `PORT`, read from `.env`, otherwise `.env.example`, plus the variables listed in `[ports] extra`. The other `*_PORT` variables of the `.env` are left alone: they may point to an external server (SMTP, remote database).
+5. **Vite HMR**: `VITE_HMR_PORT` is added if `vite` is in `package.json`.
+6. **What would break isolation**: `ds up` refuses to start if the merged config contains a `container_name`, or a volume or network with an explicit `name:` or `external: true`. These resources would be shared between instances despite the separate compose project. The message names the service and the key at fault. A bind mount with an absolute path gives a warning. The full list is in Checks.
 
-Résultat sur ton template Adonis, pour une instance au slot 1 :
+Result on your Adonis template, for an instance in slot 1:
 
-| Variable | Source | Par défaut | Attribué |
+| Variable | Source | Default | Assigned |
 | --- | --- | --- | --- |
 | `PORT` | `.env` | 3333 | 20050 |
 | `VITE_HMR_PORT` | `package.json` (vite) | 24678 | 20051 |
 | `DB_PORT` | compose, service `postgres` | 5432 | 20052 |
 
-**Limite connue** : Vite n'a pas de variable d'environnement pour son port HMR. Il faut une ligne dans `vite.config.ts`, qui retombe sur le défaut sans l'outil : `server: { hmr: { port: Number(process.env.VITE_HMR_PORT) || undefined } }`.
+**Known limitation**: Vite has no environment variable for its HMR port. One line is needed in `vite.config.ts`, which falls back to the default without the tool: `server: { hmr: { port: Number(process.env.VITE_HMR_PORT) || undefined } }`.
 
-## Vérifications
+## Checks
 
-Les mêmes contrôles servent à `ds up` et à `ds doctor`. Une erreur bloque `ds up` ; un avertissement s'affiche sans bloquer. `ds up` ne contrôle que le compose qu'il lance, alors que `ds doctor` passe en revue tous les fichiers compose de la racine, celui de la prod compris.
+The same checks serve `ds up` and `ds doctor`. An error blocks `ds up`; a warning is displayed without blocking. `ds up` only checks the compose it runs, whereas `ds doctor` reviews all the compose files at the root, the production one included.
 
-| Vérification | Niveau | Pourquoi |
+| Check | Level | Why |
 | --- | --- | --- |
-| `container_name` sur un service | erreur | Deux instances voudraient le même nom de conteneur. |
-| Volume ou réseau avec `name:` explicite ou `external: true` | erreur | Il serait partagé entre instances malgré le projet compose distinct. |
-| `.env` absent | erreur | `ds` n'a pas où écrire son bloc. |
-| Port publié en dur (`"5432:5432"`) | avertissement | Il n'est pas géré en v1 et entrera en conflit dès la deuxième instance. |
-| Service qui charge `.env` avec `env_file` et reçoit une variable gérée sans la fixer dans `environment:` | avertissement | Le conteneur recevrait un port côté machine (voir la règle ci-dessous). |
-| Bind mount en chemin absolu | avertissement | Les instances partageraient les mêmes fichiers. |
-| `vite` dans le `package.json`, mais `VITE_HMR_PORT` absent de `vite.config.*` | avertissement | Toutes les instances se disputeraient le port HMR 24678. |
-| `.env` non ignoré par git | avertissement | Le bloc finirait dans un commit. |
-| `.env.test` qui redéfinit une variable gérée | avertissement | Les tests viseraient d'autres ports que l'app. |
-| Valeur qui contient un port en dur (`DATABASE_URL=…:5432/…`) | avertissement | Elle ne suit pas le port attribué, sauf si `[env]` la reconstruit. |
+| `container_name` on a service | error | Two instances would want the same container name. |
+| Volume or network with an explicit `name:` or `external: true` | error | It would be shared between instances despite the separate compose project. |
+| `.env` missing | error | `ds` has nowhere to write its block. |
+| Hardcoded published port (`"5432:5432"`) | warning | It is not managed in v1 and will conflict as soon as there is a second instance. |
+| Service that loads `.env` with `env_file` and receives a managed variable without pinning it in `environment:` | warning | The container would receive a host-side port (see the rule below). |
+| Bind mount with an absolute path | warning | The instances would share the same files. |
+| `vite` in `package.json`, but `VITE_HMR_PORT` absent from `vite.config.*` | warning | All instances would fight over HMR port 24678. |
+| `.env` not ignored by git | warning | The block would end up in a commit. |
+| `.env.test` that redefines a managed variable | warning | Tests would target other ports than the app. |
+| Value that contains a hardcoded port (`DATABASE_URL=…:5432/…`) | warning | It does not follow the assigned port, unless `[env]` rebuilds it. |
 
-**Règle pour `env_file`** : les valeurs du bloc sont des ports côté machine. Un conteneur qui charge `.env` doit donc fixer ses ports internes dans `environment:`, qui passe avant `env_file`. C'est le cas du service `app` du `compose.yml` de ton template : sans ces deux lignes, un `just prod` lancé dans un checkout qui utilise `ds` donne à l'app `PORT=20050` et `DB_PORT=20052`, et elle devient injoignable.
+**Rule for `env_file`**: the block values are host-side ports. A container that loads `.env` must therefore pin its internal ports in `environment:`, which takes precedence over `env_file`. This is the case for the `app` service of your template's `compose.yml`: without these two lines, a `just prod` run in a checkout that uses `ds` gives the app `PORT=20050` and `DB_PORT=20052`, and it becomes unreachable.
 
 ```yaml
   app:
@@ -123,20 +123,20 @@ Les mêmes contrôles servent à `ds up` et à `ds doctor`. Une erreur bloque `d
       - PORT=3333
 ```
 
-`ds doctor --json` renvoie la même liste, avec pour chaque point le fichier, le service et la clé en cause. L'option `--fix`, qui corrigerait les fichiers après avoir montré un diff, viendra après la v1.
+`ds doctor --json` returns the same list, with the file, the service and the key at fault for each item. The `--fix` option, which would correct the files after showing a diff, will come after v1.
 
-## Attribution et registre
+## Assignment and registry
 
-Une instance garde les mêmes ports tant qu'elle existe. Ses favoris et ses tunnels ne cassent donc pas d'un redémarrage à l'autre.
+An instance keeps the same ports as long as it exists. Its bookmarks and tunnels therefore do not break from one restart to the next.
 
-1. **Verrou** : `flock` sur `registry.lock`. Deux agents lancés en même temps ne prennent jamais le même slot.
-2. **Instance connue** : elle récupère ses ports. Une nouvelle variable prend le prochain port libre de son slot. Une variable qui a disparu garde son port, au cas où elle reviendrait.
-3. **Slot plein** : une erreur claire, qui indique le nombre de ports demandés et propose d'augmenter la taille des slots dans la config globale. Pas de second slot automatique.
-4. **Nouvelle instance** : elle prend, à partir de 1, le plus petit slot absent du registre dont tous les ports sont libres. Un port est libre si un `bind` réussit sur `127.0.0.1`, `0.0.0.0`, `::1` et `::`. Une erreur `EADDRNOTAVAIL` sur les adresses IPv6 est ignorée, pour les machines où IPv6 est désactivé.
-5. **Vérification avant chaque `up`** : un port occupé par les conteneurs de l'instance est normal. Occupé par un autre programme, c'est une erreur qui nomme le port et, si possible, le programme.
-6. **Écriture atomique** : fichier temporaire puis `rename`, avant de libérer le verrou.
+1. **Lock**: `flock` on `registry.lock`. Two agents started at the same time never take the same slot.
+2. **Known instance**: it gets its ports back. A new variable takes the next free port of its slot. A variable that has disappeared keeps its port, in case it comes back.
+3. **Full slot**: a clear error, which states the number of ports requested and suggests increasing the slot size in the global config. No automatic second slot.
+4. **New instance**: it takes, starting from 1, the smallest slot absent from the registry whose ports are all free. A port is free if a `bind` succeeds on `127.0.0.1`, `0.0.0.0`, `::1` and `::`. An `EADDRNOTAVAIL` error on the IPv6 addresses is ignored, for machines where IPv6 is disabled.
+5. **Check before every `up`**: a port occupied by the instance's own containers is normal. Occupied by another program, it is an error that names the port and, if possible, the program.
+6. **Atomic write**: temporary file then `rename`, before releasing the lock.
 
-Le registre est en TOML, lisible et modifiable à la main, dans `~/.local/state/devslot/registry.toml` :
+The registry is in TOML, readable and editable by hand, in `~/.local/state/devslot/registry.toml`:
 
 ```toml
 version = 1
@@ -148,31 +148,31 @@ slot = 1
 ports = { PORT = 20050, VITE_HMR_PORT = 20051, DB_PORT = 20052 }
 ```
 
-La plage se règle dans `~/.config/devslot/config.toml`. Par défaut, 20000 à 29999 avec des slots de 50 ports, soit 200 slots. Cette plage reste sous celle des ports éphémères de Linux (32768 à 60999 par défaut).
+The range is set in `~/.config/devslot/config.toml`. By default, 20000 to 29999 with slots of 50 ports, i.e. 200 slots. This range stays below the Linux ephemeral port range (32768 to 60999 by default).
 
-## Environnement et bloc devslot dans .env
+## Environment and devslot block in .env
 
-L'outil donne les valeurs de l'instance de deux façons : il les passe au process qu'il lance, et il les recopie dans un bloc délimité à la fin de `.env`. Avec ou sans `ds`, tout le monde lit donc les mêmes valeurs.
+The tool provides the instance values in two ways: it passes them to the process it launches, and it copies them into a delimited block at the end of `.env`. With or without `ds`, everyone therefore reads the same values.
 
-**Variables gérées** : chaque variable de port, `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE` quand il le faut (voir Découverte des ports), les valeurs construites de `[env]`, plus `DEVSLOT_INSTANCE` et `DEVSLOT_SLOT` dans l'environnement des process lancés. Les identifiants de connexion, l'`APP_KEY` et le reste du `.env` ne sont jamais touchés.
+**Managed variables**: each port variable, `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE` when needed (see Port discovery), the built values of `[env]`, plus `DEVSLOT_INSTANCE` and `DEVSLOT_SLOT` in the environment of launched processes. Connection credentials, `APP_KEY` and the rest of the `.env` are never touched.
 
-**`ds` écrase toujours ses propres variables.** Si l'environnement de l'appelant en définit déjà une avec une autre valeur, par exemple après un `eval $(ds env)` fait dans un autre checkout, `ds` la remplace et le signale. Pour forcer une valeur, on passe par le `devslot.local.toml`.
+**`ds` always overwrites its own variables.** If the caller's environment already defines one with another value, for example after an `eval $(ds env)` done in another checkout, `ds` replaces it and reports it. To force a value, go through `devslot.local.toml`.
 
-**Pourquoi ça suffit** : Compose prend les variables du shell avant celles du `.env`, et `COMPOSE_PROJECT_NAME` passe avant le `name:` du fichier. Adonis donne la priorité à `process.env` sur ses fichiers `.env`.
+**Why this is enough**: Compose takes shell variables before those of `.env`, and `COMPOSE_PROJECT_NAME` takes precedence over the file's `name:`. Adonis gives `process.env` priority over its `.env` files.
 
-| Fichier | Lu par Compose | Lu par Adonis en dev | Lu par Adonis en test |
+| File | Read by Compose | Read by Adonis in dev | Read by Adonis in test |
 | --- | --- | --- | --- |
-| `.env` | oui | oui | oui |
-| `.env.local` | non | oui | non |
+| `.env` | yes | yes | yes |
+| `.env.local` | no | yes | no |
 
-C'est pour cette raison que le bloc va dans `.env` : `.env.local` ne serait lu ni par Compose ni par les tests, et créerait deux sources de vérité.
+This is why the block goes in `.env`: `.env.local` would be read neither by Compose nor by the tests, and would create two sources of truth.
 
-**Le bloc** ressemble à ceci :
+**The block** looks like this:
 
 ```
-# >>> devslot : généré automatiquement, ne pas modifier à la main >>>
-# Pour revenir aux ports par défaut : ds rm
-# (supprime aussi les conteneurs et les données de ce checkout)
+# >>> devslot: generated automatically, do not edit by hand >>>
+# To go back to the default ports: ds rm
+# (also deletes the containers and data of this checkout)
 COMPOSE_PROJECT_NAME=my-links-feat-auth-3f2a
 PORT=20050
 VITE_HMR_PORT=20051
@@ -180,68 +180,68 @@ DB_PORT=20052
 # <<< devslot <<<
 ```
 
-**Règles d'écriture** :
+**Write rules**:
 
-- Le bloc est écrit par `ds up` et `ds run`, jamais par les commandes de lecture. Seul le contenu entre les marqueurs change, par écriture atomique, et chaque écriture est annoncée avec le chemin du fichier.
-- Si `.env` n'existe pas, `ds` s'arrête et demande de le créer d'abord, par exemple depuis `.env.example`.
-- Un avertissement signale un `.env` non ignoré par git (`git check-ignore`), et un `.env.test` qui redéfinit une variable gérée.
-- Si une variable gérée existe déjà plus haut dans le fichier (`PORT=3333`), le bloc à la fin suffit si Compose et Adonis gardent la dernière valeur d'une clé en double. Sinon, `ds` commente la ligne d'origine (`# PORT=3333  # devslot`) et la restaure à la sortie. À trancher au prototype.
-- Un bloc supprimé à la main est réécrit au prochain appel à `ds up` ou `ds run`. La vraie sortie, c'est `ds rm`.
-- `ds rm` retire le bloc et restaure les lignes commentées. Le checkout reprend alors les ports par défaut et le `name:` du compose.
-- On peut couper l'écriture dans la config globale ou dans `[write]` du `devslot.toml`. Dans ce cas, seules les commandes lancées par `ds run` ont les valeurs de l'instance.
+- The block is written by `ds up` and `ds run`, never by the read commands. Only the content between the markers changes, by atomic write, and every write is announced with the file path.
+- If `.env` does not exist, `ds` stops and asks to create it first, for example from `.env.example`.
+- A warning reports a `.env` not ignored by git (`git check-ignore`), and a `.env.test` that redefines a managed variable.
+- If a managed variable already exists higher up in the file (`PORT=3333`), the block at the end is enough if Compose and Adonis keep the last value of a duplicated key. Otherwise, `ds` comments out the original line (`# PORT=3333  # devslot`) and restores it on exit. To be settled in the prototype.
+- A block deleted by hand is rewritten on the next `ds up` or `ds run`. The real way out is `ds rm`.
+- `ds rm` removes the block and restores the commented lines. The checkout then goes back to the default ports and the compose `name:`.
+- Writing can be turned off in the global config or in `[write]` of `devslot.toml`. In that case, only commands launched by `ds run` have the instance values.
 
-**Valeurs qui contiennent un port en dur**, comme `DATABASE_URL=postgres://…:5432/app` : un avertissement les signale. La section `[env]` de la config permet de les reconstruire à partir des ports attribués ; elles vont alors aussi dans le bloc.
+**Values that contain a hardcoded port**, like `DATABASE_URL=postgres://…:5432/app`: a warning reports them. The `[env]` section of the config lets you rebuild them from the assigned ports; they then also go in the block.
 
-## Plugin pour les agents
+## Plugin for agents
 
-Le repo de l'outil contient un plugin Claude Code, partie intégrante de la v1. Grâce au bloc de `.env`, un agent qui oublie `ds` vise quand même les bons ports : le plugin sert surtout à lui donner les bonnes habitudes et ses ports dès le départ.
+The tool's repo contains a Claude Code plugin, an integral part of v1. Thanks to the `.env` block, an agent that forgets `ds` still targets the right ports: the plugin mainly serves to give it the right habits and its ports from the start.
 
-- **Un skill `devslot`.** Un skill ne se déclenche pas selon les fichiers du repo : c'est le modèle qui le choisit d'après sa description. Celle-ci doit donc nommer clairement le cas d'usage (un repo avec un compose, un bloc devslot dans `.env` ou un `devslot.toml`). Ses règles :
-  - démarrer l'environnement avec `ds up` ;
-  - lire les ports et les URLs avec `ds info --json`, sans jamais les deviner ni les écrire en dur ;
-  - remettre ses données à zéro avec `ds reset` ;
-  - ne jamais lancer `ds rm` ni supprimer des conteneurs ou des volumes à la main : d'autres agents travaillent sur la machine.
-- **Un hook `SessionStart`, optionnel.** Si le checkout est inscrit, il ajoute la sortie de `ds info` au contexte de l'agent. Il n'inscrit rien et n'attribue rien.
+- **A `devslot` skill.** A skill does not trigger on the repo's files: the model chooses it from its description. The description must therefore name the use case clearly (a repo with a compose file, a devslot block in `.env` or a `devslot.toml`). Its rules:
+  - start the environment with `ds up`;
+  - read ports and URLs with `ds info --json`, never guess them or hardcode them;
+  - reset its data with `ds reset`;
+  - never run `ds rm` or delete containers or volumes by hand: other agents work on the machine.
+- **A `SessionStart` hook, optional.** If the checkout is registered, it adds the output of `ds info` to the agent's context. It registers nothing and assigns nothing.
 
-Pas de hook `CLAUDE_ENV_FILE` ni `PreToolUse` en v1. Le bloc de `.env` couvre déjà les commandes lancées sans `ds`, et `COMPOSE_PROJECT_NAME` dans ce bloc limite un `docker compose down -v` à l'instance courante. Ces hooks dépendraient en plus de bugs connus de Claude Code (environnement perdu après un `/resume`, `CwdChanged` qui ne se déclenche pas avec `EnterWorktree`).
+No `CLAUDE_ENV_FILE` or `PreToolUse` hook in v1. The `.env` block already covers commands run without `ds`, and `COMPOSE_PROJECT_NAME` in this block limits a `docker compose down -v` to the current instance. These hooks would also depend on known Claude Code bugs (environment lost after a `/resume`, `CwdChanged` not firing with `EnterWorktree`).
 
-Pour les autres agents (Codex, Cursor…), le README contient les mêmes règles, à coller dans un `AGENTS.md`.
+For other agents (Codex, Cursor…), the README contains the same rules, to paste into an `AGENTS.md`.
 
-Installation : `/plugin marketplace add Sonny93/devslot`, puis `/plugin install devslot@<nom du marketplace>`. Les deux noms dépendront du nom définitif.
+Installation: `/plugin marketplace add Sonny93/devslot`, then `/plugin install devslot@<marketplace name>`. Both names will depend on the final name.
 
-## Fichier de configuration
+## Configuration file
 
-Un `devslot.toml` à la racine du repo, optionnel, commité ou ignoré par git au choix. Il règle la façon dont l'outil traite le projet, et peut déclarer la commande de l'app avec la clé `run`.
+A `devslot.toml` at the repo root, optional, committed or ignored by git as you choose. It sets how the tool treats the project, and can declare the app command with the `run` key.
 
-Un `devslot.local.toml`, ignoré par git, le surcharge pour ta machine. Ordre de priorité : la ligne de commande, `devslot.local.toml`, `devslot.toml`, la config globale, puis les valeurs par défaut.
+A `devslot.local.toml`, ignored by git, overrides it for your machine. Priority order: the command line, `devslot.local.toml`, `devslot.toml`, the global config, then the default values.
 
 ```toml
-# devslot.toml : tout est optionnel
+# devslot.toml: everything is optional
 
-# Commande de l'app, lancée par ds up au premier plan après les services.
-# Elle lance l'app seule, jamais le compose : c'est ds qui gère les services.
+# App command, run by ds up in the foreground after the services.
+# It launches the app alone, never the compose: ds manages the services.
 run = "node ace serve --hmr"
 
 [compose]
-file = "dev.compose.yml"   # sinon détecté
+file = "dev.compose.yml"   # otherwise detected
 
 [ports]
-extra = ["FRONT_PORT"]     # variables à gérer en plus de PORT
-ignore = ["MAILPIT_PORT"]  # variables du compose à laisser telles quelles
+extra = ["FRONT_PORT"]     # variables to manage in addition to PORT
+ignore = ["MAILPIT_PORT"]  # compose variables to leave as they are
 
 [env]
-# valeurs construites à partir des ports attribués, écrites aussi dans le bloc
+# values built from the assigned ports, also written in the block
 VITE_API_URL = "http://localhost:${PORT}"
 
 [write]
-enabled = true             # false : rien n'est écrit dans .env
+enabled = true             # false: nothing is written to .env
 ```
 
-La clé `run` est le seul process que le fichier peut déclarer : une seule commande, au premier plan. `ds info` affiche l'origine de chaque valeur : ligne de commande, fichier ou détection.
+The `run` key is the only process the file can declare: a single command, in the foreground. `ds info` shows the origin of each value: command line, file or detection.
 
-## Sortie JSON et Tunneler
+## JSON output and Tunneler
 
-En v1, `ds ls --json` est un contrat stable et versionné. C'est la seule chose dont Tunneler aura besoin, et l'outil n'a aucune dépendance vers Tunneler. La clé `shared` existe déjà, vide en v1, pour que la v2 n'ait pas à changer le contrat.
+In v1, `ds ls --json` is a stable, versioned contract. It is the only thing Tunneler will need, and the tool has no dependency on Tunneler. The `shared` key already exists, empty in v1, so that v2 does not have to change the contract.
 
 ```json
 {
@@ -263,92 +263,92 @@ En v1, `ds ls --json` est un contrat stable et versionné. C'est la seule chose 
 }
 ```
 
-L'intégration Tunneler viendra en v2, sous deux formes, toutes deux optionnelles :
+The Tunneler integration will come in v2, in two forms, both optional:
 
-- **Suggestion** : `ds tunnels --host nova` affiche la commande à lancer sur ton PC principal, `tunneler up nova -L 20050 -L 20051 -L 20052`. Dans `-L`, un port seul désigne le même port sur la machine distante, donc les numéros sont identiques des deux côtés.
-- **Côté Tunneler** : il lance `ds ls --json` sur l'hôte, par sa session SSH, et propose les tunnels qui manquent. Les instances étant prévisibles, des tunnels en standby sur les premiers slots ne coûtent rien tant que personne ne s'y connecte.
+- **Suggestion**: `ds tunnels --host nova` prints the command to run on your main PC, `tunneler up nova -L 20050 -L 20051 -L 20052`. In `-L`, a single port means the same port on the remote machine, so the numbers are identical on both sides.
+- **Tunneler side**: it runs `ds ls --json` on the host, through its SSH session, and offers the missing tunnels. Since instances are predictable, standby tunnels on the first slots cost nothing as long as nobody connects to them.
 
-## Stack technique
+## Tech stack
 
-Un seul binaire Rust, qui reprend les conventions de Tunneler : édition 2024, clippy pedantic, pas d'`unwrap` hors tests, CI Linux, binaires publiés dans les releases GitHub.
+A single Rust binary, following Tunneler's conventions: edition 2024, clippy pedantic, no `unwrap` outside tests, Linux CI, binaries published in the GitHub releases.
 
-| Besoin | Choix |
+| Need | Choice |
 | --- | --- |
 | CLI | `clap` (derive) |
-| Lecture du compose | `docker compose config --variables`, puis `config --format json` avec des valeurs sentinelles, lu avec `serde_json`. Pas de parseur YAML. |
-| `.env` | `dotenvy` pour la lecture ; écriture du bloc maison, entre marqueurs, par fichier temporaire et `rename` |
-| Registre et config | `serde` + `toml` |
-| Verrou | `fs4` (`flock`) |
-| Lancement de l'app | `exec` sous Unix : la commande remplace l'outil, donc Ctrl+C et le code de sortie se comportent comme sans lui. Sous Windows, plus tard : lancer, attendre, relayer le code. |
-| Docker | Appels à la commande `docker compose`, sans SDK |
+| Reading the compose | `docker compose config --variables`, then `config --format json` with sentinel values, read with `serde_json`. No YAML parser. |
+| `.env` | `dotenvy` for reading; home-made block writing, between markers, through a temporary file and `rename` |
+| Registry and config | `serde` + `toml` |
+| Lock | `fs4` (`flock`) |
+| Launching the app | `exec` on Unix: the command replaces the tool, so Ctrl+C and the exit code behave as without it. On Windows, later: spawn, wait, relay the code. |
+| Docker | Calls to the `docker compose` command, no SDK |
 
-Côté tests, des tests unitaires pour la découverte, l'attribution et l'écriture du bloc, et des tests d'intégration avec un faux `docker` (un script désigné par `DEVSLOT_DOCKER`) pour ne pas dépendre d'un vrai démon dans la CI.
+On the test side, unit tests for discovery, assignment and block writing, and integration tests with a fake `docker` (a script designated by `DEVSLOT_DOCKER`) so the CI does not depend on a real daemon.
 
-## À vérifier au prototype
+## To verify in the prototype
 
-Ce ne sont plus des questions de conception : un essai sur le template Adonis suffit à y répondre.
+These are no longer design questions: a trial on the Adonis template is enough to answer them.
 
-- [ ] La méthode des sentinelles retrouve bien chaque variable de port, avec son service et son port conteneur.
-- [ ] Compose et Adonis gardent la dernière valeur d'une clé en double dans `.env`. Sinon, commenter la ligne d'origine.
-- [ ] La ligne de `vite.config.ts` suffit pour isoler le HMR.
-- [ ] Aucun de tes composes n'a de `container_name`, ni de volume ou réseau avec `name:` ou `external: true`.
-- [ ] Deux worktrees, `ds up` dans chacun, puis un `migration:fresh` dans l'un : la base de l'autre reste intacte.
-- [ ] Un `eval $(ds env)` dans A, un `cd` dans B, puis `ds run` : les ports sont ceux de B.
-- [ ] Un `just dev` lancé sans `ds` après un premier `ds up` : le compose et l'app visent les mêmes ports.
-- [ ] Un agent Claude Code dans chaque worktree, qui travaillent en même temps.
-- [ ] `ds rm` ramène bien le checkout sur 3333, 5432 et 24678.
+- [ ] The sentinel method correctly finds each port variable, with its service and its container port.
+- [ ] Compose and Adonis keep the last value of a duplicated key in `.env`. Otherwise, comment out the original line.
+- [ ] The `vite.config.ts` line is enough to isolate HMR.
+- [ ] None of your compose files has a `container_name`, or a volume or network with `name:` or `external: true`.
+- [ ] Two worktrees, `ds up` in each, then a `migration:fresh` in one: the other's database stays intact.
+- [ ] An `eval $(ds env)` in A, a `cd` into B, then `ds run`: the ports are B's.
+- [ ] A `just dev` run without `ds` after a first `ds up`: the compose and the app target the same ports.
+- [ ] A Claude Code agent in each worktree, working at the same time.
+- [ ] `ds rm` really brings the checkout back to 3333, 5432 and 24678.
 
-**Limite connue, documentée sans être traitée en v1** : les cookies ne sont pas isolés par port. Deux instances ouvertes sur `localhost` avec le même nom de cookie de session se déconnectent l'une l'autre dans le navigateur. Les URLs nommées de la v2 règlent ce cas, puisque chaque instance aura son propre nom d'hôte.
+**Known limitation, documented but not addressed in v1**: cookies are not isolated by port. Two instances opened on `localhost` with the same session cookie name log each other out in the browser. The named URLs of v2 solve this case, since each instance will have its own hostname.
 
-## Après la v1
+## After v1
 
-Ce qui est prévu pour la v2, chaque brique étant optionnelle et construite sur le noyau de la v1.
+What is planned for v2, each piece being optional and built on the v1 core.
 
-### Services partagés
+### Shared services
 
-Un service du compose lancé depuis une image publique (Postgres, MySQL, Redis…) est remplacé par un serveur partagé que l'outil gère lui-même, sur un port du slot 0, avec une base isolée par instance. Le partage se fait par image exacte, avec un petit adaptateur par famille pour créer la base et le rôle de chaque instance.
+A compose service started from a public image (Postgres, MySQL, Redis…) is replaced by a shared server that the tool manages itself, on a port of slot 0, with one isolated database per instance. Sharing is done by exact image, with a small adapter per family to create each instance's database and role.
 
-**Le piège à éviter.** Si `DB_PORT` vaut le port du serveur partagé et qu'un `docker compose up` est lancé, Compose démarre aussi le Postgres du compose. Celui-ci essaie de publier le même port, déjà pris, et le démarrage échoue.
+**The trap to avoid.** If `DB_PORT` equals the shared server's port and a `docker compose up` is run, Compose also starts the compose's own Postgres. It tries to publish the same port, already taken, and the start fails.
 
-**La parade : un override hors du repo.**
+**The fix: an override outside the repo.**
 
-- `ds` génère un fichier d'override dans `~/.local/state/devslot/<instance>/override.yml`. Il donne au service remplacé un profile que personne n'active : Compose ne le démarre plus.
-- **Règle : `DB_PORT` et `COMPOSE_FILE` sont toujours écrits ensemble**, dans l'environnement comme dans le bloc de `.env`. Compose lit `COMPOSE_FILE` depuis `.env`, donc la règle tient aussi pour un `just dev` lancé sans `ds`. Après un `ds rm`, rien ne reste : Compose lance son Postgres sur le port par défaut, sans conflit.
-- Quand `COMPOSE_FILE` est défini, Compose ne charge plus tout seul le `compose.override.yml` du projet : `ds` doit l'ajouter à la liste s'il existe.
-- `depends_on` : la doc de Compose confirme qu'une dépendance vers un service désactivé par profile renvoie une erreur. L'override devra donc aussi retirer ce `depends_on` des services qui en dépendent, par exemple avec `!reset`. À valider au prototype de la v2.
+- `ds` generates an override file in `~/.local/state/devslot/<instance>/override.yml`. It gives the replaced service a profile that nobody activates: Compose no longer starts it.
+- **Rule: `DB_PORT` and `COMPOSE_FILE` are always written together**, in the environment as in the `.env` block. Compose reads `COMPOSE_FILE` from `.env`, so the rule also holds for a `just dev` run without `ds`. After a `ds rm`, nothing remains: Compose starts its Postgres on the default port, without conflict.
+- When `COMPOSE_FILE` is set, Compose no longer loads the project's `compose.override.yml` by itself: `ds` must add it to the list if it exists.
+- `depends_on`: the Compose docs confirm that a dependency on a service disabled by a profile returns an error. The override will therefore also have to remove this `depends_on` from the services that depend on it, for example with `!reset`. To validate in the v2 prototype.
 
-Reste à reprendre de la [révision 1](https://claude.ai/artifact/TxgSxb3jrF9tM1kwQRGCGn) : les adaptateurs par famille, la règle Redis (partagé seulement si l'app lit `REDIS_DB`), le partage des services `build:`, la persistance (`persist`) et l'option `--isolated`.
+Still to take over from [revision 1](https://claude.ai/artifact/TxgSxb3jrF9tM1kwQRGCGn): the per-family adapters, the Redis rule (shared only if the app reads `REDIS_DB`), the sharing of `build:` services, persistence (`persist`) and the `--isolated` option.
 
-### Autres briques
+### Other pieces
 
-- **Clonage de base** : copier la base d'une instance vers une autre. Pour Postgres, `CREATE DATABASE … TEMPLATE` duplique la base côté serveur.
-- **Process en arrière-plan** : `ds up -d`, avec les logs et un arrêt global. Soit un superviseur intégré, soit PM2 en dessous.
-- **URLs nommées** : un proxy qui route `feat-auth.my-links.localhost` vers le port web de l'instance, ce qui isole aussi les cookies. Une intégration optionnelle de portless (Vercel Labs) est à comparer avec un proxy maison.
-- **Tunneler** : `ds tunnels`, puis la lecture de `ds ls --json` par Tunneler.
-- **Ports en dur dans le compose** : le même mécanisme d'override, pour les remapper.
-- **`ds doctor --fix`** : corriger les points détectés par `ds doctor`, après avoir montré le diff et demandé confirmation.
-- **`ds rm --keep-data`**, si le besoin apparaît : revenir aux ports par défaut sans supprimer les volumes.
-- **Prod locale, à étudier** : devslot reste un outil de dev. Un support de la prod lancée en local (l'app dans Docker) ne viendra que si le besoin se confirme. En attendant, la règle `env_file` de Vérifications suffit pour qu'un `just prod` marche dans un checkout qui utilise `ds`.
+- **Database cloning**: copy the database of one instance to another. For Postgres, `CREATE DATABASE … TEMPLATE` duplicates the database on the server side.
+- **Background processes**: `ds up -d`, with logs and a global stop. Either a built-in supervisor, or PM2 underneath.
+- **Named URLs**: a proxy that routes `feat-auth.my-links.localhost` to the instance's web port, which also isolates cookies. An optional portless integration (Vercel Labs) is to be compared with a home-made proxy.
+- **Tunneler**: `ds tunnels`, then Tunneler reading `ds ls --json`.
+- **Hardcoded ports in the compose**: the same override mechanism, to remap them.
+- **`ds doctor --fix`**: fix the points detected by `ds doctor`, after showing the diff and asking for confirmation.
+- **`ds rm --keep-data`**, if the need appears: go back to the default ports without deleting the volumes.
+- **Local prod, to study**: devslot stays a dev tool. Support for prod run locally (the app in Docker) will only come if the need is confirmed. In the meantime, the `env_file` rule from Checks is enough for a `just prod` to work in a checkout that uses `ds`.
 
-## Décisions
+## Decisions
 
-Plus aucune question ouverte pour la v1.
+No open question remains for v1.
 
-**Révision 3 (9 novembre)** :
+**Revision 3 (November 9)**:
 
-- Un bloc délimité à la fin de `.env` remplace `.env.local` et `.env.test.local`. Il contient les ports, `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE` quand il le faut, et un commentaire qui donne `ds rm`.
-- `ds` écrase toujours ses propres variables, avec un avertissement.
-- `ds rm` retire le bloc, supprime les conteneurs et les données du checkout et libère son slot. Un bloc retiré à la main est réécrit au prochain `ds up` ou `ds run`.
-- Seuls `up` et `run` inscrivent un checkout et écrivent ; `info`, `env` et `doctor` ne modifient rien.
-- `ds doctor` en v1, en lecture seule, avec les mêmes contrôles que `ds up` sur tous les fichiers compose de la racine. `--fix` après la v1.
-- Règle `env_file` : un conteneur qui charge `.env` fixe ses ports internes dans `environment:`. Les valeurs du bloc sont des ports côté machine.
-- devslot reste un outil de dev ; la prod locale est à étudier plus tard.
-- La découverte des ports passe par la méthode des sentinelles, plus par `--no-interpolate`.
-- Ports de l'app limités à `PORT`, `VITE_HMR_PORT` et `[ports] extra`.
-- `ds up` refuse de démarrer si un `container_name`, ou un volume ou réseau nommé explicitement, casserait l'isolation.
-- Un seul slot par instance : un slot plein donne une erreur claire, et la taille des slots se règle dans la config globale.
-- Test de port libre aussi en IPv6 (`::1` et `::`).
-- Pas de hook `CLAUDE_ENV_FILE` ni `PreToolUse` en v1.
-- Retirés : `ds nuke`, `ds release`, `ds skill`, le format `dotenv` de `ds env`, le second slot automatique, `ds init` (`docker init` fait déjà ce travail).
+- A delimited block at the end of `.env` replaces `.env.local` and `.env.test.local`. It contains the ports, `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE` when needed, and a comment that gives `ds rm`.
+- `ds` always overwrites its own variables, with a warning.
+- `ds rm` removes the block, deletes the checkout's containers and data and releases its slot. A block removed by hand is rewritten on the next `ds up` or `ds run`.
+- Only `up` and `run` register a checkout and write; `info`, `env` and `doctor` change nothing.
+- `ds doctor` in v1, read-only, with the same checks as `ds up` on all the compose files at the root. `--fix` after v1.
+- `env_file` rule: a container that loads `.env` pins its internal ports in `environment:`. The block values are host-side ports.
+- devslot stays a dev tool; local prod is to be studied later.
+- Port discovery uses the sentinel method, no longer `--no-interpolate`.
+- App ports limited to `PORT`, `VITE_HMR_PORT` and `[ports] extra`.
+- `ds up` refuses to start if a `container_name`, or an explicitly named volume or network, would break isolation.
+- A single slot per instance: a full slot gives a clear error, and the slot size is set in the global config.
+- Free-port test also on IPv6 (`::1` and `::`).
+- No `CLAUDE_ENV_FILE` or `PreToolUse` hook in v1.
+- Removed: `ds nuke`, `ds release`, `ds skill`, the `dotenv` format of `ds env`, the automatic second slot, `ds init` (`docker init` already does that job).
 
-**Révision 2, toujours valables** : pas de partage de services en v1 ; clé `run` dans `devslot.toml` ; partage en v2 avec `DB_PORT` et `COMPOSE_FILE` toujours écrits ensemble ; le nom devslot ; des slots de 50 ports ; des fichiers de config en TOML.
+**Revision 2, still valid**: no service sharing in v1; `run` key in `devslot.toml`; sharing in v2 with `DB_PORT` and `COMPOSE_FILE` always written together; the devslot name; slots of 50 ports; TOML config files.
