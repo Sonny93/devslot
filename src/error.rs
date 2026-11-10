@@ -1,0 +1,37 @@
+//! The failures of the tool itself, as opposed to the findings about a project.
+
+use std::io;
+
+use thiserror::Error;
+
+use crate::checkout::CheckoutError;
+use crate::docker::DockerError;
+use crate::project_config::ConfigError;
+
+/// Something that stops `ds` from answering. Maps to exit code 2.
+#[derive(Debug, Error)]
+pub enum ToolError {
+    /// The current folder is unknown.
+    #[error("cannot determine the current directory: {0}")]
+    CurrentDirectory(io::Error),
+    /// Git or the folder could not be examined.
+    #[error(transparent)]
+    Checkout(#[from] CheckoutError),
+    /// A devslot config file is unusable.
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    /// Docker is unavailable, timed out or answered nonsense.
+    #[error(transparent)]
+    Docker(#[from] DockerError),
+    /// A project file exists but cannot be read.
+    #[error("cannot read {file}: {source}")]
+    ReadFile {
+        /// The file, relative to the checkout root.
+        file: String,
+        /// The underlying error.
+        source: io::Error,
+    },
+    /// The report could not be written.
+    #[error("cannot write the report: {0}")]
+    WriteReport(io::Error),
+}

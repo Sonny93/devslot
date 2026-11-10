@@ -1,0 +1,37 @@
+name: my-links
+
+services:
+  postgres:
+    restart: always
+    image: postgres:18
+    environment:
+      - POSTGRES_DB=${DB_DATABASE}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    volumes:
+      - postgres-volume:/var/lib/postgresql
+    ports:
+      - '127.0.0.1:${DB_PORT}:5432'
+
+  my-links:
+    container_name: my-links
+    restart: always
+    build:
+      context: .
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - HOST=0.0.0.0
+      - PORT=3333
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+    ports:
+      - ${PORT}:3333
+    volumes:
+      - favicon-volume:/app/storage/favicons
+
+volumes:
+  postgres-volume:
+  favicon-volume:

@@ -1,0 +1,61 @@
+{
+  "name": "devslot-probe",
+  "networks": {
+    "default": {
+      "name": "devslot-probe_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "postgres": {
+      "restart": "always",
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "POSTGRES_DB": "",
+        "POSTGRES_PASSWORD": "",
+        "POSTGRES_USER": ""
+      },
+      "image": "postgres:18",
+      "networks": {
+        "default": null
+      },
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "postgres-volume",
+          "target": "/var/lib/postgresql",
+          "volume": {}
+        }
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "pg_isready",
+          "-U",
+          "",
+          "-d",
+          ""
+        ],
+        "timeout": "5s",
+        "interval": "30s",
+        "retries": 10,
+        "start_period": "10s",
+        "start_interval": "500ms"
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 5432,
+          "published": "61000",
+          "protocol": "tcp"
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "postgres-volume": {
+      "name": "devslot-probe_postgres-volume"
+    }
+  }
+}

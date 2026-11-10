@@ -1,0 +1,27 @@
+{
+    "DB_DATABASE": {
+        "Name": "DB_DATABASE",
+        "DefaultValue": "",
+        "PresenceValue": "",
+        "Required": false
+    },
+    "DB_PASSWORD": {
+        "Name": "DB_PASSWORD",
+        "DefaultValue": "",
+        "PresenceValue": "",
+        "Required": false
+    },
+    "DB_PORT": {
+        "Name": "DB_PORT",
+        "DefaultValue": "",
+        "PresenceValue": "",
+        "Required": false
+    },
+    "DB_USER": {
+        "Name": "DB_USER",
+        "DefaultValue": "",
+        "PresenceValue": "",
+        "Required": false
+    }
+}
+

@@ -1,0 +1,45 @@
+[package]
+name = "devslot"
+description = "Run several instances of the same dev stack on one machine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[lib]
+name = "devslot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ds"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml_edit = { version = "0.25", features = ["serde"] }
+
+[target."cfg(unix)".dependencies]
+rustix = { version = "1", features = ["process"] }
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
