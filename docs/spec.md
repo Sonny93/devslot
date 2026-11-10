@@ -164,8 +164,12 @@ version = 1
 path = "/home/sonny/dev/my-links.feat-auth"
 name = "my-links-feat-auth-3f2a"
 slot = 1
+range = [20050, 20099]
 ports = { PORT = 20050, VITE_HMR_PORT = 20051, DB_PORT = 20052 }
+details = { PORT = { kind = "web" }, VITE_HMR_PORT = { kind = "web" }, DB_PORT = { kind = "service", service = "postgres", target = 5432 } }
 ```
+
+`range` is the block of ports the slot covered when it was assigned, so an instance keeps its ports after a change of slot size. `details` gives the kind of each port, and for a service port its compose service and container port, so `ds info` and `ds ls` need no Docker call. A top-level `opted_out` list holds the paths of checkouts removed by `ds rm`.
 
 The range is set in `~/.config/devslot/config.toml`. By default, 20000 to 29999 with slots of 50 ports, i.e. 200 slots. This range stays below the Linux ephemeral port range (32768 to 60999 by default).
 
