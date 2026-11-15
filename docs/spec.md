@@ -1,6 +1,15 @@
-# Spec v1: dev stack isolation tool (revision 4)
+# Spec v1: dev stack isolation tool (revision 5)
 
-Nov 10, 2026 · @Sonny
+Nov 15, 2026 · @Sonny
+
+**Revision 5 (November 15)** keeps this text and adds the phase 3 and 4 decisions recorded in [decisions.md](decisions.md) (rows dated 2026-11-15), which win where they differ from the text below. The main changes:
+
+- DevSlot manages the worktrees of Claude Code sessions: the plugin's `WorktreeCreate` and `WorktreeRemove` hooks call `ds hook worktree-create` and `ds hook worktree-remove`, which create the worktree in `~/dev/.worktrees/<repo>/<name>` (configurable), register it, and delete its data and the worktree at the end. The `PreToolUse` hook (`ds ensure`) stays as a safety net and denies `ds rm` and `ds prune` to agents.
+- Instance data is deleted by Docker label (`com.docker.compose.project`), never through `compose down -v`, and the isolation checks also run on the model resolved as `up` resolves it.
+- The `.env` block also holds `DEVSLOT_INSTANCE` and `DEVSLOT_SLOT`; `ds info --json` and `ds ls --json` give each web port a `url`.
+- `ds up` waits for healthchecks (`--wait`); `ds reset` restarts the services; `ds rm` and `ds prune` need a terminal or `--yes`.
+
+Revision 4 introduction:
 
 Revision of November 10, after the step 0 checks on the Adonis template (Compose, dotenv and Adonis behavior verified) and an evaluation of existing tools. Changes since revision 3 (the full list is in Decisions):
 
@@ -288,8 +297,8 @@ In v1, `ds ls --json` is a stable, versioned contract. It is the only thing Tunn
       "slot": 1,
       "services_running": true,
       "ports": [
-        { "var": "PORT", "port": 20050, "kind": "web" },
-        { "var": "VITE_HMR_PORT", "port": 20051, "kind": "web" },
+        { "var": "PORT", "port": 20050, "kind": "web", "url": "http://localhost:20050" },
+        { "var": "VITE_HMR_PORT", "port": 20051, "kind": "web", "url": "http://localhost:20051" },
         { "var": "DB_PORT", "port": 20052, "kind": "service", "service": "postgres", "target": 5432 }
       ]
     }
