@@ -115,7 +115,7 @@ Result on your Adonis template, for an instance in slot 1:
 | `VITE_HMR_PORT` | `package.json` (vite) | 24678 | 20051 |
 | `DB_PORT` | compose, service `postgres` | 5432 | 20052 |
 
-**Known limitation**: Vite has no environment variable for its HMR port. One line is needed in `vite.config.ts`, which falls back to the default without the tool: `server: { hmr: { port: Number(process.env.VITE_HMR_PORT) || undefined } }`.
+**Known limitation**: Vite has no environment variable for its HMR port. One line is needed in `vite.config.ts`, which falls back to the default without the tool: `server: { ws: { port: Number(process.env.VITE_HMR_PORT) || undefined } }` from Vite 8 (where `server.hmr.port` is deprecated), `server: { hmr: { port: ... } }` before. Projects that use `@adonisjs/assembler` need nothing: it sets `VITE_HMR_PORT` itself, and the check does not warn.
 
 ## Checks
 
@@ -334,13 +334,13 @@ These are no longer design questions: a trial on the Adonis template is enough t
 
 - [x] The sentinel method correctly finds each port variable, with its service and its container port. Verified on Compose v5.7.0 with the template: `DB_PORT=9001` comes out as published 9001, container port 5432.
 - [x] Compose and Adonis keep the last value of a duplicated key in `.env`. Verified with Compose v5.7.0, dotenv 17.4.2 and `@adonisjs/env` 7.1.0.
-- [ ] The `vite.config.ts` line is enough to isolate HMR.
+- [x] The `vite.config.ts` line is enough to isolate HMR. Answered on rl-tracker (Adonis 7, Vite 8.3): not needed there. `@adonisjs/assembler` 8 sets `VITE_HMR_PORT` itself for the dev server (24678 when free, else a free port) and `@adonisjs/vite` 6 reads it, so the block value and the line are ignored; two instances started one after the other get distinct HMR ports, two started in the same second can both pick 24678. `ds doctor` skips the warning for Adonis projects and suggests `server.ws.port` for Vite 8 elsewhere.
 - [x] None of your compose files has a `container_name`, or a volume or network with `name:` or `external: true`. Answered: false. my-links has a `container_name` in `compose.yml` and `compose.image.yml`.
-- [ ] Two worktrees, `ds up` in each, then a `migration:fresh` in one: the other's database stays intact.
-- [ ] An `eval $(ds env)` in A, a `cd` into B, then `ds run`: the ports are B's.
-- [ ] A `just dev` run without `ds` after a first `ds up`: the compose and the app target the same ports.
-- [ ] A Claude Code agent in each worktree, working at the same time.
-- [ ] `ds rm` really brings the checkout back to 3333, 5432 and 24678.
+- [x] Two worktrees, `ds up` in each, then a `migration:fresh` in one: the other's database stays intact. Verified on rl-tracker (row kept in B after `migration:fresh` in A).
+- [x] An `eval $(ds env)` in A, a `cd` into B, then `ds run`: the ports are B's, with a warning for each replaced variable. A plain command in B keeps A's exported values (process environment wins over `.env` in Adonis).
+- [x] A `just dev` run without `ds` after a first `ds up`: the compose and the app target the same ports. Verified on rl-tracker: `COMPOSE_PROJECT_NAME` in `.env` wins over the compose file's top-level `name:`, so the recipe's `down` and `up` only touch the instance.
+- [x] A Claude Code agent in each worktree, working at the same time. Verified with two headless sessions started with `claude -w` in parallel: distinct slots, SessionStart context received, `ds up` and `migration:fresh` in each, `ds rm` denied by the hook.
+- [x] `ds rm` really brings the checkout back to 3333, 5432 and 24678: `.env` byte for byte identical to the original, no container or volume left.
 
 **Known limitation, documented but not addressed in v1**: cookies are not isolated by port. Two instances opened on `localhost` with the same session cookie name log each other out in the browser. The named URLs of v2 solve this case, since each instance will have its own hostname.
 

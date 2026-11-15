@@ -49,6 +49,25 @@ The plugin adds a `devslot` skill and four hooks (`WorktreeCreate`, `WorktreeRem
 
 The `WorktreeCreate` hook replaces Claude Code's own worktree creation: `ds hook worktree-create` runs `git worktree add` itself and puts the worktree in `~/dev/.worktrees/<repo>/<name>`, on a branch called `<name>` (the existing one when there is one, else a new one from the branch checked out in the main worktree). Change the folder with `[worktrees] root` in the global config (see Configuration). Without the plugin, Claude Code creates its worktrees where it always did.
 
+**Sessions started with `claude --worktree <name> --tmux`.** Claude Code creates the worktree before plugins load, so the plugin's `WorktreeCreate` hook does not run. If you start sessions that way, declare the `WorktreeCreate` and `WorktreeRemove` hooks yourself in `~/.claude/settings.json` (same commands as `plugin/hooks/hooks.json`):
+
+```json
+{
+  "hooks": {
+    "WorktreeCreate": [
+      { "hooks": [{ "type": "command", "command": "ds hook worktree-create", "timeout": 180 }] }
+    ],
+    "WorktreeRemove": [
+      { "hooks": [{ "type": "command", "command": "ds hook worktree-remove", "timeout": 180 }] }
+    ]
+  }
+}
+```
+
+Headless sessions (`claude -p`) never fire `WorktreeRemove`: their worktrees stay until you remove them by hand.
+
+Creating a worktree with a name that already exists reopens it: `ds hook worktree-create` prints its path and registers it if needed, like `claude --worktree <name>` does natively.
+
 ## Quick start
 
 In a project that has a compose file for development:
@@ -166,11 +185,13 @@ services:
 
 `ds doctor` reports a literal port (`"5432:5432"`); ds does not remap it.
 
-Vite has no environment variable for its HMR port. Add one line to `vite.config.ts`, which falls back to the default without devslot:
+Vite has no environment variable for its HMR port. Add one line to `vite.config.ts`, which falls back to the default without devslot. From Vite 8, where `server.hmr.port` is deprecated:
 
 ```ts
-server: { hmr: { port: Number(process.env.VITE_HMR_PORT) || undefined } }
+server: { ws: { port: Number(process.env.VITE_HMR_PORT) || undefined } }
 ```
+
+Before Vite 8, use `server: { hmr: { port: Number(process.env.VITE_HMR_PORT) || undefined } }`. AdonisJS projects that use `@adonisjs/assembler` need nothing: it sets `VITE_HMR_PORT` for the dev server itself, and `ds doctor` does not warn.
 
 **`env_file` rule.** The values in the block are host-side ports. A container that loads `.env` with `env_file` must pin its internal ports in `environment:`, which wins over `env_file`:
 
