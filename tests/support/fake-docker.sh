@@ -9,8 +9,20 @@
 # on a variable the probe environment carries.
 # Files named in $DOCKER_FAKE_FAIL (space separated) are rejected, with
 # $DOCKER_FAKE_STDERR (when set) on stderr.
+#
+# It also answers the commands that act on an instance. The subcommand is the
+# first of `up`, `down`, `rm`, `ps`, `config` after the compose global flags, or
+# `volume ls` / `volume rm`.
+# When $DOCKER_FAKE_LOG is set, every call but `config` appends one line to that
+# file: the arguments joined by single spaces, prefixed by
+# `COMPOSE_PROJECT_NAME=<value of that variable, empty when unset> ` so a test
+# can check that inherited COMPOSE_* variables were removed.
+# The subcommands named in $DOCKER_FAKE_FAIL_COMMANDS (space separated, e.g.
+# `up down`) exit 1 after logging.
+# `ps` prints the file $DOCKER_FAKE_PS when set, else `[]`.
+# `volume ls` prints the file $DOCKER_FAKE_VOLUMES when set, else nothing.
+# `up`, `down`, `rm` and `volume rm` exit 0 after logging.
 
-fixtures="${DOCKER_FAKE_FIXTURES:?DOCKER_FAKE_FIXTURES is not set}"
 mode=""
 first_file=""
 previous=""
@@ -24,6 +36,51 @@ for argument in "$@"; do
   esac
   previous="$argument"
 done
+
+subcommand=""
+if [ "${1:-}" = "volume" ]; then
+  subcommand="volume ${2:-}"
+else
+  previous=""
+  for argument in "$@"; do
+    case "$previous" in
+      -p | -f) ;;
+      *)
+        case "$argument" in
+          up | down | rm | ps | config)
+            subcommand="$argument"
+            break
+            ;;
+        esac
+        ;;
+    esac
+    previous="$argument"
+  done
+fi
+
+if [ "$subcommand" != "config" ] && [ -n "${DOCKER_FAKE_LOG:-}" ]; then
+  echo "COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-} $*" >>"$DOCKER_FAKE_LOG"
+fi
+
+for failing_command in ${DOCKER_FAKE_FAIL_COMMANDS:-}; do
+  if [ "$failing_command" = "$subcommand" ]; then
+    exit 1
+  fi
+done
+
+case "$subcommand" in
+  up | down | rm | "volume rm") exit 0 ;;
+  ps)
+    if [ -n "${DOCKER_FAKE_PS:-}" ]; then cat "$DOCKER_FAKE_PS"; else echo "[]"; fi
+    exit 0
+    ;;
+  "volume ls")
+    if [ -n "${DOCKER_FAKE_VOLUMES:-}" ]; then cat "$DOCKER_FAKE_VOLUMES"; fi
+    exit 0
+    ;;
+esac
+
+fixtures="${DOCKER_FAKE_FIXTURES:?DOCKER_FAKE_FIXTURES is not set}"
 
 for failing_file in ${DOCKER_FAKE_FAIL:-}; do
   if [ "$failing_file" = "$first_file" ]; then

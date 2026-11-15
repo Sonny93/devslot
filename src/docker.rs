@@ -101,10 +101,7 @@ pub struct DockerCompose {
 impl DockerCompose {
     /// Uses `$DEVSLOT_DOCKER`, else `docker`, with the standard timeout.
     pub fn from_environment(working_directory: &Path) -> Self {
-        let program = std::env::var_os(DOCKER_PROGRAM_VARIABLE)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| OsString::from(DEFAULT_DOCKER_PROGRAM));
-        Self::new(program, working_directory, DOCKER_TIMEOUT)
+        Self::new(docker_program(), working_directory, DOCKER_TIMEOUT)
     }
 
     /// Uses `program` with an explicit timeout.
@@ -185,6 +182,13 @@ impl ComposeCli for DockerCompose {
     }
 }
 
+/// `$DEVSLOT_DOCKER` when set and not empty, else `docker`.
+pub(crate) fn docker_program() -> OsString {
+    std::env::var_os(DOCKER_PROGRAM_VARIABLE)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OsString::from(DEFAULT_DOCKER_PROGRAM))
+}
+
 fn passed_environment() -> Vec<(OsString, OsString)> {
     std::env::vars_os()
         .filter(|(name, _)| is_passed_variable(name))
@@ -198,12 +202,12 @@ fn is_passed_variable(name: &OsStr) -> bool {
     PASSED_VARIABLES.contains(&name) || name.starts_with(DOCKER_VARIABLE_PREFIX)
 }
 
-struct FinishedCall {
-    success: bool,
-    stdout: String,
+pub(crate) struct FinishedCall {
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
 }
 
-fn run_with_timeout(
+pub(crate) fn run_with_timeout(
     mut command: Command,
     timeout: Duration,
     program: &str,

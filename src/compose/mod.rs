@@ -3,5 +3,6 @@
 
 pub mod model;
 pub mod probe;
+pub mod runner;
 pub mod selection;
 pub mod sentinels;
