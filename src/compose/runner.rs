@@ -11,13 +11,15 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::docker::{DockerError, docker_program, run_with_timeout};
+use crate::process::spawn_with_retry;
 
 const COMPOSE_VARIABLE_PREFIX: &str = "COMPOSE_";
 const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
 const COMPOSE_VOLUME_LABEL: &str = "com.docker.compose.volume";
 const UP_WAIT_TIMEOUT_SECONDS: &str = "120";
 const CONTAINERS_TIMEOUT: Duration = Duration::from_secs(5);
-const VOLUMES_TIMEOUT: Duration = Duration::from_secs(30);
+const LISTING_TIMEOUT: Duration = Duration::from_secs(30);
+const MODEL_TIMEOUT: Duration = Duration::from_secs(30);
 const NOT_PUBLISHED: u16 = 0;
 
 /// Why a command that acts on an instance did not complete. No message quotes
@@ -93,8 +95,10 @@ pub trait ComposeRunner {
     /// `down`: removes the containers and networks, keeps the volumes.
     fn down(&self, target: &ComposeTarget) -> Result<(), RunnerError>;
 
-    /// `down -v --remove-orphans`: also deletes the volumes.
-    fn down_removing_volumes(&self, target: &ComposeTarget) -> Result<(), RunnerError>;
+    /// `config --format json` with the environment and folder `up` will use,
+    /// so `.env` is loaded: the model as Compose will really resolve it.
+    /// Nothing Compose prints on stderr is kept.
+    fn resolved_model(&self, target: &ComposeTarget) -> Result<String, RunnerError>;
 
     /// `rm -s -f -v`: stops and removes one service's container and its
     /// anonymous volumes.
@@ -103,15 +107,41 @@ pub trait ComposeRunner {
     /// `ps -a`: every container of the project, stopped ones included.
     fn containers(&self, target: &ComposeTarget) -> Result<Vec<ContainerState>, RunnerError>;
 
-    /// The names of the volumes of `project_name` labelled with `volume_key`.
+    /// The names of the volumes of `project_name`, only those labelled with
+    /// `volume_key` when it is given. Found by label alone: no compose file.
     fn project_volumes(
         &self,
         project_name: &str,
-        volume_key: &str,
+        volume_key: Option<&str>,
     ) -> Result<Vec<String>, RunnerError>;
 
     /// `volume rm`: no call when `names` is empty.
     fn remove_volumes(&self, names: &[String]) -> Result<(), RunnerError>;
+
+    /// The ids of the containers of `project_name`, stopped ones included,
+    /// found by label alone.
+    fn project_containers(&self, project_name: &str) -> Result<Vec<String>, RunnerError>;
+
+    /// `rm -f`: no call when `ids` is empty.
+    fn remove_containers(&self, ids: &[String]) -> Result<(), RunnerError>;
+
+    /// The ids of the networks of `project_name`, found by label alone.
+    fn project_networks(&self, project_name: &str) -> Result<Vec<String>, RunnerError>;
+
+    /// `network rm`: no call when `ids` is empty.
+    fn remove_networks(&self, ids: &[String]) -> Result<(), RunnerError>;
+}
+
+/// Deletes the containers, volumes and networks that carry the compose project
+/// label `project_name`, without reading any compose file, `.env` or folder:
+/// nothing a repository writes can choose what is deleted.
+pub fn delete_project_data(
+    runner: &dyn ComposeRunner,
+    project_name: &str,
+) -> Result<(), RunnerError> {
+    runner.remove_containers(&runner.project_containers(project_name)?)?;
+    runner.remove_volumes(&runner.project_volumes(project_name, None)?)?;
+    runner.remove_networks(&runner.project_networks(project_name)?)
 }
 
 /// The real `docker`.
@@ -119,7 +149,7 @@ pub trait ComposeRunner {
 pub struct DockerRunner {
     program: OsString,
     containers_timeout: Duration,
-    volumes_timeout: Duration,
+    listing_timeout: Duration,
 }
 
 impl DockerRunner {
@@ -133,7 +163,7 @@ impl DockerRunner {
         Self {
             program: program.into(),
             containers_timeout: CONTAINERS_TIMEOUT,
-            volumes_timeout: VOLUMES_TIMEOUT,
+            listing_timeout: LISTING_TIMEOUT,
         }
     }
 
@@ -169,10 +199,12 @@ impl DockerRunner {
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
-        let status = command.status().map_err(|error| RunnerError::Unavailable {
-            program: self.program_name(),
-            reason: error.to_string(),
-        })?;
+        let status = spawn_with_retry(&mut command)
+            .and_then(|mut child| child.wait())
+            .map_err(|error| RunnerError::Unavailable {
+                program: self.program_name(),
+                reason: error.to_string(),
+            })?;
         if status.success() {
             return Ok(());
         }
@@ -238,9 +270,9 @@ impl ComposeRunner for DockerRunner {
         self.run_visible(self.compose_command(target, &["down"]), "down")
     }
 
-    fn down_removing_volumes(&self, target: &ComposeTarget) -> Result<(), RunnerError> {
-        let command = self.compose_command(target, &["down", "-v", "--remove-orphans"]);
-        self.run_visible(command, "down")
+    fn resolved_model(&self, target: &ComposeTarget) -> Result<String, RunnerError> {
+        let command = self.compose_command(target, &["config", "--format", "json"]);
+        self.run_captured(command, MODEL_TIMEOUT, "config")
     }
 
     fn remove_service(&self, target: &ComposeTarget, service: &str) -> Result<(), RunnerError> {
@@ -257,30 +289,77 @@ impl ComposeRunner for DockerRunner {
     fn project_volumes(
         &self,
         project_name: &str,
-        volume_key: &str,
+        volume_key: Option<&str>,
     ) -> Result<Vec<String>, RunnerError> {
         let mut command = self.plain_command(&[]);
-        command.args(["volume", "ls", "-q"]).args([
-            "--filter".to_owned(),
-            format!("label={COMPOSE_PROJECT_LABEL}={project_name}"),
-            "--filter".to_owned(),
-            format!("label={COMPOSE_VOLUME_LABEL}={volume_key}"),
-        ]);
-        let text = self.run_captured(command, self.volumes_timeout, "volume ls")?;
-        Ok(text
-            .lines()
-            .map(str::to_owned)
-            .filter(|name| !name.is_empty())
-            .collect())
+        command
+            .args(["volume", "ls", "-q"])
+            .args(["--filter".to_owned(), project_filter(project_name)]);
+        if let Some(key) = volume_key {
+            command.args([
+                "--filter".to_owned(),
+                format!("label={COMPOSE_VOLUME_LABEL}={key}"),
+            ]);
+        }
+        self.list_names(command, "volume ls")
     }
 
     fn remove_volumes(&self, names: &[String]) -> Result<(), RunnerError> {
+        self.remove_all(&["volume", "rm"], names, "volume rm")
+    }
+
+    fn project_containers(&self, project_name: &str) -> Result<Vec<String>, RunnerError> {
+        let mut command = self.plain_command(&[]);
+        command
+            .args(["ps", "-aq"])
+            .args(["--filter".to_owned(), project_filter(project_name)]);
+        self.list_names(command, "ps")
+    }
+
+    fn remove_containers(&self, ids: &[String]) -> Result<(), RunnerError> {
+        self.remove_all(&["rm", "-f", "-v"], ids, "rm")
+    }
+
+    fn project_networks(&self, project_name: &str) -> Result<Vec<String>, RunnerError> {
+        let mut command = self.plain_command(&[]);
+        command
+            .args(["network", "ls", "-q"])
+            .args(["--filter".to_owned(), project_filter(project_name)]);
+        self.list_names(command, "network ls")
+    }
+
+    fn remove_networks(&self, ids: &[String]) -> Result<(), RunnerError> {
+        self.remove_all(&["network", "rm"], ids, "network rm")
+    }
+}
+
+fn project_filter(project_name: &str) -> String {
+    format!("label={COMPOSE_PROJECT_LABEL}={project_name}")
+}
+
+impl DockerRunner {
+    fn list_names(&self, command: Command, name: &'static str) -> Result<Vec<String>, RunnerError> {
+        let text = self.run_captured(command, self.listing_timeout, name)?;
+        Ok(text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn remove_all(
+        &self,
+        base: &[&str],
+        names: &[String],
+        name: &'static str,
+    ) -> Result<(), RunnerError> {
         if names.is_empty() {
             return Ok(());
         }
         let mut command = self.plain_command(&[]);
-        command.args(["volume", "rm"]).args(names);
-        self.run_visible(command, "volume rm")
+        command.args(base).args(names);
+        self.run_visible(command, name)
     }
 }
 
@@ -348,8 +427,8 @@ pub mod testing {
     /// One call the fake received.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct RecordedCall {
-        /// The command name: `up`, `down`, `down -v`, `rm`, `ps`,
-        /// `volume ls` or `volume rm`.
+        /// The command name: `up`, `down`, `config`, `rm`, `ps`, `volume ls`,
+        /// `volume rm`, `docker ps`, `docker rm`, `network ls` or `network rm`.
         pub command: &'static str,
         /// The compose project, empty for `volume rm`.
         pub project: String,
@@ -367,6 +446,9 @@ pub mod testing {
     pub struct FakeComposeRunner {
         containers: Vec<ContainerState>,
         volumes: Vec<String>,
+        project_containers: Vec<String>,
+        networks: Vec<String>,
+        model: Option<String>,
         failing_commands: Vec<&'static str>,
         calls: RefCell<Vec<RecordedCall>>,
     }
@@ -383,6 +465,27 @@ pub mod testing {
         #[must_use]
         pub fn with_volumes(mut self, volumes: Vec<String>) -> Self {
             self.volumes = volumes;
+            self
+        }
+
+        /// Answers `project_containers` with `ids`.
+        #[must_use]
+        pub fn with_project_containers(mut self, ids: Vec<String>) -> Self {
+            self.project_containers = ids;
+            self
+        }
+
+        /// Answers `project_networks` with `ids`.
+        #[must_use]
+        pub fn with_networks(mut self, ids: Vec<String>) -> Self {
+            self.networks = ids;
+            self
+        }
+
+        /// Answers `resolved_model` with `json`.
+        #[must_use]
+        pub fn with_model(mut self, json: &str) -> Self {
+            self.model = Some(json.to_owned());
             self
         }
 
@@ -437,8 +540,9 @@ pub mod testing {
             self.record("down", Some(target), Vec::new())
         }
 
-        fn down_removing_volumes(&self, target: &ComposeTarget) -> Result<(), RunnerError> {
-            self.record("down -v", Some(target), Vec::new())
+        fn resolved_model(&self, target: &ComposeTarget) -> Result<String, RunnerError> {
+            self.record("config", Some(target), Vec::new())?;
+            Ok(self.model.clone().unwrap_or_else(|| "{}".to_owned()))
         }
 
         fn remove_service(&self, target: &ComposeTarget, service: &str) -> Result<(), RunnerError> {
@@ -453,23 +557,60 @@ pub mod testing {
         fn project_volumes(
             &self,
             project_name: &str,
-            volume_key: &str,
+            volume_key: Option<&str>,
         ) -> Result<Vec<String>, RunnerError> {
+            self.record_project("volume ls", project_name, volume_key.map(str::to_owned))?;
+            Ok(self.volumes.clone())
+        }
+
+        fn remove_volumes(&self, names: &[String]) -> Result<(), RunnerError> {
+            self.record_removal("volume rm", names)
+        }
+
+        fn project_containers(&self, project_name: &str) -> Result<Vec<String>, RunnerError> {
+            self.record_project("docker ps", project_name, None)?;
+            Ok(self.project_containers.clone())
+        }
+
+        fn remove_containers(&self, ids: &[String]) -> Result<(), RunnerError> {
+            self.record_removal("docker rm", ids)
+        }
+
+        fn project_networks(&self, project_name: &str) -> Result<Vec<String>, RunnerError> {
+            self.record_project("network ls", project_name, None)?;
+            Ok(self.networks.clone())
+        }
+
+        fn remove_networks(&self, ids: &[String]) -> Result<(), RunnerError> {
+            self.record_removal("network rm", ids)
+        }
+    }
+
+    impl FakeComposeRunner {
+        fn record_project(
+            &self,
+            command: &'static str,
+            project_name: &str,
+            key: Option<String>,
+        ) -> Result<(), RunnerError> {
             let target = ComposeTarget {
                 project_name: project_name.to_owned(),
                 files: Vec::new(),
                 working_directory: PathBuf::new(),
                 environment: Vec::new(),
             };
-            self.record("volume ls", Some(&target), vec![volume_key.to_owned()])?;
-            Ok(self.volumes.clone())
+            self.record(command, Some(&target), key.into_iter().collect())
         }
 
-        fn remove_volumes(&self, names: &[String]) -> Result<(), RunnerError> {
+        fn record_removal(
+            &self,
+            command: &'static str,
+            names: &[String],
+        ) -> Result<(), RunnerError> {
             if names.is_empty() {
                 return Ok(());
             }
-            self.record("volume rm", None, names.to_vec())
+            self.record(command, None, names.to_vec())
         }
     }
 }
@@ -538,14 +679,10 @@ mod tests {
         let target = target(directory.path());
 
         runner.down(&target).unwrap();
-        runner.down_removing_volumes(&target).unwrap();
 
         assert_eq!(
             logged(&log),
-            [
-                "compose -p web-1 -f dev.compose.yml -f o.yml down",
-                "compose -p web-1 -f dev.compose.yml -f o.yml down -v --remove-orphans"
-            ]
+            ["compose -p web-1 -f dev.compose.yml -f o.yml down"]
         );
     }
 
@@ -573,9 +710,9 @@ mod tests {
             ..target(directory.path())
         };
 
-        runner.down_removing_volumes(&target).unwrap();
+        runner.down(&target).unwrap();
 
-        assert_eq!(logged(&log), ["compose -p web-1 down -v --remove-orphans"]);
+        assert_eq!(logged(&log), ["compose -p web-1 down"]);
     }
 
     #[test]
@@ -730,7 +867,7 @@ mod tests {
         let program = script(directory.path(), "printf 'a\\n\\nb\\n'");
 
         let names = DockerRunner::new(program)
-            .project_volumes("web-1", "db")
+            .project_volumes("web-1", Some("db"))
             .unwrap();
 
         assert_eq!(names, ["a", "b"]);
@@ -741,7 +878,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (runner, log) = logging_runner(directory.path());
 
-        runner.project_volumes("web-1", "db").unwrap();
+        runner.project_volumes("web-1", Some("db")).unwrap();
 
         assert_eq!(
             logged(&log),
@@ -749,6 +886,108 @@ mod tests {
                 "volume ls -q --filter label=com.docker.compose.project=web-1 --filter label=com.docker.compose.volume=db"
             ]
         );
+    }
+
+    #[test]
+    fn should_filter_on_the_project_label_alone_when_listing_every_volume() {
+        let directory = tempfile::tempdir().unwrap();
+        let (runner, log) = logging_runner(directory.path());
+
+        runner.project_volumes("web-1", None).unwrap();
+
+        assert_eq!(
+            logged(&log),
+            ["volume ls -q --filter label=com.docker.compose.project=web-1"]
+        );
+    }
+
+    #[test]
+    fn should_list_and_remove_containers_and_networks_by_label_without_compose() {
+        let directory = tempfile::tempdir().unwrap();
+        let (runner, log) = logging_runner(directory.path());
+
+        runner.project_containers("web-1").unwrap();
+        runner
+            .remove_containers(&["c1".to_owned(), "c2".to_owned()])
+            .unwrap();
+        runner.project_networks("web-1").unwrap();
+        runner.remove_networks(&["n1".to_owned()]).unwrap();
+
+        assert_eq!(
+            logged(&log),
+            [
+                "ps -aq --filter label=com.docker.compose.project=web-1",
+                "rm -f -v c1 c2",
+                "network ls -q --filter label=com.docker.compose.project=web-1",
+                "network rm n1"
+            ]
+        );
+    }
+
+    #[test]
+    fn should_not_call_docker_when_there_is_no_container_or_network_to_remove() {
+        let directory = tempfile::tempdir().unwrap();
+        let (runner, log) = logging_runner(directory.path());
+
+        runner.remove_containers(&[]).unwrap();
+        runner.remove_networks(&[]).unwrap();
+
+        assert_eq!(logged(&log), Vec::<String>::new());
+    }
+
+    #[test]
+    fn should_ask_for_the_resolved_model_with_the_files_and_keep_nothing_of_stderr() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = script(directory.path(), "echo FAKE-SECRET >&2; echo \"$*\"");
+
+        let model = DockerRunner::new(program)
+            .resolved_model(&target(directory.path()))
+            .unwrap();
+
+        assert_eq!(
+            model.trim(),
+            "compose -p web-1 -f dev.compose.yml -f o.yml config --format json"
+        );
+    }
+
+    #[test]
+    fn should_delete_the_containers_then_the_volumes_then_the_networks_of_a_project() {
+        use testing::FakeComposeRunner;
+
+        let fake = FakeComposeRunner::default()
+            .with_project_containers(vec!["c1".to_owned()])
+            .with_volumes(vec!["v1".to_owned()])
+            .with_networks(vec!["n1".to_owned()]);
+
+        delete_project_data(&fake, "web-1").unwrap();
+
+        let calls = fake.calls();
+        let steps: Vec<(&str, Vec<String>)> = calls
+            .iter()
+            .map(|call| (call.command, call.services.clone()))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("docker ps", vec![]),
+                ("docker rm", vec!["c1".to_owned()]),
+                ("volume ls", vec![]),
+                ("volume rm", vec!["v1".to_owned()]),
+                ("network ls", vec![]),
+                ("network rm", vec!["n1".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn should_remove_nothing_when_the_project_has_no_container_volume_or_network() {
+        use testing::FakeComposeRunner;
+
+        let fake = FakeComposeRunner::default();
+
+        delete_project_data(&fake, "web-1").unwrap();
+
+        assert_eq!(fake.calls().len(), 3);
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub const TEST_SLOTS: &str = "[slots]\nfirst_port = 14000\nlast_port = 14999\nsi
 pub struct Machine {
     config_home: tempfile::TempDir,
     state_home: tempfile::TempDir,
+    scratch: tempfile::TempDir,
 }
 
 impl Machine {
@@ -26,7 +27,37 @@ impl Machine {
         Arc::new(Self {
             config_home: tempfile::tempdir().unwrap(),
             state_home: tempfile::tempdir().unwrap(),
+            scratch: tempfile::tempdir().unwrap(),
         })
+    }
+
+    pub fn state_directory(&self) -> PathBuf {
+        self.state_home.path().join("devslot")
+    }
+
+    /// The file the fake docker logs its calls to.
+    pub fn docker_log_path(&self) -> PathBuf {
+        self.scratch.path().join("docker.log")
+    }
+
+    /// The calls the fake docker logged so far, one line each.
+    pub fn docker_log(&self) -> Vec<String> {
+        std::fs::read_to_string(self.docker_log_path())
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    pub fn clear_docker_log(&self) {
+        let _ = std::fs::remove_file(self.docker_log_path());
+    }
+
+    /// Writes a file the fake docker can be pointed at, returns its path.
+    pub fn write_scratch(&self, name: &str, content: &str) -> PathBuf {
+        let path = self.scratch.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        path
     }
 
     pub fn with_test_slots() -> Arc<Self> {
@@ -56,6 +87,7 @@ impl Machine {
 
 pub struct Project {
     directory: tempfile::TempDir,
+    root: PathBuf,
     scenario: &'static str,
     machine: Arc<Machine>,
 }
@@ -78,6 +110,7 @@ impl Project {
             directory.path(),
         );
         let project = Self {
+            root: directory.path().to_path_buf(),
             directory,
             scenario,
             machine: Arc::clone(machine),
@@ -87,8 +120,10 @@ impl Project {
     }
 
     pub fn empty() -> Self {
+        let directory = tempfile::tempdir().unwrap();
         Self {
-            directory: tempfile::tempdir().unwrap(),
+            root: directory.path().to_path_buf(),
+            directory,
             scenario: "template",
             machine: Machine::with_test_slots(),
         }
@@ -99,7 +134,27 @@ impl Project {
     }
 
     pub fn path(&self) -> &Path {
-        self.directory.path()
+        &self.root
+    }
+
+    pub fn read(&self, relative: &str) -> String {
+        std::fs::read_to_string(self.path().join(relative)).unwrap()
+    }
+
+    pub fn exists(&self, relative: &str) -> bool {
+        self.path().join(relative).exists()
+    }
+
+    pub fn remove(&self, relative: &str) {
+        std::fs::remove_file(self.path().join(relative)).unwrap();
+    }
+
+    /// The modification time of a file of the project.
+    pub fn modified(&self, relative: &str) -> std::time::SystemTime {
+        std::fs::metadata(self.path().join(relative))
+            .unwrap()
+            .modified()
+            .unwrap()
     }
 
     pub fn write(&self, relative: &str, content: &str) {
@@ -118,7 +173,63 @@ impl Project {
         assert!(status.success());
     }
 
+    /// Runs `git` in the project without the user's git configuration.
+    pub fn git(&self, arguments: &[&str]) {
+        let status = Command::new("git")
+            .args(arguments)
+            .current_dir(self.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {arguments:?}");
+    }
+
+    /// Initialises git, then commits every file git does not ignore.
+    pub fn initialize_git_and_commit(&self, gitignore: &str) {
+        self.initialize_git(gitignore);
+        self.git(&["add", "-A"]);
+        self.git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--no-verify",
+            "-m",
+            "initial",
+        ]);
+    }
+
+    /// A linked worktree of this project, on a new branch, in its own folder.
+    /// The project needs a commit.
+    pub fn add_worktree(&self, branch: &str) -> Project {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("worktree");
+        self.git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            root.to_str().unwrap(),
+        ]);
+        Project {
+            root: root.canonicalize().unwrap(),
+            directory,
+            scenario: self.scenario,
+            machine: Arc::clone(&self.machine),
+        }
+    }
+
     pub fn doctor(&self, arguments: &[&str]) -> Run {
+        self.run_with(arguments, &[])
+    }
+
+    pub fn run(&self, arguments: &[&str]) -> Run {
         self.run_with(arguments, &[])
     }
 
@@ -128,6 +239,7 @@ impl Project {
             .args(arguments)
             .current_dir(self.path())
             .env("DEVSLOT_DOCKER", FAKE_DOCKER)
+            .env("DOCKER_FAKE_LOG", self.machine.docker_log_path())
             .env("XDG_CONFIG_HOME", self.machine.config_home.path())
             .env("XDG_STATE_HOME", self.machine.state_home.path())
             .env(

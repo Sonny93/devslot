@@ -243,7 +243,8 @@ pub fn effective_write_enabled(project: &ProjectConfig, global: &GlobalConfig) -
     project.write_enabled.unwrap_or(global.write_enabled)
 }
 
-fn home_from_environment() -> Option<PathBuf> {
+/// The `HOME` directory when the variable holds an absolute path.
+pub fn home_from_environment() -> Option<PathBuf> {
     std::env::var_os(HOME_VARIABLE)
         .map(PathBuf::from)
         .filter(|home| home.is_absolute())

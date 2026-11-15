@@ -2,6 +2,7 @@
 //! current checkout, and the environment of a registered instance.
 
 use crate::checkout::Checkout;
+use crate::compose::runner::ComposeTarget;
 use crate::compose::selection::select_dev_compose;
 use crate::environment::{InstanceEnvironment, build_environment, compose_file_paths};
 use crate::error::ToolError;
@@ -69,4 +70,44 @@ fn build_for(
         compose_files.as_deref(),
         &settings,
     )?)
+}
+
+/// What the commands that act on a registered instance need.
+pub struct InstanceContext {
+    /// The merged project configuration.
+    pub config: ProjectConfig,
+    /// The environment of the instance, `[env]` values included.
+    pub environment: InstanceEnvironment,
+    /// The compose project the Docker commands act on.
+    pub target: ComposeTarget,
+    /// Whether the checkout has a dev compose file.
+    pub has_compose_file: bool,
+}
+
+/// Loads the configuration of `checkout` and builds the Docker target and the
+/// environment of `instance`.
+pub fn load_instance_context(
+    checkout: &Checkout,
+    instance: &InstanceRecord,
+) -> Result<InstanceContext, ToolError> {
+    let config = ProjectConfig::load(&checkout.root)?;
+    let selection = select_dev_compose(&checkout.root, config.compose_file.as_deref());
+    let compose_files = compose_file_paths(&checkout.root, &selection);
+    let environment = build_environment(instance, compose_files.as_deref(), &config.env)?;
+    let target = ComposeTarget {
+        project_name: instance.name.clone(),
+        files: compose_files.clone().unwrap_or_default(),
+        working_directory: checkout.root.clone(),
+        environment: environment
+            .variables
+            .iter()
+            .map(|variable| (variable.name.clone(), variable.value.clone()))
+            .collect(),
+    };
+    Ok(InstanceContext {
+        config,
+        environment,
+        target,
+        has_compose_file: compose_files.is_some(),
+    })
 }

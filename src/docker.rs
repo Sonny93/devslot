@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::process::{kill_process_group, next_poll_delay, spawn_with_retry};
+
 /// The compose project name every probe uses, so implicit volume and network
 /// names come out as `devslot-probe_<key>`.
 pub const PROBE_PROJECT: &str = "devslot-probe";
@@ -25,7 +27,6 @@ const EMPTY_ENV_FILE: &str = "/dev/null";
 const ALL_PROFILES: &str = "*";
 const DOCKER_VARIABLE_PREFIX: &str = "DOCKER_";
 const PASSED_VARIABLES: [&str; 2] = ["PATH", "HOME"];
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// How long a docker call may run.
 pub const DOCKER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -216,16 +217,21 @@ pub(crate) fn run_with_timeout(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = command.spawn().map_err(|error| DockerError::Unavailable {
+    let mut child = spawn_with_retry(&mut command).map_err(|error| DockerError::Unavailable {
         program: program.to_owned(),
         reason: error.to_string(),
     })?;
     let stdout_reader = spawn_reader(child.stdout.take());
     let started = Instant::now();
+    let mut delay = None;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < timeout => thread::sleep(POLL_INTERVAL),
+            Ok(None) if started.elapsed() < timeout => {
+                let next = next_poll_delay(delay);
+                thread::sleep(next);
+                delay = Some(next);
+            }
             Ok(None) => {
                 kill_process_group(&child);
                 let _ = child.wait();
@@ -246,11 +252,6 @@ pub(crate) fn run_with_timeout(
         success: status.success(),
         stdout: join_reader(stdout_reader),
     })
-}
-
-fn kill_process_group(child: &std::process::Child) {
-    let group = rustix::process::Pid::from_child(child);
-    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
 }
 
 fn spawn_reader<R: Read + Send + 'static>(stream: Option<R>) -> thread::JoinHandle<String> {

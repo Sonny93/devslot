@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::checks::finding::{Finding, Summary};
 use crate::discovery::{ManagedPort, PortKind};
+use crate::services_state::ServicesState;
 
 /// The version of the `--json` contract.
 pub const REPORT_VERSION: u8 = 1;
@@ -49,6 +50,16 @@ pub struct InfoPort {
     /// The container port behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<u16>,
+    /// Where a web port can be opened; absent for a service port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl InfoPort {
+    /// The URL of a web port on this machine.
+    pub fn url_of(port: u16) -> String {
+        format!("http://localhost:{port}")
+    }
 }
 
 /// What `ds info` knows about a registered checkout.
@@ -72,6 +83,8 @@ pub struct RegisteredInfo {
     pub compose_file_origin: Option<String>,
     /// The ports of the instance.
     pub ports: Vec<InfoPort>,
+    /// Whether the compose services are up.
+    pub services: ServicesState,
 }
 
 /// What `ds info` says about a checkout that is not registered.
@@ -83,6 +96,8 @@ pub struct UnregisteredInfo {
     pub registered: bool,
     /// The checkout root.
     pub path: String,
+    /// Whether `ds rm` opted the checkout out of automatic registration.
+    pub opted_out: bool,
 }
 
 /// The answer of `ds info`.

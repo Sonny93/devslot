@@ -16,8 +16,9 @@ pub struct EnvCheckInput<'a> {
     pub example: &'a EnvRead,
     /// What reading `.env.test` gave.
     pub test: &'a EnvRead,
-    /// Whether the main checkout has a `.env` to copy.
-    pub main_checkout_has_env: bool,
+    /// Whether `.env` could be created: the main checkout's `.env`, or a
+    /// `.env.example` that is not a symbolic link.
+    pub has_creation_source: bool,
     /// Whether git ignores `.env`; `None` outside git.
     pub is_env_ignored: Option<bool>,
     /// The managed port variables.
@@ -64,8 +65,7 @@ fn check_readable(file: &str, read: &EnvRead) -> Option<Finding> {
 }
 
 fn check_env_exists(input: &EnvCheckInput<'_>) -> Option<Finding> {
-    let has_source = input.main_checkout_has_env || *input.example != EnvRead::Missing;
-    if *input.env != EnvRead::Missing || has_source {
+    if *input.env != EnvRead::Missing || input.has_creation_source {
         return None;
     }
     Some(
@@ -190,7 +190,7 @@ mod tests {
         env: EnvRead,
         example: EnvRead,
         test: EnvRead,
-        main_checkout_has_env: bool,
+        has_creation_source: bool,
         is_env_ignored: Option<bool>,
         managed: Vec<ManagedPort>,
         env_config_keys: Vec<String>,
@@ -202,7 +202,7 @@ mod tests {
                 env: parsed_env("PORT=3333\n"),
                 example: EnvRead::Missing,
                 test: EnvRead::Missing,
-                main_checkout_has_env: false,
+                has_creation_source: false,
                 is_env_ignored: Some(true),
                 managed: vec![managed_port("PORT", 3333), managed_port("DB_PORT", 5432)],
                 env_config_keys: vec![],
@@ -214,7 +214,7 @@ mod tests {
                 env: &self.env,
                 example: &self.example,
                 test: &self.test,
-                main_checkout_has_env: self.main_checkout_has_env,
+                has_creation_source: self.has_creation_source,
                 is_env_ignored: self.is_env_ignored,
                 managed: &self.managed,
                 env_config_keys: &self.env_config_keys,
@@ -242,10 +242,11 @@ mod tests {
     }
 
     #[test]
-    fn should_not_report_a_missing_env_when_an_example_exists() {
+    fn should_not_report_a_missing_env_when_a_creation_source_exists() {
         let scenario = Scenario {
             env: EnvRead::Missing,
             example: parsed_env("PORT=3333\n"),
+            has_creation_source: true,
             ..Scenario::healthy()
         };
 
@@ -253,10 +254,22 @@ mod tests {
     }
 
     #[test]
+    fn should_report_a_missing_env_when_an_example_exists_but_is_not_a_creation_source() {
+        let scenario = Scenario {
+            env: EnvRead::Missing,
+            example: parsed_env("PORT=3333\n"),
+            has_creation_source: false,
+            ..Scenario::healthy()
+        };
+
+        assert_eq!(checks_of(&scenario.findings()), vec![Check::EnvMissing]);
+    }
+
+    #[test]
     fn should_not_report_a_missing_env_when_the_main_checkout_has_one() {
         let scenario = Scenario {
             env: EnvRead::Missing,
-            main_checkout_has_env: true,
+            has_creation_source: true,
             ..Scenario::healthy()
         };
 

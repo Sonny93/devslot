@@ -5,7 +5,9 @@ use std::io;
 use thiserror::Error;
 
 use crate::checkout::CheckoutError;
+use crate::compose::runner::RunnerError;
 use crate::docker::DockerError;
+use crate::env_sync::EnvSyncError;
 use crate::environment::EnvironmentError;
 use crate::global_config::GlobalConfigError;
 use crate::paths::PathsError;
@@ -39,6 +41,12 @@ pub enum ToolError {
     /// Docker is unavailable, timed out or answered nonsense.
     #[error(transparent)]
     Docker(#[from] DockerError),
+    /// A Docker command that acts on an instance could not run to its end.
+    #[error(transparent)]
+    Runner(#[from] RunnerError),
+    /// `.env` cannot be created or rewritten.
+    #[error(transparent)]
+    EnvSync(#[from] EnvSyncError),
     /// A project file exists but cannot be read.
     #[error("cannot read {file}: {source}")]
     ReadFile {

@@ -51,6 +51,8 @@ pub enum Check {
     EnvUnreadable,
     /// A malformed devslot block.
     EnvBlockMalformed,
+    /// The block cannot be written with the current configuration.
+    EnvBlockUnwritable,
     /// `.env.test` redefining a managed variable.
     EnvTestRedefines,
     /// A value that hardcodes the default port of a managed variable.

@@ -128,15 +128,21 @@ fn should_keep_the_same_ports_when_run_a_second_time() {
 }
 
 #[test]
-fn should_write_nothing_in_the_project_when_running() {
+fn should_write_only_the_devslot_block_in_the_project_when_running_and_nothing_when_reading() {
     let project = Project::from_scenario("template");
     let before = files_under(project.path());
 
     project.run_with(&["run", "--", "true"], &[]);
+    let after_run = files_under(project.path());
     project.run_with(&["env"], &[]);
     project.run_with(&["info"], &[]);
 
-    assert_eq!(files_under(project.path()), before);
+    let changed: Vec<&String> = after_run
+        .keys()
+        .filter(|name| before.get(*name) != after_run.get(*name))
+        .collect();
+    assert_eq!(changed, [".env"]);
+    assert_eq!(files_under(project.path()), after_run);
 }
 
 #[test]

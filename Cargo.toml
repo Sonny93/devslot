@@ -26,7 +26,7 @@ thiserror = "2"
 toml_edit = { version = "0.25", features = ["serde"] }
 
 [target."cfg(unix)".dependencies]
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
 pretty_assertions = "1"

@@ -5,8 +5,10 @@ use std::ffi::OsString;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use super::exit_code::{
-    describe_doctor_exit_codes, describe_env_exit_codes, describe_exit_codes,
-    describe_info_exit_codes, describe_run_exit_codes,
+    describe_doctor_exit_codes, describe_down_exit_codes, describe_ensure_exit_codes,
+    describe_env_exit_codes, describe_exit_codes, describe_info_exit_codes,
+    describe_prune_exit_codes, describe_reset_exit_codes, describe_rm_exit_codes,
+    describe_run_exit_codes, describe_up_exit_codes,
 };
 use super::style::ColorChoice;
 
@@ -55,6 +57,36 @@ fn run_help() -> String {
     )
 }
 
+fn up_help() -> String {
+    help_with(
+        &describe_up_exit_codes(),
+        &[NO_COLOR_HELP, DOCKER_HELP, XDG_HELP],
+    )
+}
+
+fn ensure_help() -> String {
+    help_with(
+        &describe_ensure_exit_codes(),
+        &[NO_COLOR_HELP, DOCKER_HELP, XDG_HELP],
+    )
+}
+
+fn down_help() -> String {
+    help_with(&describe_down_exit_codes(), &[DOCKER_HELP, XDG_HELP])
+}
+
+fn reset_help() -> String {
+    help_with(&describe_reset_exit_codes(), &[DOCKER_HELP, XDG_HELP])
+}
+
+fn rm_help() -> String {
+    help_with(&describe_rm_exit_codes(), &[DOCKER_HELP, XDG_HELP])
+}
+
+fn prune_help() -> String {
+    help_with(&describe_prune_exit_codes(), &[DOCKER_HELP, XDG_HELP])
+}
+
 /// The `ds` command line.
 #[derive(Debug, Parser)]
 #[command(name = "ds", version, about = "Run several instances of the same dev stack on one machine", after_help = top_level_help())]
@@ -74,15 +106,49 @@ pub enum Command {
     /// Review the project without starting or writing anything
     #[command(after_help = doctor_help())]
     Doctor(DoctorArguments),
+    /// Stop the services of this checkout's instance, keeping its data
+    #[command(after_help = down_help())]
+    Down,
+    /// Register this checkout and write its .env block if needed, without starting anything
+    #[command(after_help = ensure_help())]
+    Ensure,
     /// Print the environment of this checkout's instance
     #[command(after_help = env_help())]
     Env(EnvArguments),
-    /// Show the name, slot and ports of this checkout's instance
+    /// Show the name, slot, ports and services state of this checkout's instance
     #[command(after_help = info_help())]
     Info(InfoArguments),
+    /// Delete the containers and volumes of gone checkouts and forget them
+    #[command(after_help = prune_help())]
+    Prune(ConfirmationArguments),
+    /// Delete the data of this checkout's instance (or of one service) and start it again
+    #[command(after_help = reset_help())]
+    Reset(ResetArguments),
+    /// Delete the instance's data, remove the .env block and opt the checkout out
+    #[command(after_help = rm_help())]
+    Rm(ConfirmationArguments),
     /// Register this checkout if needed and run a command with the instance environment
     #[command(after_help = run_help())]
     Run(RunArguments),
+    /// Register this checkout if needed, start its services, then run the run key
+    #[command(after_help = up_help())]
+    Up,
+}
+
+/// The options of the commands that delete data after asking.
+#[derive(Debug, Args)]
+pub struct ConfirmationArguments {
+    /// Do not ask for confirmation
+    #[arg(long)]
+    pub yes: bool,
+}
+
+/// The arguments of `ds reset`.
+#[derive(Debug, Args)]
+pub struct ResetArguments {
+    /// The compose service to reset; every service when omitted
+    #[arg(value_name = "SERVICE")]
+    pub service: Option<String>,
 }
 
 /// How `ds env` prints the environment.
@@ -198,6 +264,53 @@ mod tests {
             cli.command,
             Command::Info(InfoArguments { json: true })
         ));
+    }
+
+    #[test]
+    fn should_parse_rm_with_yes_when_the_flag_is_given() {
+        let cli = Cli::try_parse_from(["ds", "rm", "--yes"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Rm(ConfirmationArguments { yes: true })
+        ));
+    }
+
+    #[test]
+    fn should_ask_by_default_when_prune_has_no_flag() {
+        let cli = Cli::try_parse_from(["ds", "prune"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Prune(ConfirmationArguments { yes: false })
+        ));
+    }
+
+    #[test]
+    fn should_parse_the_service_when_reset_names_one() {
+        let cli = Cli::try_parse_from(["ds", "reset", "postgres"]).unwrap();
+
+        let Command::Reset(arguments) = cli.command else {
+            panic!("expected reset");
+        };
+        assert_eq!(arguments.service.as_deref(), Some("postgres"));
+    }
+
+    #[test]
+    fn should_reset_everything_when_no_service_is_named() {
+        let cli = Cli::try_parse_from(["ds", "reset"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Reset(ResetArguments { service: None })
+        ));
+    }
+
+    #[test]
+    fn should_parse_the_commands_without_arguments() {
+        for name in ["up", "down", "ensure"] {
+            assert!(Cli::try_parse_from(["ds", name]).is_ok(), "{name}");
+        }
     }
 
     #[test]

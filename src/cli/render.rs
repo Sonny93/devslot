@@ -5,7 +5,7 @@ use std::fmt::Write;
 use super::style::{Style, Tone};
 use crate::checks::finding::{Finding, Level};
 use crate::discovery::ManagedPort;
-use crate::report::{DoctorReport, InfoReport, RegisteredInfo};
+use crate::report::{DoctorReport, InfoReport, RegisteredInfo, UnregisteredInfo};
 
 const LEVEL_WORD_WIDTH: usize = 7;
 const NO_VALUE: &str = "-";
@@ -54,9 +54,12 @@ fn render_ports(ports: &[ManagedPort]) -> String {
     render_table(header, ports.iter().map(port_row).collect())
 }
 
-fn render_table(header: [String; 4], body: Vec<[String; 4]>) -> String {
-    let rows: Vec<[String; 4]> = std::iter::once(header).chain(body).collect();
-    let widths: [usize; 4] =
+fn render_table<const COLUMNS: usize>(
+    header: [String; COLUMNS],
+    body: Vec<[String; COLUMNS]>,
+) -> String {
+    let rows: Vec<[String; COLUMNS]> = std::iter::once(header).chain(body).collect();
+    let widths: [usize; COLUMNS] =
         std::array::from_fn(|column| rows.iter().map(|row| row[column].len()).max().unwrap_or(0));
     let mut output = String::new();
     for row in &rows {
@@ -101,11 +104,21 @@ fn render_finding(finding: &Finding, style: Style) -> String {
 pub fn render_info_text(report: &InfoReport) -> String {
     match report {
         InfoReport::Registered(info) => render_registered_info(info),
-        InfoReport::Unregistered(info) => format!(
-            "Path:          {}\nThis checkout is not registered. Run ds up to register it.\n",
-            info.path
-        ),
+        InfoReport::Unregistered(info) => render_unregistered_info(info),
     }
+}
+
+fn render_unregistered_info(info: &UnregisteredInfo) -> String {
+    if info.opted_out {
+        return format!(
+            "Path:          {}\nThis checkout is opted out by ds rm; ds up or ds run registers it again.\n",
+            info.path
+        );
+    }
+    format!(
+        "Path:          {}\nThis checkout is not registered. Run ds up to register it.\n",
+        info.path
+    )
 }
 
 fn render_registered_info(info: &RegisteredInfo) -> String {
@@ -123,6 +136,7 @@ fn render_registered_info(info: &RegisteredInfo) -> String {
         info.slot, info.range[0], info.range[1]
     );
     let _ = writeln!(output, "Compose file:  {compose}");
+    let _ = writeln!(output, "Services:      {}", info.services.word());
     output.push_str("\nPorts\n");
     output.push_str(&render_info_ports(info));
     output
@@ -132,7 +146,7 @@ fn render_info_ports(info: &RegisteredInfo) -> String {
     if info.ports.is_empty() {
         return "  none\n".to_owned();
     }
-    let header = ["VARIABLE", "PORT", "KIND", "SERVICE"].map(str::to_owned);
+    let header = ["VARIABLE", "PORT", "KIND", "SERVICE", "URL"].map(str::to_owned);
     let rows = info
         .ports
         .iter()
@@ -147,6 +161,7 @@ fn render_info_ports(info: &RegisteredInfo) -> String {
                 port.port.to_string(),
                 port.kind.word().to_owned(),
                 target,
+                port.url.clone().unwrap_or_else(|| NO_VALUE.to_owned()),
             ]
         })
         .collect();
@@ -160,6 +175,7 @@ mod tests {
     use super::*;
     use crate::checks::finding::{Check, Summary};
     use crate::discovery::{PortKind, PortSource};
+    use crate::services_state::ServicesState;
 
     fn plain() -> Style {
         Style { color: false }
@@ -246,6 +262,7 @@ mod tests {
                     kind: PortKind::Web,
                     service: None,
                     target: None,
+                    url: Some("http://localhost:20050".to_owned()),
                 },
                 crate::report::InfoPort {
                     variable: "DB_PORT".to_owned(),
@@ -253,8 +270,10 @@ mod tests {
                     kind: PortKind::Service,
                     service: Some("postgres".to_owned()),
                     target: Some(5432),
+                    url: None,
                 },
             ],
+            services: ServicesState::Running,
         }
     }
 
@@ -268,11 +287,12 @@ mod tests {
              Path:          /work/app\n\
              Slot:          1 (20050-20099)\n\
              Compose file:  dev.compose.yml (detected)\n\
+             Services:      running\n\
              \n\
              Ports\n\
-             \x20 VARIABLE  PORT   KIND     SERVICE\n\
-             \x20 PORT      20050  web      -\n\
-             \x20 DB_PORT   20052  service  postgres:5432\n"
+             \x20 VARIABLE  PORT   KIND     SERVICE        URL\n\
+             \x20 PORT      20050  web      -              http://localhost:20050\n\
+             \x20 DB_PORT   20052  service  postgres:5432  -\n"
         );
     }
 
@@ -295,12 +315,25 @@ mod tests {
             version: 1,
             registered: false,
             path: "/work/app".to_owned(),
+            opted_out: false,
         }));
 
         assert_eq!(
             text,
             "Path:          /work/app\nThis checkout is not registered. Run ds up to register it.\n"
         );
+    }
+
+    #[test]
+    fn should_say_the_checkout_is_opted_out_when_ds_rm_opted_it_out() {
+        let text = render_info_text(&InfoReport::Unregistered(crate::report::UnregisteredInfo {
+            version: 1,
+            registered: false,
+            path: "/work/app".to_owned(),
+            opted_out: true,
+        }));
+
+        assert!(text.contains("opted out by ds rm; ds up or ds run registers it again"));
     }
 
     #[test]

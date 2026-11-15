@@ -1,6 +1,6 @@
 //! `ds doctor`: checkout, config, discovery and checks, without writing anything.
 
-use crate::analysis::{CheckoutAnalysis, DOTENV_FILE, ProbeScope, selection_findings};
+use crate::analysis::{CheckoutAnalysis, ProbeScope, selection_findings};
 use crate::checkout::Checkout;
 use crate::checks::env::{EnvCheckInput, check_env};
 use crate::checks::env_config::check_forced_port_conflicts;
@@ -13,6 +13,7 @@ use crate::cli::render::render_text;
 use crate::cli::style::{ColorChoice, Style};
 use crate::commands::machine::{Machine, locate_checkout};
 use crate::docker::{ComposeCli, DockerCompose};
+use crate::env_sync::has_creation_source;
 use crate::error::ToolError;
 use crate::global_config::GlobalConfig;
 use crate::registry::record::Registry;
@@ -96,18 +97,11 @@ fn env_findings(
         env: &analysis.env_files.env,
         example: &analysis.env_files.example,
         test: &analysis.env_files.test,
-        main_checkout_has_env: main_checkout_has_env(checkout),
+        has_creation_source: has_creation_source(checkout),
         is_env_ignored,
         managed: &analysis.ports,
         env_config_keys: &analysis.config.env_keys(),
     }))
-}
-
-fn main_checkout_has_env(checkout: &Checkout) -> bool {
-    checkout
-        .main_root
-        .as_ref()
-        .is_some_and(|main| main.join(DOTENV_FILE).is_file())
 }
 
 #[cfg(test)]

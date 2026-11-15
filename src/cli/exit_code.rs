@@ -27,7 +27,7 @@ pub fn describe_exit_codes() -> String {
         (SUCCESS, "success"),
         (
             ERROR,
-            "error (doctor: at least one error was found; env: checkout not registered; run: refused to start the command)",
+            "error (doctor: at least one error was found; env, down, reset: checkout not registered; run, up, ensure: refused to register or start; down, reset, rm, prune: refused or Compose failed)",
         ),
         (USAGE, "invalid usage, or the tool itself failed"),
     ]
@@ -81,6 +81,113 @@ pub fn describe_run_exit_codes() -> String {
             "the command was found but cannot be executed (permission denied, no interpreter)",
         ),
         (COMMAND_NOT_FOUND, "the command was not found"),
+    ])
+}
+
+/// The exit codes in the form `ds up --help` shows them.
+pub fn describe_up_exit_codes() -> String {
+    format_codes(&[
+        (
+            SUCCESS,
+            "the services are up; with a run key, the command's own exit code, whatever it is",
+        ),
+        (
+            ERROR,
+            "ds refused to start: the checks found an error, no slot is free, a port is used by another program, or the services did not start",
+        ),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed (Docker or git unavailable, registry locked, unreadable file), or invalid usage",
+        ),
+        (
+            COMMAND_NOT_EXECUTABLE,
+            "the run command was found but cannot be executed",
+        ),
+        (COMMAND_NOT_FOUND, "the run command was not found"),
+    ])
+}
+
+/// The exit codes in the form `ds ensure --help` shows them.
+pub fn describe_ensure_exit_codes() -> String {
+    format_codes(&[
+        (
+            SUCCESS,
+            "the checkout is registered and its .env is current, or there was nothing to do (outside git, outside [auto], opted out, no dev compose)",
+        ),
+        (
+            ERROR,
+            "ds refused: the checks found an error, or no slot is free",
+        ),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed (Docker or git unavailable, registry locked, unreadable file), or invalid usage",
+        ),
+    ])
+}
+
+/// The exit codes in the form `ds down --help` shows them.
+pub fn describe_down_exit_codes() -> String {
+    format_codes(&[
+        (SUCCESS, "the services are stopped"),
+        (ERROR, "this checkout is not registered, or Compose failed"),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed (Docker unavailable, unreadable config or registry), or invalid usage",
+        ),
+    ])
+}
+
+/// The exit codes in the form `ds reset --help` shows them.
+pub fn describe_reset_exit_codes() -> String {
+    format_codes(&[
+        (
+            SUCCESS,
+            "the data is deleted and the services are started again",
+        ),
+        (
+            ERROR,
+            "this checkout is not registered, the service is unknown or shares a volume with another service, or Compose failed",
+        ),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed (Docker unavailable, unreadable config or registry), or invalid usage",
+        ),
+    ])
+}
+
+/// The exit codes in the form `ds rm --help` shows them.
+pub fn describe_rm_exit_codes() -> String {
+    format_codes(&[
+        (
+            SUCCESS,
+            "the checkout is back to its default configuration and opted out",
+        ),
+        (
+            ERROR,
+            "nothing was changed: no terminal to ask in and no --yes, the answer was no, .env cannot be rewritten, or Compose failed",
+        ),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed; when the data is already deleted the message says so, and running ds rm again finishes the job",
+        ),
+    ])
+}
+
+/// The exit codes in the form `ds prune --help` shows them.
+pub fn describe_prune_exit_codes() -> String {
+    format_codes(&[
+        (
+            SUCCESS,
+            "nothing to prune, or every gone instance was cleaned and forgotten",
+        ),
+        (
+            ERROR,
+            "no terminal to ask in and no --yes, the answer was no, or at least one cleanup failed (that instance stays in the registry)",
+        ),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed (unreadable config or registry, registry locked), or invalid usage",
+        ),
     ])
 }
 
@@ -138,6 +245,40 @@ mod tests {
     #[test]
     fn should_list_success_for_an_unregistered_checkout_when_describing_info_exit_codes() {
         assert!(describe_info_exit_codes().contains("unregistered"));
+    }
+
+    #[test]
+    fn should_list_the_shell_codes_when_describing_up_exit_codes() {
+        let description = describe_up_exit_codes();
+
+        assert!(
+            [
+                SUCCESS,
+                ERROR,
+                TOOL_FAILURE,
+                COMMAND_NOT_EXECUTABLE,
+                COMMAND_NOT_FOUND
+            ]
+            .iter()
+            .all(|code| description.contains(&format!("  {code}  ")))
+        );
+    }
+
+    #[test]
+    fn should_list_the_three_codes_when_describing_the_other_new_commands() {
+        let descriptions = [
+            describe_ensure_exit_codes(),
+            describe_down_exit_codes(),
+            describe_reset_exit_codes(),
+            describe_rm_exit_codes(),
+            describe_prune_exit_codes(),
+        ];
+
+        assert!(descriptions.iter().all(|description| {
+            [SUCCESS, ERROR, TOOL_FAILURE]
+                .iter()
+                .all(|code| description.contains(&format!("  {code}  ")))
+        }));
     }
 
     #[test]

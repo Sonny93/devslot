@@ -1,6 +1,7 @@
 //! Reading the registry document into records, and applying one record to the
 //! document in place so everything else in the file stays as it is.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, value};
@@ -258,40 +259,96 @@ fn read_detail(item: &Item, variable: &str, entry: &str) -> Result<PortDetail, P
 }
 
 fn check_consistency(instances: &[InstanceRecord]) -> Result<(), Problem> {
-    for (index, instance) in instances.iter().enumerate() {
-        for other in &instances[index + 1..] {
-            check_pair(instance, other)?;
-        }
+    if let Some((first, second)) = first_duplicate_path(instances) {
+        return Err(pair_problem(
+            instances,
+            first,
+            second,
+            "the same path is registered twice",
+        ));
+    }
+    if let Some((first, second)) = first_duplicate_name(instances) {
+        let reason = format!("the name {} is used twice", instances[first].name);
+        return Err(pair_problem(instances, first, second, reason));
+    }
+    if let Some((first, second)) = first_overlapping_range(instances) {
+        return Err(pair_problem(
+            instances,
+            first,
+            second,
+            "their ranges overlap",
+        ));
+    }
+    if let Some((first, second, port)) = first_shared_port(instances) {
+        let reason = format!("both hold port {port}");
+        return Err(pair_problem(instances, first, second, reason));
     }
     Ok(())
 }
 
-fn check_pair(first: &InstanceRecord, second: &InstanceRecord) -> Result<(), Problem> {
+fn pair_problem(
+    instances: &[InstanceRecord],
+    first: usize,
+    second: usize,
+    reason: impl Into<String>,
+) -> Problem {
     let entry = format!(
         "instance {} and instance {}",
-        first.path.display(),
-        second.path.display()
+        instances[first].path.display(),
+        instances[second].path.display()
     );
-    if normalize_path(&first.path) == normalize_path(&second.path) {
-        return Err(problem(&entry, "the same path is registered twice"));
+    problem(&entry, reason)
+}
+
+fn first_duplicate_path(instances: &[InstanceRecord]) -> Option<(usize, usize)> {
+    let mut seen: HashMap<PathBuf, usize> = HashMap::with_capacity(instances.len());
+    instances.iter().enumerate().find_map(|(index, instance)| {
+        seen.insert(normalize_path(&instance.path), index)
+            .map(|earlier| (earlier, index))
+    })
+}
+
+fn first_duplicate_name(instances: &[InstanceRecord]) -> Option<(usize, usize)> {
+    let mut seen: HashMap<&str, usize> = HashMap::with_capacity(instances.len());
+    instances.iter().enumerate().find_map(|(index, instance)| {
+        seen.insert(instance.name.as_str(), index)
+            .map(|earlier| (earlier, index))
+    })
+}
+
+fn first_overlapping_range(instances: &[InstanceRecord]) -> Option<(usize, usize)> {
+    let mut order: Vec<usize> = (0..instances.len()).collect();
+    order.sort_by_key(|index| (instances[*index].range.first, *index));
+    let mut widest: Option<usize> = None;
+    for index in order {
+        let range = instances[index].range;
+        if let Some(reaching) = widest.filter(|reaching| instances[*reaching].range.overlaps(range))
+        {
+            return Some((reaching.min(index), reaching.max(index)));
+        }
+        if widest.is_none_or(|reaching| range.last > instances[reaching].range.last) {
+            widest = Some(index);
+        }
     }
-    if first.name == second.name {
-        return Err(problem(
-            &entry,
-            format!("the name {} is used twice", first.name),
-        ));
+    None
+}
+
+fn first_shared_port(instances: &[InstanceRecord]) -> Option<(usize, usize, u16)> {
+    let mut holders: HashMap<u16, usize> = HashMap::new();
+    for (index, instance) in instances.iter().enumerate() {
+        for assigned in &instance.ports {
+            match holders.get(&assigned.port) {
+                Some(holder) if *holder != index => {
+                    return Some((*holder, index, assigned.port));
+                }
+                Some(_) => {}
+                None => {
+                    holders.insert(assigned.port, index);
+                }
+            }
+        }
     }
-    if first.range.overlaps(second.range) {
-        return Err(problem(&entry, "their ranges overlap"));
-    }
-    let shared = first
-        .ports
-        .iter()
-        .find(|assigned| second.ports.iter().any(|other| other.port == assigned.port));
-    match shared {
-        Some(assigned) => Err(problem(&entry, format!("both hold port {}", assigned.port))),
-        None => Ok(()),
-    }
+    None
 }
 
 /// Sets `record` in the document: the table of its path is updated in place
@@ -697,6 +754,37 @@ details = { PORT = { kind = "web" }, VITE_HMR_PORT = { kind = "web" }, DB_PORT =
         ]);
 
         assert!(malformed_reason(&text).contains("their ranges overlap"));
+    }
+
+    #[test]
+    fn should_refuse_a_range_nested_in_a_wider_range_of_a_non_adjacent_entry() {
+        let text = registry_text(&[
+            entry("/work/a", "a", (20000, 20099), 20000),
+            entry("/work/b", "b", (20100, 20149), 20100),
+            entry("/work/c", "c", (20050, 20059), 20050),
+        ]);
+
+        let reason = malformed_reason(&text);
+
+        assert!(reason.contains("instance /work/a and instance /work/c"));
+        assert!(reason.contains("their ranges overlap"));
+    }
+
+    #[test]
+    fn should_accept_a_large_registry_whose_entries_do_not_conflict() {
+        let entries: Vec<String> = (0..2000_u16)
+            .map(|index| {
+                let first = 1100 + index * 10;
+                entry(
+                    &format!("/work/{index}"),
+                    &format!("n{index}"),
+                    (first, first + 9),
+                    u32::from(first),
+                )
+            })
+            .collect();
+
+        assert!(parse(&registry_text(&entries)).is_ok());
     }
 
     #[test]

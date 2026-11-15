@@ -56,26 +56,48 @@ pub struct ProbedFile {
 
 /// The `.env` files of a checkout.
 pub struct EnvFiles {
-    /// `.env`.
+    /// `.env`, as it is on disk.
     pub env: EnvRead,
     /// `.env.example`.
     pub example: EnvRead,
     /// `.env.test`.
     pub test: EnvRead,
+    /// The file `.env` would be created from, read in memory only; `Missing`
+    /// unless `.env` is missing and a creation source was given.
+    pub creation_source: EnvRead,
 }
 
 impl EnvFiles {
-    fn read(root: &Path) -> Result<Self, ToolError> {
+    /// Reads the three files at `root`. When `.env` is missing and
+    /// `creation_source` is given, that file is read too, so discovery can see
+    /// the values `.env` is about to be created with.
+    pub fn read(root: &Path, creation_source: Option<&Path>) -> Result<Self, ToolError> {
+        let env = read_named(root, DOTENV_FILE)?;
+        let creation_source = match creation_source {
+            Some(source) if env == EnvRead::Missing => {
+                read_env_file(source).map_err(|error| ToolError::ReadFile {
+                    file: source.display().to_string(),
+                    source: error,
+                })?
+            }
+            _ => EnvRead::Missing,
+        };
         Ok(Self {
-            env: read_named(root, DOTENV_FILE)?,
+            env,
             example: read_named(root, DOTENV_EXAMPLE_FILE)?,
             test: read_named(root, DOTENV_TEST_FILE)?,
+            creation_source,
         })
     }
 
     /// `.env` when it could be parsed.
     pub fn env_file(&self) -> Option<&EnvFile> {
         parsed(&self.env)
+    }
+
+    /// `.env`, else the file it is about to be created from, when parsed.
+    pub fn effective_env_file(&self) -> Option<&EnvFile> {
+        parsed(&self.env).or_else(|| parsed(&self.creation_source))
     }
 
     /// `.env.example` when it could be parsed.
@@ -123,8 +145,19 @@ impl CheckoutAnalysis {
         compose: &dyn ComposeCli,
         scope: ProbeScope,
     ) -> Result<Self, ToolError> {
+        Self::analyze_with_creation_source(checkout, compose, scope, None)
+    }
+
+    /// Like [`CheckoutAnalysis::analyze`]; when `.env` is missing, discovery
+    /// reads `creation_source` in its place.
+    pub fn analyze_with_creation_source(
+        checkout: &Checkout,
+        compose: &dyn ComposeCli,
+        scope: ProbeScope,
+        creation_source: Option<&Path>,
+    ) -> Result<Self, ToolError> {
         let config = ProjectConfig::load(&checkout.root)?;
-        let env_files = EnvFiles::read(&checkout.root)?;
+        let env_files = EnvFiles::read(&checkout.root, creation_source)?;
         let vite = detect_vite(&checkout.root);
         let selection = select_dev_compose(&checkout.root, config.compose_file.as_deref());
         let dev_file = selected_file(&selection);
@@ -139,7 +172,7 @@ impl CheckoutAnalysis {
         let is_local_config_tracked = is_local_config_tracked(checkout)?;
         let dev_probe = dev_file.and_then(|file| read_probe(&probed_files, file));
         let ports = discover_ports(&DiscoveryInput {
-            env: env_files.env_file(),
+            env: env_files.effective_env_file(),
             example: env_files.example_file(),
             config: &config,
             vite: &vite,
@@ -182,7 +215,7 @@ impl CheckoutAnalysis {
         let mut findings = check_env_forces_port(&self.config, &self.ports);
         findings.extend(check_env_keys_declared(
             &self.config,
-            self.env_files.env_file(),
+            self.env_files.effective_env_file(),
             self.env_files.example_file(),
             &self.ports,
         ));
@@ -291,7 +324,12 @@ fn probe_files(
 ) -> Result<Vec<ProbedFile>, ToolError> {
     let overrides = existing_overrides(root);
     let from_env_files = |name: &str| {
-        lookup_value(env_files.env_file(), env_files.example_file(), name).map(str::to_owned)
+        lookup_value(
+            env_files.effective_env_file(),
+            env_files.example_file(),
+            name,
+        )
+        .map(str::to_owned)
     };
     let mut probed_files = Vec::new();
     for name in files_to_scan(root, dev_file, scope) {

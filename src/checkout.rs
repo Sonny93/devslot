@@ -3,13 +3,16 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
+use std::time::Duration;
 
 use thiserror::Error;
 
 use crate::instance_name::repository_name_from_common_dir;
+use crate::process::{CaptureFailure, CapturedOutput, capture_with_timeout};
 
 const GIT_PROGRAM: &str = "git";
+const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const DISABLE_FSMONITOR_ARGUMENTS: [&str; 2] = ["-c", "core.fsmonitor=false"];
 const NOT_A_REPOSITORY_MESSAGE: &str = "not a git repository";
 const WORKTREE_PREFIX: &str = "worktree ";
@@ -33,6 +36,12 @@ pub enum CheckoutError {
     /// Git could not be run.
     #[error("cannot run git: {0}")]
     GitUnavailable(io::Error),
+    /// Git did not answer in time and was killed.
+    #[error("git did not answer within {seconds} seconds")]
+    GitTimedOut {
+        /// The time limit.
+        seconds: u64,
+    },
     /// Git ran and failed for another reason than "not a repository".
     #[error("git {command} failed: {reason}")]
     GitFailed {
@@ -129,17 +138,22 @@ fn canonicalize(path: &Path) -> Result<PathBuf, CheckoutError> {
         })
 }
 
-fn run_git(directory: &Path, arguments: &[&str]) -> Result<Output, CheckoutError> {
-    Command::new(GIT_PROGRAM)
+fn run_git(directory: &Path, arguments: &[&str]) -> Result<CapturedOutput, CheckoutError> {
+    let mut command = Command::new(GIT_PROGRAM);
+    command
         .args(DISABLE_FSMONITOR_ARGUMENTS)
         .args(arguments)
         .current_dir(directory)
-        .env("LC_ALL", "C")
-        .output()
-        .map_err(CheckoutError::GitUnavailable)
+        .env("LC_ALL", "C");
+    capture_with_timeout(command, GIT_TIMEOUT).map_err(|failure| match failure {
+        CaptureFailure::Io(error) => CheckoutError::GitUnavailable(error),
+        CaptureFailure::TimedOut => CheckoutError::GitTimedOut {
+            seconds: GIT_TIMEOUT.as_secs(),
+        },
+    })
 }
 
-fn git_failure(command: &'static str, output: &Output) -> CheckoutError {
+fn git_failure(command: &'static str, output: &CapturedOutput) -> CheckoutError {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let reason = stderr
         .lines()
