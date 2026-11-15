@@ -125,6 +125,38 @@ pub fn describe_ensure_exit_codes() -> String {
     ])
 }
 
+/// The exit codes in the form `ds ls --help` shows them.
+pub fn describe_ls_exit_codes() -> String {
+    format_codes(&[
+        (
+            SUCCESS,
+            "the instances were listed (also when none is registered, or when Docker could not tell which ones run)",
+        ),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed (unreadable registry), or invalid usage",
+        ),
+    ])
+}
+
+/// The exit codes in the form `ds hook --help` shows them.
+pub fn describe_hook_exit_codes() -> String {
+    format_codes(&[
+        (
+            SUCCESS,
+            "the hook did its job or had nothing to do; pre-tool-use always exits 0",
+        ),
+        (
+            ERROR,
+            "worktree-create: git refused to create the worktree; worktree-remove: git refused to remove it, or the path is not the root of a linked worktree",
+        ),
+        (
+            TOOL_FAILURE,
+            "the input on stdin is invalid, or the tool itself failed (git or a devslot file)",
+        ),
+    ])
+}
+
 /// The exit codes in the form `ds down --help` shows them.
 pub fn describe_down_exit_codes() -> String {
     format_codes(&[

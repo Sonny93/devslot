@@ -27,6 +27,10 @@
 # prints the file $DOCKER_FAKE_NETWORKS when set; `docker rm` and `network rm`
 # exit 0 after logging. Their names in $DOCKER_FAKE_FAIL_COMMANDS are
 # `docker_ps`, `docker_rm`, `network_ls`, `network_rm`, `volume_ls`, `volume_rm`.
+# `docker ps --filter label=com.docker.compose.project --format ...` (the
+# machine-wide listing of `ds ls`) prints the file $DOCKER_FAKE_RUNNING_PROJECTS
+# when set, one compose project name per line, else nothing. It fails with the
+# same name as the other `docker ps` call, `docker_ps`.
 # `up`, `down`, `rm` and `volume rm` exit 0 after logging.
 # `compose -p <name> ... config --format json` (without --no-env-resolution)
 # answers the config fixture with `devslot-probe` replaced by <name>, or the file
@@ -105,6 +109,12 @@ done
 case "$subcommand" in
   up | down | rm | "volume rm" | "docker rm" | "network rm") exit 0 ;;
   "docker ps")
+    case " $* " in
+      *" --format "*)
+        if [ -n "${DOCKER_FAKE_RUNNING_PROJECTS:-}" ]; then cat "$DOCKER_FAKE_RUNNING_PROJECTS"; fi
+        exit 0
+        ;;
+    esac
     if [ -n "${DOCKER_FAKE_CONTAINERS:-}" ]; then cat "$DOCKER_FAKE_CONTAINERS"; fi
     exit 0
     ;;

@@ -5,10 +5,14 @@ use std::fmt::Write;
 use super::style::{Style, Tone};
 use crate::checks::finding::{Finding, Level};
 use crate::discovery::ManagedPort;
-use crate::report::{DoctorReport, InfoReport, RegisteredInfo, UnregisteredInfo};
+use crate::report::{
+    DoctorReport, InfoPort, InfoReport, ListReport, RegisteredInfo, UnregisteredInfo,
+};
 
 const LEVEL_WORD_WIDTH: usize = 7;
 const NO_VALUE: &str = "-";
+const SERVICES_NOT_CHECKED: &str = "run ds info to check";
+const NO_INSTANCE_LINE: &str = "No instance is registered on this machine.\n";
 
 /// Renders the report as the text `ds doctor` prints.
 pub fn render_text(report: &DoctorReport, style: Style) -> String {
@@ -100,6 +104,57 @@ fn render_finding(finding: &Finding, style: Style) -> String {
     format!("{} {location}{}", style.paint(tone, &word), finding.message)
 }
 
+/// Renders the answer of `ds ls` as text: one row per instance, the ports of
+/// each, then the checkouts `ds rm` opted out.
+pub fn render_list_text(report: &ListReport, opted_out: &[String]) -> String {
+    if report.instances.is_empty() && opted_out.is_empty() {
+        return NO_INSTANCE_LINE.to_owned();
+    }
+    let mut output = String::new();
+    if report.instances.is_empty() {
+        output.push_str(NO_INSTANCE_LINE);
+    } else {
+        output.push_str(&render_instance_table(report));
+    }
+    for instance in &report.instances {
+        let _ = write!(
+            output,
+            "\nPorts of {}\n{}",
+            instance.name,
+            render_info_ports(&instance.ports)
+        );
+    }
+    if !opted_out.is_empty() {
+        output.push_str("\nOpted out\n");
+        for path in opted_out {
+            let _ = writeln!(output, "  {path}");
+        }
+    }
+    output
+}
+
+fn render_instance_table(report: &ListReport) -> String {
+    let header = ["NAME", "SLOT", "SERVICES", "PATH"].map(str::to_owned);
+    let rows = report
+        .instances
+        .iter()
+        .map(|instance| {
+            let services = match instance.services_running {
+                Some(true) => "running",
+                Some(false) => "not running",
+                None => "unknown",
+            };
+            [
+                instance.name.clone(),
+                instance.slot.to_string(),
+                services.to_owned(),
+                instance.path.clone(),
+            ]
+        })
+        .collect();
+    render_table(header, rows)
+}
+
 /// Renders the answer of `ds info` as text.
 pub fn render_info_text(report: &InfoReport) -> String {
     match report {
@@ -122,6 +177,16 @@ fn render_unregistered_info(info: &UnregisteredInfo) -> String {
 }
 
 fn render_registered_info(info: &RegisteredInfo) -> String {
+    render_registered_info_with(info, info.services.word())
+}
+
+/// Renders a registered instance like `ds info` does, but without the state
+/// of the services, which needs a Docker call: it says how to check instead.
+pub fn render_registered_info_unchecked(info: &RegisteredInfo) -> String {
+    render_registered_info_with(info, SERVICES_NOT_CHECKED)
+}
+
+fn render_registered_info_with(info: &RegisteredInfo, services: &str) -> String {
     let compose = match (&info.compose_file, &info.compose_file_origin) {
         (Some(file), Some(origin)) => format!("{file} ({origin})"),
         (Some(file), None) => file.clone(),
@@ -136,19 +201,18 @@ fn render_registered_info(info: &RegisteredInfo) -> String {
         info.slot, info.range[0], info.range[1]
     );
     let _ = writeln!(output, "Compose file:  {compose}");
-    let _ = writeln!(output, "Services:      {}", info.services.word());
+    let _ = writeln!(output, "Services:      {services}");
     output.push_str("\nPorts\n");
-    output.push_str(&render_info_ports(info));
+    output.push_str(&render_info_ports(&info.ports));
     output
 }
 
-fn render_info_ports(info: &RegisteredInfo) -> String {
-    if info.ports.is_empty() {
+fn render_info_ports(ports: &[InfoPort]) -> String {
+    if ports.is_empty() {
         return "  none\n".to_owned();
     }
     let header = ["VARIABLE", "PORT", "KIND", "SERVICE", "URL"].map(str::to_owned);
-    let rows = info
-        .ports
+    let rows = ports
         .iter()
         .map(|port| {
             let target = match (&port.service, port.target) {
@@ -294,6 +358,69 @@ mod tests {
              \x20 PORT      20050  web      -              http://localhost:20050\n\
              \x20 DB_PORT   20052  service  postgres:5432  -\n"
         );
+    }
+
+    #[test]
+    fn should_say_how_to_check_the_services_when_they_were_not_asked() {
+        let text = render_registered_info_unchecked(&registered_info());
+
+        assert!(text.contains("Services:      run ds info to check\n"));
+        assert!(!text.contains("Services:      running"));
+    }
+
+    fn listed(name: &str, services_running: Option<bool>) -> crate::report::ListedInstance {
+        crate::report::ListedInstance {
+            name: name.to_owned(),
+            path: format!("/work/{name}"),
+            slot: 1,
+            services_running,
+            ports: registered_info().ports,
+        }
+    }
+
+    #[test]
+    fn should_render_the_table_the_ports_and_the_opted_out_paths_when_listing() {
+        let report = ListReport {
+            version: 1,
+            shared: Vec::new(),
+            instances: vec![listed("app-3f2a", Some(true)), listed("web-9b1c", None)],
+        };
+
+        let text = render_list_text(&report, &["/work/old".to_owned()]);
+
+        assert!(text.starts_with(
+            "  NAME      SLOT  SERVICES  PATH\n\
+             \x20 app-3f2a  1     running   /work/app-3f2a\n\
+             \x20 web-9b1c  1     unknown   /work/web-9b1c\n\
+             \nPorts of app-3f2a\n"
+        ));
+        assert!(text.contains("\nPorts of web-9b1c\n"));
+        assert!(text.ends_with("\nOpted out\n  /work/old\n"));
+    }
+
+    #[test]
+    fn should_say_that_nothing_is_registered_when_listing_an_empty_machine() {
+        let report = ListReport {
+            version: 1,
+            shared: Vec::new(),
+            instances: Vec::new(),
+        };
+
+        assert_eq!(
+            render_list_text(&report, &[]),
+            "No instance is registered on this machine.\n"
+        );
+    }
+
+    #[test]
+    fn should_say_not_running_when_docker_reports_no_container_of_the_instance() {
+        let report = ListReport {
+            version: 1,
+            shared: Vec::new(),
+            instances: vec![listed("app-3f2a", Some(false))],
+        };
+
+        assert!(render_list_text(&report, &[]).contains("not running"));
     }
 
     #[test]

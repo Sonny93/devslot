@@ -57,6 +57,16 @@ fn registered_info(
     let config = ProjectConfig::load(&checkout.root)?;
     let services =
         ServicesState::of(&runner.containers(&status_target(checkout, instance, &config)?));
+    describe_registered(checkout, instance, &config, services)
+}
+
+/// What is known about a registered checkout, with `services` as its state.
+pub fn describe_registered(
+    checkout: &Checkout,
+    instance: &InstanceRecord,
+    config: &ProjectConfig,
+    services: ServicesState,
+) -> Result<RegisteredInfo, ToolError> {
     let selection = select_dev_compose(&checkout.root, config.compose_file.as_deref());
     let (compose_file, compose_file_origin) = match selection {
         DevComposeSelection::Selected(file) => {
@@ -102,7 +112,8 @@ fn status_target(
     })
 }
 
-fn info_port(assigned: &AssignedPort) -> InfoPort {
+/// The port of an instance in the shape both `ds info` and `ds ls` print.
+pub fn info_port(assigned: &AssignedPort) -> InfoPort {
     InfoPort {
         variable: assigned.variable.clone(),
         port: assigned.port,

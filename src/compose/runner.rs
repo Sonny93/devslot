@@ -2,6 +2,7 @@
 //! stop, remove, list containers and volumes. They show Compose's own output
 //! and keep the caller's environment, unlike the read-only probes.
 
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -21,6 +22,7 @@ const CONTAINERS_TIMEOUT: Duration = Duration::from_secs(5);
 const LISTING_TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL_TIMEOUT: Duration = Duration::from_secs(30);
 const NOT_PUBLISHED: u16 = 0;
+const RUNNING_PROJECTS_FORMAT: &str = "{{.Label \"com.docker.compose.project\"}}";
 
 /// Why a command that acts on an instance did not complete. No message quotes
 /// Docker's output.
@@ -114,6 +116,10 @@ pub trait ComposeRunner {
         project_name: &str,
         volume_key: Option<&str>,
     ) -> Result<Vec<String>, RunnerError>;
+
+    /// The compose projects that have at least one running container, for the
+    /// whole machine, found by label alone in one call.
+    fn running_projects(&self) -> Result<BTreeSet<String>, RunnerError>;
 
     /// `volume rm`: no call when `names` is empty.
     fn remove_volumes(&self, names: &[String]) -> Result<(), RunnerError>;
@@ -304,6 +310,20 @@ impl ComposeRunner for DockerRunner {
         self.list_names(command, "volume ls")
     }
 
+    fn running_projects(&self) -> Result<BTreeSet<String>, RunnerError> {
+        let mut command = self.plain_command(&[]);
+        command
+            .args(["ps", "--filter", "label=com.docker.compose.project"])
+            .args(["--format", RUNNING_PROJECTS_FORMAT]);
+        let text = self.run_captured(command, self.containers_timeout, "ps")?;
+        Ok(text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
     fn remove_volumes(&self, names: &[String]) -> Result<(), RunnerError> {
         self.remove_all(&["volume", "rm"], names, "volume rm")
     }
@@ -448,6 +468,7 @@ pub mod testing {
         volumes: Vec<String>,
         project_containers: Vec<String>,
         networks: Vec<String>,
+        running_projects: Vec<String>,
         model: Option<String>,
         failing_commands: Vec<&'static str>,
         calls: RefCell<Vec<RecordedCall>>,
@@ -479,6 +500,13 @@ pub mod testing {
         #[must_use]
         pub fn with_networks(mut self, ids: Vec<String>) -> Self {
             self.networks = ids;
+            self
+        }
+
+        /// Answers `running_projects` with `names`.
+        #[must_use]
+        pub fn with_running_projects(mut self, names: Vec<String>) -> Self {
+            self.running_projects = names;
             self
         }
 
@@ -561,6 +589,11 @@ pub mod testing {
         ) -> Result<Vec<String>, RunnerError> {
             self.record_project("volume ls", project_name, volume_key.map(str::to_owned))?;
             Ok(self.volumes.clone())
+        }
+
+        fn running_projects(&self) -> Result<BTreeSet<String>, RunnerError> {
+            self.record("docker ps", None, Vec::new())?;
+            Ok(self.running_projects.iter().cloned().collect())
         }
 
         fn remove_volumes(&self, names: &[String]) -> Result<(), RunnerError> {
@@ -669,6 +702,29 @@ mod tests {
         assert_eq!(
             logged(&log),
             ["compose -p web-1 -f dev.compose.yml -f o.yml up -d --wait --wait-timeout 120 db"]
+        );
+    }
+
+    #[test]
+    fn should_list_the_running_projects_once_each_when_asked() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("log");
+        let program = script(
+            directory.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{}'\nprintf 'app-1\\napp-2\\napp-1\\n'",
+                log.display()
+            ),
+        );
+
+        let projects = DockerRunner::new(program).running_projects().unwrap();
+
+        assert_eq!(projects.into_iter().collect::<Vec<_>>(), ["app-1", "app-2"]);
+        assert_eq!(
+            logged(&log),
+            [
+                r#"ps --filter label=com.docker.compose.project --format {{.Label "com.docker.compose.project"}}"#
+            ]
         );
     }
 

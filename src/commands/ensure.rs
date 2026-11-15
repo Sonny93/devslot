@@ -3,16 +3,17 @@
 //! every command of an agent, so every case that has nothing to do is a silent
 //! success.
 
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use crate::analysis::EnvFiles;
-use crate::checkout::Checkout;
+use crate::checkout::{Checkout, CheckoutError};
 use crate::checks::finding::{Check, Finding, Level};
 use crate::cli::exit_code;
 use crate::cli::style::{ColorChoice, Style};
 use crate::commands::machine::Machine;
 use crate::commands::registering::{
-    LOCK_TIMEOUT, announce, register_checkout_within, report_refusal,
+    LOCK_TIMEOUT, announcement_lines, refusal_text, register_checkout_within,
 };
 use crate::compose::selection::{DevComposeSelection, select_dev_compose};
 use crate::ensure_cache::{
@@ -56,31 +57,82 @@ pub struct EnsureWrite<'a> {
     pub lock_timeout: Duration,
 }
 
+/// What `ds ensure` found and did, before anything is printed.
+#[derive(Debug)]
+pub enum EnsureResult {
+    /// Nothing to report: nothing to do, the checkout was already current, or
+    /// a refusal that was already reported for the same files.
+    Silent,
+    /// The checkout was registered or its block rewritten.
+    Done {
+        /// The instance of the checkout.
+        instance: InstanceRecord,
+        /// The lines announcing what was done, for stderr.
+        lines: Vec<String>,
+    },
+    /// The checkout is not registered, or its block not written, until the
+    /// user fixes the problems; reported for the first time.
+    Refused {
+        /// The lines explaining why, for stderr.
+        lines: Vec<String>,
+    },
+}
+
 /// Runs `ds ensure` on the current folder.
 pub fn run_ensure(color: ColorChoice) -> Result<u8, ToolError> {
+    let directory = std::env::current_dir().map_err(ToolError::CurrentDirectory)?;
+    let result = ensure_directory(&directory, Style::for_stderr(color))?;
+    Ok(print_result(&result))
+}
+
+fn print_result(result: &EnsureResult) -> u8 {
+    match result {
+        EnsureResult::Silent => exit_code::SUCCESS,
+        EnsureResult::Done { lines, .. } => {
+            print_lines(lines);
+            exit_code::SUCCESS
+        }
+        EnsureResult::Refused { lines } => {
+            print_lines(lines);
+            exit_code::ERROR
+        }
+    }
+}
+
+fn print_lines(lines: &[String]) {
+    for line in lines {
+        eprintln!("{line}");
+    }
+}
+
+/// Makes sure the checkout that holds `directory` is registered and its block
+/// is current, and returns what happened instead of printing it.
+pub fn ensure_directory(directory: &Path, style: Style) -> Result<EnsureResult, ToolError> {
     let machine = Machine::from_process()?;
     let global = GlobalConfig::load(&machine.paths.config_file)?;
     let home = home_from_environment();
-    let directory = std::env::current_dir()
-        .and_then(|directory| directory.canonicalize())
-        .map_err(ToolError::CurrentDirectory)?;
+    let directory = directory
+        .canonicalize()
+        .map_err(|source| CheckoutError::Resolve {
+            path: directory.to_path_buf(),
+            source,
+        })?;
     if !global.auto.covers(&directory, home.as_deref()) {
-        return Ok(exit_code::SUCCESS);
+        return Ok(EnsureResult::Silent);
     }
     let checkout = Checkout::locate(&directory)?;
     if !checkout.is_git || !global.auto.covers(&checkout.root, home.as_deref()) {
-        return Ok(exit_code::SUCCESS);
+        return Ok(EnsureResult::Silent);
     }
     let registry = machine.store.read()?;
     if registry.is_opted_out(&checkout.root) {
-        return Ok(exit_code::SUCCESS);
+        return Ok(EnsureResult::Silent);
     }
     let config = ProjectConfig::load(&checkout.root)?;
     let selection = select_dev_compose(&checkout.root, config.compose_file.as_deref());
     let DevComposeSelection::Selected(dev_file) = &selection else {
-        return Ok(exit_code::SUCCESS);
+        return Ok(EnsureResult::Silent);
     };
-    let style = Style::for_stderr(color);
     match registry.find(&checkout.root) {
         Some(instance) => {
             ensure_registered(&checkout, &machine, &global, (instance, dev_file), style)
@@ -95,15 +147,15 @@ fn ensure_registered(
     global: &GlobalConfig,
     (instance, dev_file): (&InstanceRecord, &str),
     style: Style,
-) -> Result<u8, ToolError> {
+) -> Result<EnsureResult, ToolError> {
     remove_temp_files_older_than(&checkout.root, STALE_TEMP_AGE).map_err(EnvSyncError::from)?;
     let config = ProjectConfig::load(&checkout.root)?;
     if !effective_write_enabled(&config, global) || is_env_current(checkout, instance, &config)? {
-        return Ok(exit_code::SUCCESS);
+        return Ok(EnsureResult::Silent);
     }
     let cache = RefusalCache::of(machine, checkout, dev_file);
     if cache.is_silent() {
-        return Ok(exit_code::SUCCESS);
+        return Ok(EnsureResult::Silent);
     }
     let blockers = check_before_writing(checkout)?;
     if !blockers.is_empty() {
@@ -127,12 +179,13 @@ fn ensure_registered(
         }
     };
     cache.clear();
-    if let EnsureOutcome::Wrote(lines) = outcome {
-        for line in lines {
-            eprintln!("{line}");
-        }
-    }
-    Ok(exit_code::SUCCESS)
+    Ok(match outcome {
+        EnsureOutcome::Nothing => EnsureResult::Silent,
+        EnsureOutcome::Wrote(lines) => EnsureResult::Done {
+            instance: instance.clone(),
+            lines,
+        },
+    })
 }
 
 /// The errors that forbid writing `.env`, found without the registry lock:
@@ -200,24 +253,30 @@ fn ensure_unregistered(
     global: &GlobalConfig,
     dev_file: &str,
     style: Style,
-) -> Result<u8, ToolError> {
+) -> Result<EnsureResult, ToolError> {
     let cache = RefusalCache::of(machine, checkout, dev_file);
     if cache.is_silent() {
-        return Ok(exit_code::SUCCESS);
+        return Ok(EnsureResult::Silent);
     }
     let flight = try_take_flight(machine.paths.state_directory(), &checkout.root);
     if matches!(flight, Flight::Busy) {
-        return Ok(exit_code::SUCCESS);
+        return Ok(EnsureResult::Silent);
     }
     let outcome =
         register_checkout_within(checkout, machine, global, Intent::Automatic, PROBE_TIMEOUT);
     match outcome {
         Ok(RegistrationOutcome::Registered(registration)) => {
             cache.clear();
-            announce(&registration, style);
-            Ok(exit_code::SUCCESS)
+            let lines = announcement_lines(&registration, style);
+            if lines.is_empty() {
+                return Ok(EnsureResult::Silent);
+            }
+            Ok(EnsureResult::Done {
+                instance: registration.instance,
+                lines,
+            })
         }
-        Ok(RegistrationOutcome::SkippedOptedOut) => Ok(exit_code::SUCCESS),
+        Ok(RegistrationOutcome::SkippedOptedOut) => Ok(EnsureResult::Silent),
         Ok(RegistrationOutcome::Refused(refusal)) => {
             Ok(cache.refuse(&refusal, machine, style, UNREGISTERED_CLOSING_LINE))
         }
@@ -230,12 +289,12 @@ fn ensure_unregistered(
 }
 
 /// When `error` is a problem of the checkout's own files or settings (and not
-/// of the tool), reports it as a refusal, caches it, and gives the exit code.
+/// of the tool), reports it as a refusal and caches it.
 fn refuse_or_fail(
     error: &ToolError,
     cache: &RefusalCache,
     (machine, style): (&Machine, Style),
-) -> Option<u8> {
+) -> Option<EnsureResult> {
     let finding = refusal_of(error)?;
     Some(cache.refuse(
         &Refusal::Blocked(vec![finding]),
@@ -284,15 +343,23 @@ impl RefusalCache {
         remove_entry(&self.file);
     }
 
-    fn refuse(&self, refusal: &Refusal, machine: &Machine, style: Style, closing: &str) -> u8 {
-        let code = report_refusal(refusal, machine, style, closing);
+    fn refuse(
+        &self,
+        refusal: &Refusal,
+        machine: &Machine,
+        style: Style,
+        closing: &str,
+    ) -> EnsureResult {
+        let text = refusal_text(refusal, machine, style, closing);
         let entry = if depends_on_other_checkouts(refusal) {
             CacheEntry::shared_state_refusal(self.fingerprint.clone(), SystemTime::now())
         } else {
             CacheEntry::refusal(self.fingerprint.clone())
         };
         self.save(&entry);
-        code
+        EnsureResult::Refused {
+            lines: text.lines().map(str::to_owned).collect(),
+        }
     }
 
     fn remember_docker_failure(&self) {

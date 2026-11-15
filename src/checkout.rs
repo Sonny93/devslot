@@ -1,6 +1,7 @@
 //! The checkout: its root, whether git manages it, its main worktree, and
 //! whether git ignores its `.env`.
 
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -139,21 +140,35 @@ fn canonicalize(path: &Path) -> Result<PathBuf, CheckoutError> {
 }
 
 fn run_git(directory: &Path, arguments: &[&str]) -> Result<CapturedOutput, CheckoutError> {
+    run_git_within(directory, arguments, GIT_TIMEOUT)
+}
+
+/// Runs git in `directory` without the file system monitor, killed after
+/// `timeout`. The output is captured.
+pub(crate) fn run_git_within<I, S>(
+    directory: &Path,
+    arguments: I,
+    timeout: Duration,
+) -> Result<CapturedOutput, CheckoutError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let mut command = Command::new(GIT_PROGRAM);
     command
         .args(DISABLE_FSMONITOR_ARGUMENTS)
         .args(arguments)
         .current_dir(directory)
         .env("LC_ALL", "C");
-    capture_with_timeout(command, GIT_TIMEOUT).map_err(|failure| match failure {
+    capture_with_timeout(command, timeout).map_err(|failure| match failure {
         CaptureFailure::Io(error) => CheckoutError::GitUnavailable(error),
         CaptureFailure::TimedOut => CheckoutError::GitTimedOut {
-            seconds: GIT_TIMEOUT.as_secs(),
+            seconds: timeout.as_secs(),
         },
     })
 }
 
-fn git_failure(command: &'static str, output: &CapturedOutput) -> CheckoutError {
+pub(crate) fn git_failure(command: &'static str, output: &CapturedOutput) -> CheckoutError {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let reason = stderr
         .lines()

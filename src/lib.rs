@@ -3,7 +3,8 @@
 //! Phase 1 holds the port discovery engine and the read-only `ds doctor`;
 //! phase 2 adds the registry, port allocation, `ds env`, `ds info` and `ds run`;
 //! phase 3 adds the `.env` block writer and `ds up`, `ds down`, `ds reset`,
-//! `ds rm`, `ds prune` and `ds ensure`.
+//! `ds rm`, `ds prune` and `ds ensure`;
+//! phase 4 adds `ds ls`, the `ds hook` commands and the Claude Code plugin.
 #![warn(missing_docs)]
 
 pub mod allocation;
@@ -21,6 +22,7 @@ pub mod ensure_cache;
 pub mod env_sync;
 pub mod environment;
 pub mod error;
+pub mod git_worktree;
 pub mod global_config;
 pub mod instance_name;
 pub mod paths;
@@ -49,7 +51,9 @@ use commands::doctor::run_doctor_command;
 use commands::down::run_down;
 use commands::ensure::run_ensure;
 use commands::env::run_env;
+use commands::hook::run_hook;
 use commands::info::run_info;
+use commands::ls::run_ls;
 use commands::prune::run_prune;
 use commands::reset::run_reset;
 use commands::rm::run_rm;
@@ -75,7 +79,9 @@ fn execute(cli: &Cli) -> Result<u8, ToolError> {
         Command::Down => run_down(),
         Command::Ensure => run_ensure(cli.color),
         Command::Env(arguments) => run_env(arguments.format),
+        Command::Hook(arguments) => Ok(run_hook(arguments.event)),
         Command::Info(arguments) => run_info(arguments.json),
+        Command::Ls(arguments) => run_ls(arguments.json),
         Command::Prune(arguments) => run_prune(arguments.yes.into()),
         Command::Reset(arguments) => run_reset(arguments.service.as_deref()),
         Command::Rm(arguments) => run_rm(arguments.yes.into()),

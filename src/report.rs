@@ -34,7 +34,7 @@ impl DoctorReport {
 }
 
 /// One port of a registered instance, in the shape `ds info --json` prints.
-/// `ds ls --json` will use the same shape.
+/// `ds ls --json` uses the same shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InfoPort {
     /// The variable name.
@@ -108,4 +108,31 @@ pub enum InfoReport {
     Registered(RegisteredInfo),
     /// The checkout is not registered.
     Unregistered(UnregisteredInfo),
+}
+
+/// One instance in the shape `ds ls --json` prints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ListedInstance {
+    /// The instance name, also the compose project name.
+    pub name: String,
+    /// The checkout root.
+    pub path: String,
+    /// The slot number.
+    pub slot: u32,
+    /// Whether a container of the compose project runs; `null` when Docker
+    /// could not tell.
+    pub services_running: Option<bool>,
+    /// The ports of the instance.
+    pub ports: Vec<InfoPort>,
+}
+
+/// What `ds ls --json` prints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ListReport {
+    /// The version of this contract.
+    pub version: u8,
+    /// Services shared between instances: always empty in v1.
+    pub shared: Vec<String>,
+    /// Every instance of the machine.
+    pub instances: Vec<ListedInstance>,
 }

@@ -6,9 +6,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use super::exit_code::{
     describe_doctor_exit_codes, describe_down_exit_codes, describe_ensure_exit_codes,
-    describe_env_exit_codes, describe_exit_codes, describe_info_exit_codes,
-    describe_prune_exit_codes, describe_reset_exit_codes, describe_rm_exit_codes,
-    describe_run_exit_codes, describe_up_exit_codes,
+    describe_env_exit_codes, describe_exit_codes, describe_hook_exit_codes,
+    describe_info_exit_codes, describe_ls_exit_codes, describe_prune_exit_codes,
+    describe_reset_exit_codes, describe_rm_exit_codes, describe_run_exit_codes,
+    describe_up_exit_codes,
 };
 use super::style::ColorChoice;
 
@@ -79,6 +80,14 @@ fn reset_help() -> String {
     help_with(&describe_reset_exit_codes(), &[DOCKER_HELP, XDG_HELP])
 }
 
+fn ls_help() -> String {
+    help_with(&describe_ls_exit_codes(), &[DOCKER_HELP, XDG_HELP])
+}
+
+fn hook_help() -> String {
+    help_with(&describe_hook_exit_codes(), &[DOCKER_HELP, XDG_HELP])
+}
+
 fn rm_help() -> String {
     help_with(&describe_rm_exit_codes(), &[DOCKER_HELP, XDG_HELP])
 }
@@ -118,6 +127,12 @@ pub enum Command {
     /// Show the name, slot, ports and services state of this checkout's instance
     #[command(after_help = info_help())]
     Info(InfoArguments),
+    /// Run a Claude Code hook (called by the devslot plugin, not by hand)
+    #[command(hide = true, after_help = hook_help())]
+    Hook(HookArguments),
+    /// List every instance of this machine with its ports and whether its services run
+    #[command(after_help = ls_help())]
+    Ls(InfoArguments),
     /// Delete the containers and volumes of gone checkouts and forget them
     #[command(after_help = prune_help())]
     Prune(ConfirmationArguments),
@@ -133,6 +148,27 @@ pub enum Command {
     /// Register this checkout if needed, start its services, then run the run key
     #[command(after_help = up_help())]
     Up,
+}
+
+/// The arguments of `ds hook`.
+#[derive(Debug, Args)]
+pub struct HookArguments {
+    /// The Claude Code event; the hook reads its JSON input on stdin
+    #[command(subcommand)]
+    pub event: HookEvent,
+}
+
+/// The Claude Code events `ds hook` answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+pub enum HookEvent {
+    /// Create the git worktree of a session, register it and print its path
+    WorktreeCreate,
+    /// Delete the data of a session's worktree, then the worktree and its merged branch
+    WorktreeRemove,
+    /// Deny `ds rm` and `ds prune`, and make sure the checkout is registered
+    PreToolUse,
+    /// Tell the agent which instance its checkout is
+    SessionStart,
 }
 
 /// The options of the commands that delete data after asking.
@@ -168,7 +204,7 @@ pub struct EnvArguments {
     pub format: EnvFormat,
 }
 
-/// The options of `ds info`.
+/// The options of `ds info` and `ds ls`.
 #[derive(Debug, Args)]
 pub struct InfoArguments {
     /// Print the information as JSON, for agents and scripts
@@ -264,6 +300,40 @@ mod tests {
             cli.command,
             Command::Info(InfoArguments { json: true })
         ));
+    }
+
+    #[test]
+    fn should_parse_ls_with_json_when_the_flag_is_given() {
+        let cli = Cli::try_parse_from(["ds", "ls", "--json"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Ls(InfoArguments { json: true })
+        ));
+    }
+
+    #[test]
+    fn should_parse_each_hook_event_when_it_is_named() {
+        let events = [
+            ("worktree-create", HookEvent::WorktreeCreate),
+            ("worktree-remove", HookEvent::WorktreeRemove),
+            ("pre-tool-use", HookEvent::PreToolUse),
+            ("session-start", HookEvent::SessionStart),
+        ];
+        for (name, event) in events {
+            let cli = Cli::try_parse_from(["ds", "hook", name]).unwrap();
+
+            let Command::Hook(arguments) = cli.command else {
+                panic!("expected hook");
+            };
+            assert_eq!(arguments.event, event);
+        }
+    }
+
+    #[test]
+    fn should_reject_a_hook_when_the_event_is_unknown_or_missing() {
+        assert!(Cli::try_parse_from(["ds", "hook"]).is_err());
+        assert!(Cli::try_parse_from(["ds", "hook", "stop"]).is_err());
     }
 
     #[test]

@@ -75,27 +75,47 @@ pub fn report_refusal(
     style: Style,
     closing_line: &str,
 ) -> u8 {
+    eprint!("{}", refusal_text(refusal, machine, style, closing_line));
+    exit_code::ERROR
+}
+
+/// What to tell the user about a refusal, one line each, ending with a newline.
+pub fn refusal_text(
+    refusal: &Refusal,
+    machine: &Machine,
+    style: Style,
+    closing_line: &str,
+) -> String {
     match refusal {
-        Refusal::Blocked(findings) => {
-            eprintln!("ds: the checks found problems in this checkout:");
-            eprint!("{}", render_findings(findings, style));
-            eprintln!("ds: error: {closing_line}");
-        }
+        Refusal::Blocked(findings) => format!(
+            "ds: the checks found problems in this checkout:\n{}ds: error: {closing_line}\n",
+            render_findings(findings, style)
+        ),
         Refusal::NoRoom(error) => {
             let message = Refusal::no_room_message(error, &machine.paths.config_file);
-            eprintln!("ds: error: {message}");
+            format!("ds: error: {message}\n")
         }
     }
-    exit_code::ERROR
 }
 
 /// Prints the warnings of the checks and what registration did.
 pub fn announce(registration: &Registration, style: Style) {
+    for line in announcement_lines(registration, style) {
+        eprintln!("{line}");
+    }
+}
+
+/// The warnings of the checks, then what registration did, one entry per line.
+pub fn announcement_lines(registration: &Registration, style: Style) -> Vec<String> {
+    let mut lines = Vec::new();
     if !registration.warnings.is_empty() {
-        eprintln!("ds: the checks report warnings:");
-        eprint!("{}", render_findings(&registration.warnings, style));
+        lines.push("ds: the checks report warnings:".to_owned());
+        lines.extend(
+            render_findings(&registration.warnings, style)
+                .lines()
+                .map(str::to_owned),
+        );
     }
-    for notice in registration.notices() {
-        eprintln!("{notice}");
-    }
+    lines.extend(registration.notices());
+    lines
 }

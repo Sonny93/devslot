@@ -2,8 +2,9 @@
 //! Helpers shared by the integration tests: temp projects and the real binary
 //! run against the fake docker script.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
@@ -82,6 +83,18 @@ impl Machine {
 
     pub fn read_registry(&self) -> String {
         std::fs::read_to_string(self.registry_path()).unwrap()
+    }
+
+    /// The names of the instances in the registry, in file order; empty when
+    /// the registry does not exist.
+    pub fn instance_names(&self) -> Vec<String> {
+        std::fs::read_to_string(self.registry_path())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("name = \""))
+            .filter_map(|rest| rest.strip_suffix('"'))
+            .map(str::to_owned)
+            .collect()
     }
 }
 
@@ -234,6 +247,42 @@ impl Project {
     }
 
     pub fn run_with(&self, arguments: &[&str], environment: &[(&str, &str)]) -> Run {
+        Run::from(self.command(arguments, environment).output().unwrap())
+    }
+
+    /// Runs `ds hook <event>` with `input` on stdin, as the Claude Code plugin does.
+    pub fn run_hook(&self, event: &str, input: &str, environment: &[(&str, &str)]) -> Run {
+        let mut command = self.command(&["hook", event], environment);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        Run::from(child.wait_with_output().unwrap())
+    }
+
+    /// Runs `ds hook <event>` whose stdin stays open and silent until the
+    /// hook exits, like a writer that never closes the pipe.
+    pub fn run_hook_with_open_stdin(&self, event: &str) -> Run {
+        let mut command = self.command(&["hook", event], &[]);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let run = Run::from(child.wait_with_output().unwrap());
+        drop(stdin);
+        run
+    }
+
+    fn command(&self, arguments: &[&str], environment: &[(&str, &str)]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
         command
             .args(arguments)
@@ -250,7 +299,7 @@ impl Project {
         for (name, value) in environment {
             command.env(name, value);
         }
-        Run::from(command.output().unwrap())
+        command
     }
 }
 
