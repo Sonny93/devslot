@@ -5,11 +5,15 @@ use std::path::Path;
 use super::finding::{Check, Finding, Level};
 use crate::project::vite::{HMR_PORT_VARIABLE, ViteDetection, config_reads_hmr_port};
 
+const FIRST_WS_MAJOR: u32 = 8;
+
 /// Runs every Vite check on what was detected under `root`.
 pub fn check_vite(root: &Path, detection: &ViteDetection) -> Vec<Finding> {
     let mut findings = Vec::new();
-    findings.extend(check_configs_read_hmr_port(root, detection));
-    findings.extend(check_manifests_have_a_config(detection));
+    if !detection.uses_assembler {
+        findings.extend(check_configs_read_hmr_port(root, detection));
+        findings.extend(check_manifests_have_a_config(detection));
+    }
     findings.extend(check_single_config(detection));
     findings
 }
@@ -24,12 +28,30 @@ fn check_configs_read_hmr_port(root: &Path, detection: &ViteDetection) -> Vec<Fi
                 Level::Warning,
                 Check::ViteHmrPort,
                 format!(
-                    "the Vite config does not read {HMR_PORT_VARIABLE}: every instance would fight over HMR port 24678; add server: {{ hmr: {{ port: Number(process.env.{HMR_PORT_VARIABLE}) || undefined }} }}"
+                    "the Vite config does not read {HMR_PORT_VARIABLE}: every instance would fight over HMR port 24678; {}",
+                    suggested_fix(detection.vite_major)
                 ),
             )
             .in_file(config.display().to_string())
         })
         .collect()
+}
+
+/// What to add to the Vite config: `server.ws.port` from Vite 8 on, where
+/// `server.hmr.port` is deprecated, `server.hmr.port` before; both when the
+/// version is unknown.
+fn suggested_fix(vite_major: Option<u32>) -> String {
+    let ws = format!(
+        "server: {{ ws: {{ port: Number(process.env.{HMR_PORT_VARIABLE}) || undefined }} }}"
+    );
+    let hmr = format!(
+        "server: {{ hmr: {{ port: Number(process.env.{HMR_PORT_VARIABLE}) || undefined }} }}"
+    );
+    match vite_major {
+        Some(major) if major >= FIRST_WS_MAJOR => format!("add {ws}"),
+        Some(_) => format!("add {hmr}"),
+        None => format!("add {ws} for Vite {FIRST_WS_MAJOR} and later, or {hmr} before"),
+    }
 }
 
 fn check_manifests_have_a_config(detection: &ViteDetection) -> Vec<Finding> {
@@ -98,6 +120,7 @@ mod tests {
         ViteDetection {
             manifests: manifests.iter().map(PathBuf::from).collect(),
             configs: configs.iter().map(PathBuf::from).collect(),
+            ..ViteDetection::default()
         }
     }
 
@@ -118,6 +141,55 @@ mod tests {
             ),
             (1, Check::ViteHmrPort, Some("vite.config.ts"))
         );
+    }
+
+    fn message_of(detection: &ViteDetection) -> String {
+        let root = root_with(&[("vite.config.ts", "export default {}")]);
+        check_vite(root.path(), detection)[0].message.clone()
+    }
+
+    #[test]
+    fn should_suggest_server_ws_when_vite_is_8_or_later() {
+        let vite = ViteDetection {
+            vite_major: Some(8),
+            ..detection(&["package.json"], &["vite.config.ts"])
+        };
+
+        let message = message_of(&vite);
+
+        assert!(message.contains("server: { ws: { port: Number(process.env.VITE_HMR_PORT)"));
+        assert!(!message.contains("hmr"));
+    }
+
+    #[test]
+    fn should_suggest_server_hmr_when_vite_is_before_8() {
+        let vite = ViteDetection {
+            vite_major: Some(5),
+            ..detection(&["package.json"], &["vite.config.ts"])
+        };
+
+        let message = message_of(&vite);
+
+        assert!(message.contains("server: { hmr: { port:"));
+        assert!(!message.contains("ws:"));
+    }
+
+    #[test]
+    fn should_mention_both_when_the_vite_version_is_unknown() {
+        let message = message_of(&detection(&["package.json"], &["vite.config.ts"]));
+
+        assert!(message.contains("ws: { port:") && message.contains("hmr: { port:"));
+    }
+
+    #[test]
+    fn should_report_nothing_when_the_project_uses_the_adonis_assembler() {
+        let root = root_with(&[("vite.config.ts", "export default {}")]);
+        let vite = ViteDetection {
+            uses_assembler: true,
+            ..detection(&["package.json"], &["vite.config.ts"])
+        };
+
+        assert_eq!(check_vite(root.path(), &vite), vec![]);
     }
 
     #[test]

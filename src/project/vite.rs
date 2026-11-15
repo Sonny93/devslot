@@ -10,6 +10,7 @@ use serde::Deserialize;
 const NODE_MODULES: &str = "node_modules";
 const PACKAGE_MANIFEST: &str = "package.json";
 const VITE_PACKAGE: &str = "vite";
+const ASSEMBLER_PACKAGE: &str = "@adonisjs/assembler";
 const VITE_CONFIG_STEM: &str = "vite.config.";
 const VITE_CONFIG_EXTENSIONS: [&str; 6] = ["js", "mjs", "cjs", "ts", "mts", "cts"];
 
@@ -25,6 +26,11 @@ pub struct ViteDetection {
     pub manifests: Vec<PathBuf>,
     /// The `vite.config.*` files.
     pub configs: Vec<PathBuf>,
+    /// Whether a `package.json` lists `@adonisjs/assembler`, which sets
+    /// `VITE_HMR_PORT` itself for the dev server it starts.
+    pub uses_assembler: bool,
+    /// The major version of the first `vite` range found in a `package.json`.
+    pub vite_major: Option<u32>,
 }
 
 impl ViteDetection {
@@ -77,8 +83,8 @@ fn classify(absolute: &Path, relative: &Path, detection: &mut ViteDetection) {
     let Some(name) = absolute.file_name().and_then(|name| name.to_str()) else {
         return;
     };
-    if name == PACKAGE_MANIFEST && manifest_lists_vite(absolute) {
-        detection.manifests.push(relative.to_path_buf());
+    if name == PACKAGE_MANIFEST {
+        classify_manifest(absolute, relative, detection);
     } else if is_vite_config_name(name) {
         detection.configs.push(relative.to_path_buf());
     }
@@ -89,15 +95,46 @@ fn is_vite_config_name(name: &str) -> bool {
         .is_some_and(|extension| VITE_CONFIG_EXTENSIONS.contains(&extension))
 }
 
-fn manifest_lists_vite(path: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
+fn classify_manifest(absolute: &Path, relative: &Path, detection: &mut ViteDetection) {
+    let Some(manifest) = read_manifest(absolute) else {
+        return;
     };
-    let Ok(manifest) = serde_json::from_str::<Manifest>(&text) else {
-        return false;
+    detection.uses_assembler |= manifest.has_dependency(ASSEMBLER_PACKAGE);
+    let Some(range) = manifest.dependency_range(VITE_PACKAGE) else {
+        return;
     };
-    manifest.dependencies.contains_key(VITE_PACKAGE)
-        || manifest.dev_dependencies.contains_key(VITE_PACKAGE)
+    detection.manifests.push(relative.to_path_buf());
+    if detection.vite_major.is_none() {
+        detection.vite_major = first_number(&range);
+    }
+}
+
+fn read_manifest(path: &Path) -> Option<Manifest> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+impl Manifest {
+    fn has_dependency(&self, name: &str) -> bool {
+        self.dependencies.contains_key(name) || self.dev_dependencies.contains_key(name)
+    }
+
+    fn dependency_range(&self, name: &str) -> Option<String> {
+        let value = self
+            .dependencies
+            .get(name)
+            .or_else(|| self.dev_dependencies.get(name))?;
+        Some(value.as_str().unwrap_or_default().to_owned())
+    }
+}
+
+fn first_number(range: &str) -> Option<u32> {
+    let digits: String = range
+        .chars()
+        .skip_while(|character| !character.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 /// Whether the config file mentions the HMR port variable.
@@ -135,7 +172,26 @@ mod tests {
             ViteDetection {
                 manifests: vec![PathBuf::from("package.json")],
                 configs: vec![PathBuf::from("vite.config.ts")],
+                uses_assembler: false,
+                vite_major: Some(8),
             }
+        );
+    }
+
+    #[test]
+    fn should_see_the_assembler_and_read_the_major_of_the_vite_range() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "package.json",
+            r#"{"dependencies": {"@adonisjs/assembler": "^8"}, "devDependencies": {"vite": "~7.1.2"}}"#,
+        );
+
+        let detection = detect_vite(root.path());
+
+        assert_eq!(
+            (detection.uses_assembler, detection.vite_major),
+            (true, Some(7))
         );
     }
 
@@ -217,6 +273,7 @@ mod tests {
         let detection = ViteDetection {
             manifests: vec![PathBuf::from("package.json")],
             configs: vec![PathBuf::from("vite.config.ts")],
+            ..ViteDetection::default()
         };
 
         assert_eq!(detection.source_file(), Some(Path::new("package.json")));
@@ -227,6 +284,7 @@ mod tests {
         let detection = ViteDetection {
             manifests: vec![],
             configs: vec![PathBuf::from("vite.config.ts")],
+            ..ViteDetection::default()
         };
 
         assert_eq!(detection.source_file(), Some(Path::new("vite.config.ts")));

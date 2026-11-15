@@ -230,6 +230,7 @@ mod tests {
         ViteDetection {
             manifests: vec![file.into()],
             configs: vec![],
+            ..ViteDetection::default()
         }
     }
 
@@ -368,6 +369,7 @@ mod tests {
         let vite = ViteDetection {
             manifests: vec![],
             configs: vec!["apps/web/vite.config.ts".into()],
+            ..ViteDetection::default()
         };
 
         let ports = discover(None, None, &ProjectConfig::default(), &vite, None);
