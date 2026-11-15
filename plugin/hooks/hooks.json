@@ -1,0 +1,50 @@
+{
+  "description": "Create and remove session worktrees, register checkouts and protect devslot data",
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ds hook worktree-create",
+            "timeout": 180
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ds hook worktree-remove",
+            "timeout": 180
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ds hook pre-tool-use",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ds hook session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

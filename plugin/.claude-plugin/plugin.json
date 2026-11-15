@@ -1,0 +1,5 @@
+{
+  "name": "devslot",
+  "version": "0.1.0",
+  "description": "Run several instances of the same dev stack on one machine: a worktree per session, a slot of ports and a compose project per checkout"
+}

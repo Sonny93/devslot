@@ -1,0 +1,13 @@
+{
+  "name": "devslot",
+  "owner": {
+    "name": "Sonny"
+  },
+  "plugins": [
+    {
+      "name": "devslot",
+      "source": "./plugin",
+      "description": "Give each checkout and Claude Code worktree its own ports and compose project"
+    }
+  ]
+}
