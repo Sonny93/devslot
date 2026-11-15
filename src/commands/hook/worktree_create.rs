@@ -13,6 +13,7 @@ use crate::checkout::{Checkout, CheckoutError};
 use crate::cli::exit_code;
 use crate::cli::output::write_stdout;
 use crate::cli::style::Style;
+use crate::commands::ensure::{EnsureResult, ensure_directory};
 use crate::commands::machine::Machine;
 use crate::commands::registering::{announce, refusal_text, register_checkout};
 use crate::compose::selection::{DevComposeSelection, select_dev_compose};
@@ -84,8 +85,11 @@ fn create_worktree(
         return Err(HookFailure::NotInGit(checkout.root));
     }
     let target = target_path(&checkout, global, &input.name)?;
-    prepare_parent(&target)?;
     let main_root = checkout.main_root.as_ref().unwrap_or(&checkout.root);
+    if std::fs::symlink_metadata(&target).is_ok() {
+        return reopen_worktree(&target, main_root);
+    }
+    prepare_parent(&target)?;
     add_worktree(main_root, &target, &input.name)?;
     target.canonicalize().map_err(|source| {
         HookFailure::Checkout(CheckoutError::Resolve {
@@ -107,11 +111,27 @@ fn target_path(
     if matches!(repository.as_str(), "" | "." | "..") {
         return Err(HookFailure::UnusableRepositoryName(checkout.root.clone()));
     }
-    let target = normalize_path(&root.join(repository).join(name));
-    if std::fs::symlink_metadata(&target).is_ok() {
-        return Err(HookFailure::TargetExists(target));
+    Ok(normalize_path(&root.join(repository).join(name)))
+}
+
+fn reopen_worktree(target: &Path, main_root: &Path) -> Result<PathBuf, HookFailure> {
+    if !target.is_dir() {
+        return Err(HookFailure::TargetExists(target.to_path_buf()));
     }
-    Ok(target)
+    let canonical = target
+        .canonicalize()
+        .map_err(|source| CheckoutError::Resolve {
+            path: target.to_path_buf(),
+            source,
+        })?;
+    let existing = Checkout::locate(&canonical)?;
+    let is_linked_worktree_of_repository = existing.is_git
+        && existing.root == canonical
+        && existing.main_root.as_deref() == Some(main_root);
+    if !is_linked_worktree_of_repository {
+        return Err(HookFailure::TargetExists(target.to_path_buf()));
+    }
+    Ok(canonical)
 }
 
 fn prepare_parent(target: &Path) -> Result<(), HookFailure> {
@@ -133,12 +153,36 @@ fn add_worktree(main_root: &Path, target: &Path, name: &str) -> Result<(), HookF
 }
 
 fn register_worktree(path: &Path, machine: &Machine, global: &GlobalConfig) {
-    if let Err(error) = try_register(path, machine, global) {
+    let result = if is_registered(path, machine) {
+        refresh_registered(path)
+    } else {
+        try_register(path, machine, global)
+    };
+    if let Err(error) = result {
         eprintln!(
             "ds: warning: could not register {}: {error}; the worktree was created, run ds up in it to try again",
             path.display()
         );
     }
+}
+
+fn is_registered(path: &Path, machine: &Machine) -> bool {
+    machine
+        .store
+        .read()
+        .is_ok_and(|registry| registry.find(path).is_some())
+}
+
+fn refresh_registered(path: &Path) -> Result<(), ToolError> {
+    match ensure_directory(path, PLAIN_STYLE)? {
+        EnsureResult::Silent => {}
+        EnsureResult::Done { lines, .. } | EnsureResult::Refused { lines } => {
+            for line in lines {
+                eprintln!("{line}");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn try_register(path: &Path, machine: &Machine, global: &GlobalConfig) -> Result<(), ToolError> {

@@ -264,15 +264,54 @@ fn should_exit_2_when_the_folder_is_not_in_a_git_repository() {
 }
 
 #[test]
-fn should_exit_2_when_the_target_folder_already_exists() {
+fn should_reopen_the_worktree_when_the_same_name_is_created_again() {
     let sandbox = sandbox();
-    sandbox.created("feature-x");
+    let path = sandbox.created("feature-x");
+    let registry = sandbox.machine().read_registry();
+    sandbox.machine().clear_docker_log();
+
+    let run = sandbox.create("feature-x", &[]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(run.stdout, format!("{}\n", path.display()));
+    assert_eq!(sandbox.machine().instance_names().len(), 1);
+    assert_eq!(sandbox.machine().read_registry(), registry);
+    assert_eq!(sandbox.machine().docker_log(), Vec::<String>::new());
+}
+
+#[test]
+fn should_recreate_a_missing_env_when_reopening_a_registered_worktree() {
+    let sandbox = sandbox();
+    let path = sandbox.created("feature-x");
+    std::fs::remove_file(path.join(".env")).unwrap();
+
+    let run = sandbox.create("feature-x", &[]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(
+        std::fs::read_to_string(path.join(".env"))
+            .unwrap()
+            .contains(BLOCK_START)
+    );
+}
+
+#[test]
+fn should_exit_2_and_leave_a_plain_folder_untouched_when_it_is_at_the_target() {
+    let sandbox = sandbox();
+    let target = sandbox.expected_path("feature-x");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("keep.txt"), "mine").unwrap();
 
     let run = sandbox.create("feature-x", &[]);
 
     assert_eq!(run.status, 2, "{}", run.stderr);
     assert_eq!(run.stdout, "");
     assert!(run.stderr.contains("already exists"));
+    assert_eq!(
+        std::fs::read_to_string(target.join("keep.txt")).unwrap(),
+        "mine"
+    );
+    assert!(!target.join(".git").exists());
 }
 
 #[test]
