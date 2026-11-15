@@ -4,7 +4,7 @@ Run several instances of the same dev stack on one machine: each checkout or wor
 
 ## Status
 
-v1 is in development and nothing is released. Available commands: `ds doctor`, `ds up`, `ds down`, `ds run`, `ds env`, `ds info`, `ds ls`, `ds ensure`, `ds reset`, `ds rm`, `ds prune` and `ds hook` (called by the plugin). The Tunneler integration, shared services and background processes are planned after v1.
+v1 is in development and nothing is released. Available commands: `ds doctor`, `ds up`, `ds down`, `ds run`, `ds env`, `ds info`, `ds ls`, `ds ensure`, `ds reset`, `ds rm`, `ds prune`, `ds worktree rm` and `ds hook` (called by the plugin). The Tunneler integration, shared services and background processes are planned after v1.
 
 ## Why
 
@@ -103,9 +103,9 @@ DEVSLOT_SLOT=1
 **Worktree lifecycle.** With the plugin, a Claude Code session in a worktree goes like this:
 
 1. `WorktreeCreate`: `ds hook worktree-create` creates the worktree, then registers it (slot, `.env`, block). It never starts services.
-2. `PreToolUse`: before each Bash command, `ds hook pre-tool-use` registers a checkout that is not (worktrees entered mid-session included), tells the agent about its instance, and denies `ds rm` and `ds prune`. It never blocks anything else.
+2. `PreToolUse`: before each Bash command, `ds hook pre-tool-use` registers a checkout that is not (worktrees entered mid-session included), tells the agent about its instance, and denies `ds rm`, `ds prune`, `ds worktree rm` and every `ds hook` command (Claude Code runs the hooks itself, never through the Bash tool, so this only stops an agent calling one by hand). It never blocks anything else.
 3. `SessionStart`: `ds hook session-start` adds the instance to the agent's context.
-4. `WorktreeRemove`: `ds hook worktree-remove` deletes the instance's containers, volumes and networks by label, forgets the instance, removes the worktree, and deletes its branch only when it is merged into the main worktree's branch. When Docker fails, the registry keeps the entry and `ds prune` cleans it later.
+4. `WorktreeRemove`: `ds hook worktree-remove` removes the worktree the way `ds worktree rm` does (see below): it refuses a locked worktree, stops the instance's processes, removes the git worktree, deletes the instance's containers, volumes and networks by label, forgets the instance, and deletes the branch only when it is merged into the main worktree's branch. When Docker fails, the registry keeps the entry and `ds prune` cleans it later.
 
 **Opt-out.** `ds rm` records the checkout as opted out: the hooks leave it alone until an explicit `ds up` or `ds run` registers it again.
 
@@ -124,7 +124,20 @@ DEVSLOT_SLOT=1
 | `ds reset [service]` | Deletes the data of the instance, or of one service, and starts the services again. |
 | `ds rm [--yes]` | Deletes the instance's data, removes the block and opts the checkout out. |
 | `ds prune [--yes]` | Deletes the data of the instances whose folder is gone and forgets them. |
+| `ds worktree rm <name\|path> [--yes] [--force]` | Shows what would be lost, then stops the instance's processes, removes a linked worktree, deletes its data and forgets its instance. |
 | `ds hook <event>` | Called by the Claude Code plugin: `worktree-create`, `worktree-remove`, `pre-tool-use`, `session-start`. Not meant to be run by hand. |
+
+**`ds worktree rm <name|path>`.** A name (letters, digits, `.`, `_`, `-`) is the worktree `<[worktrees] root>/<repo>/<name>` of the repository of the current folder; an argument that contains `/` or starts with `.` is a path, and any linked worktree root will do (never the main checkout or a subfolder). Before acting it prints the path, the branch, the instance (or "not registered"), the processes it would stop and the other processes found there, the number of uncommitted changes, and the number of commits found nowhere else (reachable from the worktree's `HEAD` only; the branch counts as a place only when it is kept). Ignored files (`.env`, local databases, uploads) are deleted with the folder, and the preview says so. It then asks like `ds rm` (a terminal, or `--yes`). A worktree with uncommitted changes or commits found nowhere else also needs `--force`. A locked worktree is refused (`git worktree unlock` first) before anything is stopped, deleted or forgotten. The hook runs the same removal without the preview and the gates, because Claude Code decides when a session ends.
+
+**Which processes are stopped (Linux only).** Removing a worktree first stops the processes of its instance, and only when an instance is registered for it. A process is stopped only when all of these hold:
+
+- it runs as your user, and is not `ds` or one of its ancestors;
+- its working directory is the worktree or a folder below it (compared by path component: `feat` never matches `feat-2`);
+- it listens on TCP on one of the ports registered for the instance, or its environment holds exactly `DEVSLOT_INSTANCE=<instance name>` (the block puts that variable in `.env`, and `ds run` passes it). Only that marker is looked for; the environment is never printed or stored.
+
+Each process is signalled on its own, never as a group (an editor can be the leader of the group of the dev server it started). A stopped process's descendants are stopped too, when they also run as your user with their working directory in the worktree. Signals go through a pidfd after the checks are repeated, so a reused pid is never hit. They get SIGTERM and up to 5 seconds to exit; ds then looks again (children that were respawned and carry the marker or listen on a port) for at most 3 rounds, and sends SIGKILL to what is left. A parent that is not a target and respawns its child (for example `node ace serve` started by hand, without `ds run`) is listed as still running, not stopped: servers started through `ds run` or `ds up` carry the marker and are stopped entirely, the others may need stopping by hand. ds prints `ds: stopped <pid> (<name>)` for each, with the kernel name of the process, never its command line. Every other process whose working directory is in the worktree (a tmux server, an ssh master connection, an editor, another session) is listed on a `ds: still running in <path>: ...` line and never signalled. On other systems nothing is stopped and nothing is listed.
+
+If `git worktree remove` fails after git has already forgotten the worktree (typically "Directory not empty" because a process recreated files), the removal goes on and ds warns that the folder is left on disk; it never deletes it itself.
 
 Exit codes: 0 success, 1 a refusal or an error in the project, 2 the tool itself failed or invalid usage. `--help` of each command lists its codes. `ds ls --json` and `ds info --json` are versioned contracts.
 
@@ -232,7 +245,7 @@ This repository runs several instances of its dev stack on one machine, one per 
 - Start the services with `ds up`. Run a command with the instance environment with `ds run -- <command>`.
 - Read ports and URLs with `ds info --json`. Never guess or hardcode them: 3333, 5432 and 24678 are the defaults of other instances.
 - Reset the data with `ds reset` (everything) or `ds reset <service>`.
-- Never run `ds rm`, `ds prune`, `docker compose down -v`, `docker volume rm` or remove containers by hand: it can delete another agent's data. Ask the user.
+- Never run `ds rm`, `ds prune`, `ds worktree rm`, `docker compose down -v`, `docker volume rm` or remove containers by hand: it can delete another agent's data. Ask the user.
 - If `ds info` says this checkout is opted out, do not run `ds up` without asking the user.
 - `DEVSLOT_INSTANCE` names this instance; show it in logs or on a health endpoint when useful.
 - `ds doctor` explains why a checkout cannot be isolated.
