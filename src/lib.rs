@@ -6,6 +6,8 @@
 
 pub mod allocation;
 pub mod analysis;
+pub mod auto_scope;
+pub mod block_entries;
 pub mod checkout;
 pub mod checks;
 pub mod cli;

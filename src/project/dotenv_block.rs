@@ -48,6 +48,10 @@ pub enum BlockError {
 pub struct BlockSplit {
     /// The lines outside the block, in their original order and endings.
     pub outside: String,
+    /// The lines before the block; the whole text when there is no block.
+    pub before: String,
+    /// The lines after the block; empty when there is no block.
+    pub after: String,
     /// The whole text with each block line replaced by an empty line, so line
     /// numbers still match the original file.
     pub masked: String,
@@ -66,6 +70,8 @@ fn is_end(line: &str) -> bool {
 /// Separates the lines of the block from the others.
 pub fn split_block(text: &str) -> Result<BlockSplit, BlockError> {
     let mut outside = String::with_capacity(text.len());
+    let mut before = String::new();
+    let mut after = String::new();
     let mut masked = String::with_capacity(text.len());
     let mut open_line: Option<usize> = None;
     let mut has_block = false;
@@ -98,13 +104,22 @@ pub fn split_block(text: &str) -> Result<BlockSplit, BlockError> {
             }
             (Some(_), false, true) => open_line = None,
             (Some(_), false, false) => {}
-            (None, false, false) => outside.push_str(line),
+            (None, false, false) => {
+                outside.push_str(line);
+                if has_block {
+                    after.push_str(line);
+                } else {
+                    before.push_str(line);
+                }
+            }
         }
     }
     match open_line {
         Some(start_line) => Err(BlockError::StartWithoutEnd { start_line }),
         None => Ok(BlockSplit {
             outside,
+            before,
+            after,
             masked,
             has_block,
         }),
@@ -134,6 +149,8 @@ mod tests {
             split,
             BlockSplit {
                 outside: "A=1\nB=2\n".to_owned(),
+                before: "A=1\nB=2\n".to_owned(),
+                after: String::new(),
                 masked: "A=1\nB=2\n".to_owned(),
                 has_block: false
             }
@@ -152,6 +169,18 @@ mod tests {
         let text = format!("A=1\n{}B=2\n", block_text());
 
         assert_eq!(strip_block(&text).unwrap(), "A=1\nB=2\n");
+    }
+
+    #[test]
+    fn should_expose_the_lines_before_and_after_the_block() {
+        let text = format!("A=1\n{}B=2\n", block_text());
+
+        let split = split_block(&text).unwrap();
+
+        assert_eq!(
+            (split.before.as_str(), split.after.as_str()),
+            ("A=1\n", "B=2\n")
+        );
     }
 
     #[test]

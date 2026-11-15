@@ -1,6 +1,7 @@
 //! The global configuration, `config.toml` in the devslot config folder.
 //!
-//! Only `[slots]` is modeled; other keys and tables are accepted and ignored.
+//! Only `[slots]`, `[auto]`, `[write]` and `[worktrees]` are modeled; other
+//! keys and tables are accepted and ignored.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -8,8 +9,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::auto_scope::AutoScope;
 use crate::port_range::PortRange;
 use crate::project::bounded_read::{BoundedRead, Unreadable, read_bounded};
+use crate::project_config::ProjectConfig;
 
 /// The largest slot size a configuration may ask for.
 pub const MAX_SLOT_SIZE: u16 = 100;
@@ -20,6 +23,10 @@ const DEFAULT_SLOT_SIZE: u16 = 50;
 const LOWEST_USABLE_PORT: i64 = 1024;
 const HIGHEST_PORT: i64 = 65535;
 const MINIMUM_SLOT_COUNT: i64 = 2;
+const HOME_VARIABLE: &str = "HOME";
+const HOME_ALONE: &str = "~";
+const HOME_PREFIX: &str = "~/";
+const DEFAULT_WORKTREES_SUBPATH: &str = "dev/.worktrees";
 
 /// Why the global configuration cannot be used. These are tool failures.
 #[derive(Debug, Error)]
@@ -64,6 +71,28 @@ pub enum GlobalConfigError {
 struct RawGlobalConfig {
     #[serde(default)]
     slots: RawSlots,
+    #[serde(default)]
+    auto: RawAuto,
+    #[serde(default)]
+    write: RawWrite,
+    #[serde(default)]
+    worktrees: RawWorktrees,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawAuto {
+    include: Option<Vec<String>>,
+    exclude: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawWrite {
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawWorktrees {
+    root: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -117,15 +146,38 @@ impl SlotGeometry {
 }
 
 /// The global configuration.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalConfig {
     /// How the port range is cut into slots.
     pub slots: SlotGeometry,
+    /// `[auto]`: the checkouts `ds ensure` may register.
+    pub auto: AutoScope,
+    /// `[write] enabled`: whether ds may write `.env`.
+    pub write_enabled: bool,
+    /// `[worktrees] root`, absolute, when the file sets it.
+    pub worktrees_root: Option<PathBuf>,
+}
+
+impl Default for GlobalConfig {
+    fn default() -> Self {
+        Self {
+            slots: SlotGeometry::default(),
+            auto: AutoScope::default(),
+            write_enabled: true,
+            worktrees_root: None,
+        }
+    }
 }
 
 impl GlobalConfig {
-    /// Reads the file at `path`; a missing file gives the defaults.
+    /// Reads the file at `path`; a missing file gives the defaults. `~` in the
+    /// file is expanded with the `HOME` variable.
     pub fn load(path: &Path) -> Result<Self, GlobalConfigError> {
+        Self::load_with_home(path, home_from_environment().as_deref())
+    }
+
+    /// Reads the file at `path`, expanding `~` with `home`.
+    pub fn load_with_home(path: &Path, home: Option<&Path>) -> Result<Self, GlobalConfigError> {
         let bytes = match read_bounded(path) {
             Ok(BoundedRead::Bytes(bytes)) => bytes,
             Ok(BoundedRead::Missing) => return Ok(Self::default()),
@@ -142,24 +194,59 @@ impl GlobalConfig {
                 });
             }
         };
-        Self::from_text(&String::from_utf8_lossy(&bytes), path)
+        Self::from_text_with_home(&String::from_utf8_lossy(&bytes), path, home)
     }
 
-    /// Parses the text of a config file read from `path`.
+    /// Parses the text of a config file read from `path`, expanding `~` with
+    /// the `HOME` variable.
     pub fn from_text(text: &str, path: &Path) -> Result<Self, GlobalConfigError> {
+        Self::from_text_with_home(text, path, home_from_environment().as_deref())
+    }
+
+    /// Parses the text of a config file read from `path`, expanding `~` with `home`.
+    pub fn from_text_with_home(
+        text: &str,
+        path: &Path,
+        home: Option<&Path>,
+    ) -> Result<Self, GlobalConfigError> {
         let raw: RawGlobalConfig =
             toml_edit::de::from_str(text).map_err(|error| GlobalConfigError::Parse {
                 path: path.to_path_buf(),
                 message: error.message().to_owned(),
             })?;
-        let slots =
-            geometry_from(&raw.slots).map_err(|(key, reason)| GlobalConfigError::Invalid {
-                path: path.to_path_buf(),
-                key,
-                reason,
-            })?;
-        Ok(Self { slots })
+        let invalid = |(key, reason): Violation| GlobalConfigError::Invalid {
+            path: path.to_path_buf(),
+            key,
+            reason,
+        };
+        Ok(Self {
+            slots: geometry_from(&raw.slots).map_err(invalid)?,
+            auto: scope_from(raw.auto).map_err(invalid)?,
+            write_enabled: raw.write.enabled.unwrap_or(true),
+            worktrees_root: worktrees_root_from(raw.worktrees.root, home).map_err(invalid)?,
+        })
     }
+
+    /// Where worktrees are created: `[worktrees] root`, else `~/dev/.worktrees`.
+    /// `None` when neither the file nor `home` gives a location.
+    pub fn worktrees_root(&self, home: Option<&Path>) -> Option<PathBuf> {
+        self.worktrees_root
+            .clone()
+            .or_else(|| home.map(|home| home.join(DEFAULT_WORKTREES_SUBPATH)))
+    }
+}
+
+/// Whether ds may write `.env` of a checkout: `devslot.local.toml`, then
+/// `devslot.toml` (already merged in `project`), then the global
+/// configuration, which defaults to true.
+pub fn effective_write_enabled(project: &ProjectConfig, global: &GlobalConfig) -> bool {
+    project.write_enabled.unwrap_or(global.write_enabled)
+}
+
+fn home_from_environment() -> Option<PathBuf> {
+    std::env::var_os(HOME_VARIABLE)
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
 }
 
 fn unusable(path: &Path, reason: &'static str) -> GlobalConfigError {
@@ -170,6 +257,44 @@ fn unusable(path: &Path, reason: &'static str) -> GlobalConfigError {
 }
 
 type Violation = (&'static str, String);
+
+fn scope_from(raw: RawAuto) -> Result<AutoScope, Violation> {
+    let include = raw.include.unwrap_or_default();
+    let exclude = raw.exclude.unwrap_or_default();
+    check_patterns("[auto] include", &include)?;
+    check_patterns("[auto] exclude", &exclude)?;
+    Ok(AutoScope::new(include, exclude))
+}
+
+fn check_patterns(key: &'static str, patterns: &[String]) -> Result<(), Violation> {
+    for pattern in patterns {
+        AutoScope::check_pattern(pattern)
+            .map_err(|reason| (key, format!("{pattern:?} is not a valid glob: {reason}")))?;
+    }
+    Ok(())
+}
+
+fn worktrees_root_from(
+    root: Option<String>,
+    home: Option<&Path>,
+) -> Result<Option<PathBuf>, Violation> {
+    const KEY: &str = "[worktrees] root";
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    let expanded = if root == HOME_ALONE {
+        home.map(Path::to_path_buf)
+    } else if let Some(rest) = root.strip_prefix(HOME_PREFIX) {
+        home.map(|home| home.join(rest))
+    } else {
+        Some(PathBuf::from(&root))
+    };
+    match expanded {
+        Some(path) if path.is_absolute() => Ok(Some(path)),
+        None => Err((KEY, "starts with ~ but HOME is not set".to_owned())),
+        Some(_) => Err((KEY, "must be an absolute path, or start with ~/".to_owned())),
+    }
+}
 
 fn geometry_from(raw: &RawSlots) -> Result<SlotGeometry, Violation> {
     let defaults = SlotGeometry::default();
@@ -284,9 +409,155 @@ mod tests {
 
     #[test]
     fn should_ignore_the_other_tables_when_the_file_has_them() {
-        let config = parse("[auto]\ninclude = []\n[write]\nenabled = true\n").unwrap();
+        let config = parse("[mobile]\nname = \"app\"\n[auto]\ninclude = []\n").unwrap();
 
         assert_eq!(config, GlobalConfig::default());
+    }
+
+    fn parse_with_home(text: &str) -> Result<GlobalConfig, GlobalConfigError> {
+        GlobalConfig::from_text_with_home(
+            text,
+            Path::new("/c/config.toml"),
+            Some(Path::new("/home/me")),
+        )
+    }
+
+    #[test]
+    fn should_default_to_everywhere_writing_enabled_and_no_worktrees_root() {
+        let config = parse("").unwrap();
+
+        assert_eq!(
+            (
+                config.auto.covers(Path::new("/x"), None),
+                config.write_enabled
+            ),
+            (true, true)
+        );
+        assert_eq!(config, GlobalConfig::default());
+    }
+
+    #[test]
+    fn should_read_the_auto_lists() {
+        let config =
+            parse("[auto]\ninclude = [\"/work/*\"]\nexclude = [\"/work/vendor\"]\n").unwrap();
+
+        assert_eq!(
+            (
+                config.auto.covers(Path::new("/work/app"), None),
+                config.auto.covers(Path::new("/work/vendor"), None),
+                config.auto.covers(Path::new("/other"), None)
+            ),
+            (true, false, false)
+        );
+    }
+
+    #[test]
+    fn should_refuse_an_invalid_glob_in_include_naming_the_key() {
+        assert_eq!(
+            invalid_key("[auto]\ninclude = [\"/a/[b\"]\n"),
+            "[auto] include"
+        );
+    }
+
+    #[test]
+    fn should_refuse_an_invalid_glob_in_exclude_naming_the_key() {
+        assert_eq!(
+            invalid_key("[auto]\nexclude = [\"{a\"]\n"),
+            "[auto] exclude"
+        );
+    }
+
+    #[test]
+    fn should_report_a_parse_error_when_auto_include_is_not_a_list() {
+        assert!(matches!(
+            parse("[auto]\ninclude = \"/work\"\n").unwrap_err(),
+            GlobalConfigError::Parse { .. }
+        ));
+    }
+
+    #[test]
+    fn should_read_the_global_write_setting() {
+        assert!(!parse("[write]\nenabled = false\n").unwrap().write_enabled);
+    }
+
+    #[test]
+    fn should_expand_the_home_folder_of_the_worktrees_root() {
+        let config = parse_with_home("[worktrees]\nroot = \"~/trees\"\n").unwrap();
+
+        assert_eq!(config.worktrees_root, Some(PathBuf::from("/home/me/trees")));
+    }
+
+    #[test]
+    fn should_accept_an_absolute_worktrees_root() {
+        let config = parse_with_home("[worktrees]\nroot = \"/srv/trees\"\n").unwrap();
+
+        assert_eq!(config.worktrees_root, Some(PathBuf::from("/srv/trees")));
+    }
+
+    #[test]
+    fn should_refuse_a_relative_worktrees_root_naming_the_key() {
+        assert_eq!(
+            match parse_with_home("[worktrees]\nroot = \"trees\"\n").unwrap_err() {
+                GlobalConfigError::Invalid { key, .. } => key,
+                other => panic!("unexpected error {other}"),
+            },
+            "[worktrees] root"
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_home_worktrees_root_when_home_is_unknown() {
+        let outcome = GlobalConfig::from_text_with_home(
+            "[worktrees]\nroot = \"~/trees\"\n",
+            Path::new("/c/config.toml"),
+            None,
+        );
+
+        assert!(matches!(outcome, Err(GlobalConfigError::Invalid { .. })));
+    }
+
+    #[test]
+    fn should_default_the_worktrees_root_below_home() {
+        assert_eq!(
+            GlobalConfig::default().worktrees_root(Some(Path::new("/home/me"))),
+            Some(PathBuf::from("/home/me/dev/.worktrees"))
+        );
+    }
+
+    #[test]
+    fn should_prefer_the_configured_worktrees_root_to_the_default() {
+        let config = parse_with_home("[worktrees]\nroot = \"/srv/trees\"\n").unwrap();
+
+        assert_eq!(
+            config.worktrees_root(Some(Path::new("/home/me"))),
+            Some(PathBuf::from("/srv/trees"))
+        );
+    }
+
+    #[test]
+    fn should_let_the_project_setting_win_over_the_global_one() {
+        let global = parse("[write]\nenabled = false\n").unwrap();
+        let project = ProjectConfig {
+            write_enabled: Some(true),
+            ..ProjectConfig::default()
+        };
+
+        assert!(effective_write_enabled(&project, &global));
+    }
+
+    #[test]
+    fn should_fall_back_to_the_global_write_setting_when_the_project_sets_none() {
+        let global = parse("[write]\nenabled = false\n").unwrap();
+
+        assert!(!effective_write_enabled(&ProjectConfig::default(), &global));
+    }
+
+    #[test]
+    fn should_write_by_default_when_nothing_sets_it() {
+        assert!(effective_write_enabled(
+            &ProjectConfig::default(),
+            &GlobalConfig::default()
+        ));
     }
 
     #[test]

@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, value};
 
 use super::RegistryError;
-use super::record::{AssignedPort, InstanceRecord, PortDetail, Registry, normalize_path};
+use super::record::{
+    AssignedPort, InstanceRecord, PortDetail, Registry, RegistryChange, normalize_path,
+};
 use crate::discovery::PortKind;
 use crate::global_config::MAX_SLOT_SIZE;
 use crate::port_range::PortRange;
@@ -319,6 +321,98 @@ pub fn apply_record(
         None => tables.push(new_table(record, path_text, !ends_with_blank_line)),
     }
     Ok(())
+}
+
+/// Applies one change to the document in place.
+pub fn apply_change(
+    document: &mut DocumentMut,
+    change: &RegistryChange,
+    file: &Path,
+) -> Result<(), RegistryError> {
+    match change {
+        RegistryChange::SaveInstance(record) => apply_record(document, record, file),
+        RegistryChange::RemoveInstance(path) => remove_record(document, path, file),
+        RegistryChange::OptOut(path) => add_opted_out(document, path, file),
+        RegistryChange::ClearOptOut(path) | RegistryChange::ForgetOptOut(path) => {
+            remove_opted_out(document, path, file)
+        }
+    }
+}
+
+fn remove_record(
+    document: &mut DocumentMut,
+    path: &Path,
+    file: &Path,
+) -> Result<(), RegistryError> {
+    if document.get(INSTANCE_KEY).is_none() {
+        return Ok(());
+    }
+    let tables = instance_tables(document, file)?;
+    let wanted = normalize_path(path);
+    let position = tables.iter().position(|table| {
+        table
+            .get("path")
+            .and_then(Item::as_str)
+            .is_some_and(|existing| normalize_path(Path::new(existing)) == wanted)
+    });
+    if let Some(index) = position {
+        tables.remove(index);
+    }
+    Ok(())
+}
+
+fn add_opted_out(
+    document: &mut DocumentMut,
+    path: &Path,
+    file: &Path,
+) -> Result<(), RegistryError> {
+    let path_text = path.to_str().ok_or_else(|| RegistryError::PathNotUtf8 {
+        path: path.to_path_buf(),
+    })?;
+    let list = opted_out_list(document, file)?;
+    if position_in(list, path).is_none() {
+        list.push(path_text);
+    }
+    Ok(())
+}
+
+fn remove_opted_out(
+    document: &mut DocumentMut,
+    path: &Path,
+    file: &Path,
+) -> Result<(), RegistryError> {
+    if document.get(OPTED_OUT_KEY).is_none() {
+        return Ok(());
+    }
+    let list = opted_out_list(document, file)?;
+    if let Some(index) = position_in(list, path) {
+        list.remove(index);
+    }
+    Ok(())
+}
+
+fn position_in(list: &Array, path: &Path) -> Option<usize> {
+    let wanted = normalize_path(path);
+    list.iter().position(|entry| {
+        entry
+            .as_str()
+            .is_some_and(|existing| normalize_path(Path::new(existing)) == wanted)
+    })
+}
+
+fn opted_out_list<'a>(
+    document: &'a mut DocumentMut,
+    file: &Path,
+) -> Result<&'a mut Array, RegistryError> {
+    document
+        .entry(OPTED_OUT_KEY)
+        .or_insert_with(|| value(Array::new()))
+        .as_array_mut()
+        .ok_or_else(|| RegistryError::Malformed {
+            path: file.to_path_buf(),
+            entry: OPTED_OUT_KEY.to_owned(),
+            reason: "must be a list of absolute paths".to_owned(),
+        })
 }
 
 fn instance_tables<'a>(

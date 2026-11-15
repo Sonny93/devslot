@@ -10,9 +10,9 @@ use std::time::Duration;
 use toml_edit::DocumentMut;
 
 use super::RegistryError;
-use super::document::{EMPTY_REGISTRY, apply_record, parse_registry};
+use super::document::{EMPTY_REGISTRY, apply_change, parse_registry};
 use super::lock::RegistryLock;
-use super::record::{InstanceRecord, Registry};
+use super::record::{InstanceRecord, Registry, RegistryChange};
 use crate::paths::DevslotPaths;
 use crate::project::bounded_read::{BoundedRead, Unreadable, read_bounded};
 
@@ -25,7 +25,7 @@ pub struct RegistryStore {
 }
 
 /// The registry while this process holds its lock. Every change goes through
-/// [`LockedRegistry::save_instance`].
+/// [`LockedRegistry::apply`].
 #[derive(Debug)]
 pub struct LockedRegistry<'store> {
     store: &'store RegistryStore,
@@ -107,9 +107,21 @@ impl LockedRegistry<'_> {
     /// Adds `record` or updates the entry of its path, then replaces the file.
     /// Every other entry, comment and unknown key stays as it was.
     pub fn save_instance(&mut self, record: &InstanceRecord) -> Result<(), RegistryError> {
+        self.apply(&[RegistryChange::SaveInstance(record.clone())])
+    }
+
+    /// Applies every change to the document in place, checks the result once
+    /// and replaces the file once. Nothing is written when a change or the
+    /// check fails. Everything the changes do not name stays as it was.
+    pub fn apply(&mut self, changes: &[RegistryChange]) -> Result<(), RegistryError> {
+        if changes.is_empty() {
+            return Ok(());
+        }
         let file = &self.store.paths.registry_file;
         let mut document = self.document.clone();
-        apply_record(&mut document, record, file)?;
+        for change in changes {
+            apply_change(&mut document, change, file)?;
+        }
         let text = document.to_string();
         let (checked_document, checked_registry) = parse_registry(&text, file)?;
         write_atomically(&self.store.paths, &text)?;
@@ -282,6 +294,224 @@ mod tests {
         assert!(after.starts_with("# my notes\nversion = 1\n"));
         assert!(after.contains(untouched_second));
         assert!(after.contains("DB_PORT = 20051"));
+    }
+
+    fn apply(store: &RegistryStore, changes: &[RegistryChange]) {
+        store
+            .locked(TIMEOUT, |locked| locked.apply(changes))
+            .unwrap();
+    }
+
+    fn commented_registry_with_two_instances(store: &RegistryStore) -> String {
+        save(store, &record("/work/a", "a", 20050));
+        save(store, &record("/work/b", "b", 20100));
+        let text = read_text(store).replace("version = 1\n", "# my notes\nversion = 1\n");
+        std::fs::write(&store.paths.registry_file, &text).unwrap();
+        text
+    }
+
+    fn entry_text(text: &str, index: usize) -> &str {
+        text.split("[[instance]]").nth(index).unwrap()
+    }
+
+    #[test]
+    fn should_add_the_opted_out_path_before_the_instances_and_keep_the_rest_byte_for_byte() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_in(directory.path());
+        let before = commented_registry_with_two_instances(&store);
+
+        apply(&store, &[RegistryChange::OptOut(PathBuf::from("/work/c"))]);
+
+        let after = read_text(&store);
+        assert_eq!(
+            after,
+            before.replace("version = 1\n", "version = 1\nopted_out = [\"/work/c\"]\n")
+        );
+        assert!(store.read().unwrap().is_opted_out(Path::new("/work/c")));
+    }
+
+    #[test]
+    fn should_not_duplicate_an_opted_out_path_when_it_is_added_twice() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_in(directory.path());
+
+        apply(
+            &store,
+            &[
+                RegistryChange::OptOut(PathBuf::from("/work/c")),
+                RegistryChange::OptOut(PathBuf::from("/work/c/")),
+            ],
+        );
+
+        assert_eq!(
+            store.read().unwrap().opted_out,
+            vec![PathBuf::from("/work/c")]
+        );
+    }
+
+    #[test]
+    fn should_keep_the_other_opted_out_paths_when_one_is_cleared() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_in(directory.path());
+        apply(
+            &store,
+            &[
+                RegistryChange::OptOut(PathBuf::from("/work/c")),
+                RegistryChange::OptOut(PathBuf::from("/work/d")),
+            ],
+        );
+
+        apply(
+            &store,
+            &[RegistryChange::ClearOptOut(PathBuf::from("/work/c"))],
+        );
+
+        assert_eq!(
+            store.read().unwrap().opted_out,
+            vec![PathBuf::from("/work/d")]
+        );
+    }
+
+    #[test]
+    fn should_remove_an_opted_out_path_when_it_is_forgotten_and_keep_instances_and_comments() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_in(directory.path());
+        commented_registry_with_two_instances(&store);
+        apply(&store, &[RegistryChange::OptOut(PathBuf::from("/work/c"))]);
+        let with_opt_out = read_text(&store);
+
+        apply(
+            &store,
+            &[RegistryChange::ForgetOptOut(PathBuf::from("/work/c"))],
+        );
+
+        let after = read_text(&store);
+        assert_eq!(
+            after,
+            with_opt_out.replace("opted_out = [\"/work/c\"]\n", "opted_out = []\n")
+        );
+        assert_eq!(store.read().unwrap().opted_out, Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn should_leave_the_file_unchanged_when_clearing_an_opt_out_that_is_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_in(directory.path());
+        let before = commented_registry_with_two_instances(&store);
+
+        apply(
+            &store,
+            &[RegistryChange::ClearOptOut(PathBuf::from("/work/c"))],
+        );
+
+        assert_eq!(read_text(&store), before);
+    }
+
+    #[test]
+    fn should_remove_only_the_entry_of_the_path_and_keep_the_others_byte_for_byte() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_in(directory.path());
+        let before = commented_registry_with_two_instances(&store);
+        apply(&store, &[RegistryChange::OptOut(PathBuf::from("/work/c"))]);
+
+        apply(
+            &store,
+            &[RegistryChange::RemoveInstance(PathBuf::from("/work/a/"))],
+        );
+
+        let after = read_text(&store);
+        assert!(after.starts_with("# my notes\nversion = 1\nopted_out = [\"/work/c\"]\n"));
+        assert!(after.ends_with(&format!("[[instance]]{}", entry_text(&before, 2))));
+        assert_eq!(store.read().unwrap().instances.len(), 1);
+    }
+
+    #[test]
+    fn should_leave_the_file_unchanged_when_removing_an_instance_that_is_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_in(directory.path());
+        let before = commented_registry_with_two_instances(&store);
+
+        apply(
+            &store,
+            &[RegistryChange::RemoveInstance(PathBuf::from("/work/z"))],
+        );
+
+        assert_eq!(read_text(&store), before);
+    }
+
+    #[test]
+    fn should_leave_a_valid_registry_when_the_last_instance_is_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_in(directory.path());
+        save(&store, &record("/work/a", "a", 20050));
+
+        apply(
+            &store,
+            &[RegistryChange::RemoveInstance(PathBuf::from("/work/a"))],
+        );
+
+        assert_eq!(store.read().unwrap(), Registry::default());
+    }
+
+    #[test]
+    fn should_apply_several_changes_in_one_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_in(directory.path());
+        save(&store, &record("/work/a", "a", 20050));
+
+        apply(
+            &store,
+            &[
+                RegistryChange::RemoveInstance(PathBuf::from("/work/a")),
+                RegistryChange::SaveInstance(record("/work/b", "b", 20100)),
+                RegistryChange::OptOut(PathBuf::from("/work/a")),
+            ],
+        );
+
+        let registry = store.read().unwrap();
+        assert_eq!(
+            (
+                registry.instances.len(),
+                registry.find(Path::new("/work/b")).is_some(),
+                registry.is_opted_out(Path::new("/work/a"))
+            ),
+            (1, true, true)
+        );
+    }
+
+    #[test]
+    fn should_write_nothing_when_a_later_change_of_the_batch_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_in(directory.path());
+        save(&store, &record("/work/a", "a", 20050));
+        let before = read_text(&store);
+
+        let error = store
+            .locked(TIMEOUT, |locked| {
+                locked.apply(&[
+                    RegistryChange::OptOut(PathBuf::from("/work/c")),
+                    RegistryChange::SaveInstance(record("/work/b", "b", 20060)),
+                ])
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, RegistryError::Malformed { .. }));
+        assert_eq!(read_text(&store), before);
+    }
+
+    #[test]
+    fn should_see_the_applied_changes_in_the_locked_registry() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store_in(directory.path());
+
+        let opted_out = store
+            .locked(TIMEOUT, |locked| {
+                locked.apply(&[RegistryChange::OptOut(PathBuf::from("/work/c"))])?;
+                Ok::<_, RegistryError>(locked.registry().is_opted_out(Path::new("/work/c")))
+            })
+            .unwrap();
+
+        assert!(opted_out);
     }
 
     #[test]

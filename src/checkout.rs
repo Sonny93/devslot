@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::instance_name::repository_name_from_common_dir;
 
 const GIT_PROGRAM: &str = "git";
+const DISABLE_FSMONITOR_ARGUMENTS: [&str; 2] = ["-c", "core.fsmonitor=false"];
 const NOT_A_REPOSITORY_MESSAGE: &str = "not a git repository";
 const WORKTREE_PREFIX: &str = "worktree ";
 const BARE_MARKER: &str = "bare";
@@ -130,6 +131,7 @@ fn canonicalize(path: &Path) -> Result<PathBuf, CheckoutError> {
 
 fn run_git(directory: &Path, arguments: &[&str]) -> Result<Output, CheckoutError> {
     Command::new(GIT_PROGRAM)
+        .args(DISABLE_FSMONITOR_ARGUMENTS)
         .args(arguments)
         .current_dir(directory)
         .env("LC_ALL", "C")

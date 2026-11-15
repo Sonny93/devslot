@@ -62,6 +62,22 @@ impl InstanceRecord {
     }
 }
 
+/// One change to the registry file. Several changes are applied and written
+/// together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryChange {
+    /// Adds the instance or updates the entry of its path.
+    SaveInstance(InstanceRecord),
+    /// Removes the entry of this path; an absent entry is not an error.
+    RemoveInstance(PathBuf),
+    /// Adds this path to the checkouts opted out of automatic registration.
+    OptOut(PathBuf),
+    /// Takes this path off the opted-out list, because the user registers it again.
+    ClearOptOut(PathBuf),
+    /// Takes this path off the opted-out list, because its folder is gone.
+    ForgetOptOut(PathBuf),
+}
+
 /// Everything in the registry file that devslot understands.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Registry {
@@ -78,6 +94,14 @@ impl Registry {
         self.instances
             .iter()
             .find(|instance| normalize_path(&instance.path) == wanted)
+    }
+
+    /// Whether `path` is on the opted-out list, compared as normalized paths.
+    pub fn is_opted_out(&self, path: &Path) -> bool {
+        let wanted = normalize_path(path);
+        self.opted_out
+            .iter()
+            .any(|opted| normalize_path(opted) == wanted)
     }
 
     /// Every port any instance holds.
@@ -124,6 +148,22 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[test]
+    fn should_tell_an_opted_out_path_when_it_differs_by_a_trailing_slash() {
+        let registry = Registry {
+            opted_out: vec![PathBuf::from("/work/a")],
+            ..Registry::default()
+        };
+
+        assert_eq!(
+            (
+                registry.is_opted_out(Path::new("/work/a/")),
+                registry.is_opted_out(Path::new("/work/b"))
+            ),
+            (true, false)
+        );
+    }
 
     #[test]
     fn should_ignore_a_trailing_slash_and_dot_components_when_normalizing() {

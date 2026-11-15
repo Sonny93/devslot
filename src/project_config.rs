@@ -1,6 +1,7 @@
 //! The project configuration: `devslot.toml` overridden by `devslot.local.toml`.
 //!
-//! Only the keys phase 1 reads are modeled; other keys are accepted and ignored.
+//! Only the keys devslot reads are modeled (`[compose]`, `[ports]`, `[env]`,
+//! `run` and `[write]`); other keys are accepted and ignored.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -62,6 +63,12 @@ pub enum ConfigError {
         /// The key at fault.
         key: String,
     },
+    /// `run` is empty.
+    #[error("run in {file} must not be empty")]
+    EmptyRun {
+        /// The file name.
+        file: &'static str,
+    },
     /// An `[env]` entry cannot be exported. The value is never quoted.
     #[error("invalid [env] key {key:?} in {file}: {reason}")]
     InvalidEnv {
@@ -82,6 +89,14 @@ struct RawConfig {
     ports: RawPorts,
     #[serde(default)]
     env: BTreeMap<String, RawEnvValue>,
+    run: Option<String>,
+    #[serde(default)]
+    write: RawWrite,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawWrite {
+    enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +151,12 @@ pub struct ProjectConfig {
     pub ignored_ports: VariableList,
     /// `[env]`: the values built from the assigned ports, local over committed per key.
     pub env: Vec<EnvSetting>,
+    /// `run`: the command `ds run` executes when it is given none.
+    pub run: Option<String>,
+    /// The file that set `run`.
+    pub run_origin: Option<&'static str>,
+    /// `[write] enabled`: whether ds may write `.env`; the local file wins.
+    pub write_enabled: Option<bool>,
 }
 
 impl ProjectConfig {
@@ -179,6 +200,13 @@ impl ProjectConfig {
                     names,
                     file: Some(file),
                 };
+            }
+            if layer.run.is_some() {
+                config.run = layer.run;
+                config.run_origin = Some(file);
+            }
+            if layer.write.enabled.is_some() {
+                config.write_enabled = layer.write.enabled;
             }
             for (key, value) in layer.env {
                 let RawEnvValue::Text(value) = value else {
@@ -229,6 +257,7 @@ fn parse(text: &str, file: &'static str) -> Result<RawConfig, ConfigError> {
         message: error.message().to_owned(),
     })?;
     check_port_names(&raw.ports, file)?;
+    check_run(raw.run.as_deref(), file)?;
     check_committed_extra_names(&raw.ports, file)?;
     for (key, value) in &mut raw.env {
         let text = match value {
@@ -249,6 +278,13 @@ fn parse(text: &str, file: &'static str) -> Result<RawConfig, ConfigError> {
         *value = RawEnvValue::Text(text);
     }
     Ok(raw)
+}
+
+fn check_run(run: Option<&str>, file: &'static str) -> Result<(), ConfigError> {
+    match run {
+        Some(command) if command.trim().is_empty() => Err(ConfigError::EmptyRun { file }),
+        _ => Ok(()),
+    }
 }
 
 fn check_committed_extra_names(ports: &RawPorts, file: &'static str) -> Result<(), ConfigError> {
@@ -325,6 +361,100 @@ mod tests {
 
     fn write(root: &Path, file: &str, text: &str) {
         std::fs::write(root.join(file), text).unwrap();
+    }
+
+    #[test]
+    fn should_read_the_run_command_and_its_file() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), CONFIG_FILE, "run = \"pnpm dev\"\n");
+
+        let config = ProjectConfig::load(root.path()).unwrap();
+
+        assert_eq!(
+            (config.run.as_deref(), config.run_origin),
+            (Some("pnpm dev"), Some(CONFIG_FILE))
+        );
+    }
+
+    #[test]
+    fn should_let_the_local_run_command_win_over_the_committed_one() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), CONFIG_FILE, "run = \"pnpm dev\"\n");
+        write(root.path(), LOCAL_CONFIG_FILE, "run = \"pnpm start\"\n");
+
+        let config = ProjectConfig::load(root.path()).unwrap();
+
+        assert_eq!(
+            (config.run.as_deref(), config.run_origin),
+            (Some("pnpm start"), Some(LOCAL_CONFIG_FILE))
+        );
+    }
+
+    #[test]
+    fn should_refuse_an_empty_run_command_naming_the_file() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), CONFIG_FILE, "run = \"  \"\n");
+
+        assert!(matches!(
+            ProjectConfig::load(root.path()),
+            Err(ConfigError::EmptyRun { file: CONFIG_FILE })
+        ));
+    }
+
+    #[test]
+    fn should_refuse_a_run_command_that_is_not_a_string() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), CONFIG_FILE, "run = 3\n");
+
+        assert!(matches!(
+            ProjectConfig::load(root.path()),
+            Err(ConfigError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn should_leave_write_unset_when_no_file_sets_it() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            ProjectConfig::load(root.path()).unwrap().write_enabled,
+            None
+        );
+    }
+
+    #[test]
+    fn should_let_the_local_write_setting_win_over_the_committed_one() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), CONFIG_FILE, "[write]\nenabled = false\n");
+        write(root.path(), LOCAL_CONFIG_FILE, "[write]\nenabled = true\n");
+
+        assert_eq!(
+            ProjectConfig::load(root.path()).unwrap().write_enabled,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn should_keep_the_committed_write_setting_when_the_local_file_does_not_set_it() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), CONFIG_FILE, "[write]\nenabled = false\n");
+        write(root.path(), LOCAL_CONFIG_FILE, "run = \"x\"\n");
+
+        assert_eq!(
+            ProjectConfig::load(root.path()).unwrap().write_enabled,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_write_setting_that_is_not_a_boolean() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), CONFIG_FILE, "[write]\nenabled = \"no\"\n");
+
+        assert!(matches!(
+            ProjectConfig::load(root.path()),
+            Err(ConfigError::Parse { .. })
+        ));
     }
 
     #[test]
@@ -517,8 +647,8 @@ mod tests {
     }
 
     #[test]
-    fn should_ignore_unknown_keys_when_the_file_has_the_run_key() {
-        let config = ProjectConfig::from_text("run = \"node ace serve\"\n").unwrap();
+    fn should_ignore_unknown_keys_when_the_file_has_some() {
+        let config = ProjectConfig::from_text("[mobile]\nname = \"app\"\n").unwrap();
 
         assert_eq!(config, ProjectConfig::default());
     }
