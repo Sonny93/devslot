@@ -233,6 +233,7 @@ fn is_same_file(left: &Path, right: &Path) -> bool {
     matches!((left.canonicalize(), right.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
+/// Names the entry position in `volumes`, never the source: Compose interpolated it, so it may hold secrets.
 fn check_bind_mounts(
     file: &str,
     probed: &ProbedCompose,
@@ -240,26 +241,26 @@ fn check_bind_mounts(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (service_name, service) in &probed.config.services {
-        for mount in service
-            .volumes
-            .iter()
-            .filter(|mount| mount.kind == BIND_MOUNT)
-        {
+        for (index, mount) in service.volumes.iter().enumerate() {
+            if mount.kind != BIND_MOUNT {
+                continue;
+            }
             let Some(source) = mount.source.as_deref() else {
                 continue;
             };
             if Path::new(source).starts_with(context.root) {
                 continue;
             }
+            let position = index + 1;
             findings.push(
                 Finding::new(
                     Level::Warning,
                     Check::BindMount,
-                    format!("service mounts {source}, outside the checkout: instances would share the same files"),
+                    format!("entry {position} of volumes is a bind mount outside the checkout: instances would share the same files"),
                 )
                 .in_file(file)
                 .in_service(service_name)
-                .for_key(source),
+                .for_key("volumes"),
             );
         }
     }
@@ -456,8 +457,31 @@ mod tests {
         let findings = run(&[], config, &[]);
 
         assert_eq!(
-            (checks_of(&findings), findings[0].key.as_deref()),
-            (vec![Check::BindMount], Some("/var/data"))
+            (
+                checks_of(&findings),
+                findings[0].key.as_deref(),
+                findings[0].service.as_deref()
+            ),
+            (vec![Check::BindMount], Some("volumes"), Some("app"))
+        );
+    }
+
+    #[test]
+    fn should_not_print_the_bind_source_when_it_is_outside_the_checkout() {
+        let config = r#"{"services":{"app":{"volumes":[{"type":"volume","source":"data","target":"/d"},{"type":"bind","source":"/srv/SECRET-TOKEN-123","target":"/s"}]}}}"#;
+
+        let findings = run(&[], config, &[]);
+
+        assert_eq!(
+            (
+                findings[0].message.contains("SECRET"),
+                findings[0]
+                    .key
+                    .as_deref()
+                    .is_some_and(|key| key.contains("SECRET")),
+                findings[0].message.contains("entry 2")
+            ),
+            (false, false, true)
         );
     }
 
