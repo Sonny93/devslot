@@ -251,6 +251,16 @@ This repository runs several instances of its dev stack on one machine, one per 
 - `ds doctor` explains why a checkout cannot be isolated.
 ```
 
+## Known limitations
+
+- **Two Adonis servers started in the same second can share HMR port 24678.** `@adonisjs/assembler` 8 picks the HMR port itself (24678 when free, else a random free port) and ignores `VITE_HMR_PORT` from `.env`, so the slot value is not used. Started one after the other, instances get distinct ports. Workaround: start them a few seconds apart.
+- **Sessions started with `claude -p` keep their worktree.** Claude Code never fires `WorktreeRemove` for them, so the worktree, its instance and its data stay until you run `ds worktree rm <name>`.
+- **Sessions started with `--tmux` skip the plugin's `WorktreeCreate` hook.** See [Install](#install) for the hooks to declare yourself.
+- **A server started without `ds run` may survive a worktree removal.** Its process listening on an instance port is stopped, but a parent that respawns it (for example `node ace serve` run by hand) is only listed. Servers started through `ds run` or `ds up` are stopped entirely.
+- **Cookies are not isolated by port.** Two instances opened on `localhost` with the same session cookie name log each other out. Named URLs per instance (after v1) will fix it.
+- **Dev and local prod share the compose project** of a registered checkout, so `just prod` runs on the dev database volume. Workaround: `-p <name>` in the prod recipe (see the [spec](docs/spec.md)).
+- **Processes are stopped on Linux only.** Elsewhere, a worktree removal stops nothing and lists nothing.
+
 ## Develop
 
 The checks CI runs (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
