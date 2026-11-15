@@ -89,7 +89,7 @@ pub fn describe_up_exit_codes() -> String {
     format_codes(&[
         (
             SUCCESS,
-            "the services are up; with a run key, the command's own exit code, whatever it is",
+            "the services are up; with a run key and without --no-run, the command's own exit code, whatever it is",
         ),
         (
             ERROR,

@@ -9,7 +9,7 @@ devslot gives each checkout or worktree of a project its own slot of ports and i
 
 ## Rules
 
-- Start the services with `ds up`. To run a command with the instance environment, use `ds run -- <command>`.
+- Start the services with `ds up --no-run`. Plain `ds up` then runs the `run` key of `devslot.toml` in the foreground and does not return: use it only as a background command, when you also want the app. To run a command with the instance environment, use `ds run -- <command>`.
 - Read ports and URLs with `ds info --json`. Never guess or hardcode them: 3333, 5432 and 24678 are the defaults of other instances.
 - Reset the data with `ds reset` (everything) or `ds reset <service>` (one service). It deletes the data and starts the services again.
 - Never run `ds rm`, `ds prune`, `ds worktree rm`, `docker compose down -v`, `docker volume rm` or remove containers by hand: that can delete another agent's data. Ask the user when something has to be removed.

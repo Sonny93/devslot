@@ -18,7 +18,7 @@ use crate::project_config::ProjectConfig;
 use crate::report::RegisteredInfo;
 use crate::services_state::ServicesState;
 
-const GUIDANCE: &str = "Use ds info --json for ports and URLs; ds up starts the services; ds reset resets the data; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand.";
+pub(super) const GUIDANCE: &str = "Use ds info --json for ports and URLs; ds up --no-run starts the services (plain ds up then runs the app in the foreground and does not return); ds reset resets the data; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand.";
 
 #[derive(Debug, Deserialize)]
 struct SessionStartInput {

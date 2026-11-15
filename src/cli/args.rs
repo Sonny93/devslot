@@ -149,9 +149,9 @@ pub enum Command {
     /// Register this checkout if needed and run a command with the instance environment
     #[command(after_help = run_help())]
     Run(RunArguments),
-    /// Register this checkout if needed, start its services, then run the run key
+    /// Register this checkout if needed, start its services, then run the run key (unless --no-run)
     #[command(after_help = up_help())]
-    Up,
+    Up(UpArguments),
     /// Manage the linked worktrees of this repository
     Worktree(WorktreeArguments),
 }
@@ -205,6 +205,14 @@ pub enum HookEvent {
     PreToolUse,
     /// Tell the agent which instance its checkout is
     SessionStart,
+}
+
+/// The arguments of `ds up`.
+#[derive(Debug, Args)]
+pub struct UpArguments {
+    /// Start the services only, without running the run key of devslot.toml
+    #[arg(long)]
+    pub no_run: bool,
 }
 
 /// The options of the commands that delete data after asking.

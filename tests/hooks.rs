@@ -768,7 +768,7 @@ fn should_print_the_info_and_the_guidance_when_the_checkout_is_registered() {
     assert!(run.stdout.contains("Services:      run ds info to check\n"));
     assert!(run.stdout.contains("DB_PORT"));
     assert!(run.stdout.ends_with(
-        "Use ds info --json for ports and URLs; ds up starts the services; ds reset resets the data; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand.\n"
+        "Use ds info --json for ports and URLs; ds up --no-run starts the services (plain ds up then runs the app in the foreground and does not return); ds reset resets the data; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand.\n"
     ));
     assert_eq!(project.machine().docker_log(), Vec::<String>::new());
 }

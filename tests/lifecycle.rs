@@ -454,6 +454,22 @@ fn should_run_the_run_key_with_the_instance_environment_after_the_services() {
 }
 
 #[test]
+fn should_start_the_services_without_running_the_run_key_when_up_has_no_run() {
+    let project = git_project();
+    project.write("devslot.toml", "run = \"touch ran-the-app\"\n");
+
+    let run = project.run(&["up", "--no-run"]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(
+        run.stderr
+            .contains(&format!("ds: the services of {} are up", name_of(&project)))
+    );
+    assert!(log_has_line_ending_with(&project, UP_ARGUMENTS));
+    assert!(!project.exists("ran-the-app"));
+}
+
+#[test]
 fn should_refuse_to_start_when_another_program_holds_a_service_port() {
     let project = git_project();
     project

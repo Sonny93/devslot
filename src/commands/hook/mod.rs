@@ -33,3 +33,56 @@ fn exit_code_of(result: Result<u8, HookFailure>) -> u8 {
         }
     }
 }
+
+#[cfg(test)]
+mod agent_rules_tests {
+    use super::pre_tool_use::DENY_REASON;
+    use super::session_start::GUIDANCE;
+
+    const SKILL: &str = include_str!("../../../plugin/skills/devslot/SKILL.md");
+    const README: &str = include_str!("../../../README.md");
+    const RULES_HEADING: &str = "\n## Rules for agents";
+    const NEXT_SECTION_HEADING: &str = "\n```\n\n## ";
+    const DELETING_COMMANDS: [&str; 3] = ["ds rm", "ds prune", "ds worktree rm"];
+    const STARTING_COMMAND: &str = "ds up --no-run";
+
+    fn readme_rules() -> &'static str {
+        let from_heading = README
+            .split_once(RULES_HEADING)
+            .map_or("", |(_, rest)| rest);
+        from_heading
+            .split_once(NEXT_SECTION_HEADING)
+            .map_or(from_heading, |(rules, _)| rules)
+    }
+
+    fn missing(copies: &[(&str, &str)], commands: &[&str]) -> Vec<String> {
+        copies
+            .iter()
+            .flat_map(|(copy, text)| {
+                commands
+                    .iter()
+                    .filter(|command| !text.contains(**command))
+                    .map(move |command| format!("{command} is missing from {copy}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn should_name_the_same_commands_in_the_four_copies_of_the_agent_rules() {
+        let all_commands = [STARTING_COMMAND]
+            .into_iter()
+            .chain(DELETING_COMMANDS)
+            .collect::<Vec<_>>();
+        let mut problems = missing(
+            &[
+                ("SKILL.md", SKILL),
+                ("the README rules for agents", readme_rules()),
+                ("GUIDANCE", GUIDANCE),
+            ],
+            &all_commands,
+        );
+        problems.extend(missing(&[("DENY_REASON", DENY_REASON)], &DELETING_COMMANDS));
+
+        assert_eq!(problems, Vec::<String>::new());
+    }
+}

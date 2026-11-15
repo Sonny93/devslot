@@ -1,7 +1,9 @@
 //! `ds up`: register the checkout if needed, start the compose services, then
-//! run the `run` command of `devslot.toml` in the foreground when there is one.
+//! run the `run` command of `devslot.toml` in the foreground when there is one,
+//! unless `--no-run` asks for the services only.
 
 use crate::allocation::PortProbe;
+use crate::cli::args::UpArguments;
 use crate::cli::exit_code;
 use crate::cli::style::{ColorChoice, Style};
 use crate::commands::docker_step::checked_step;
@@ -48,7 +50,7 @@ pub struct UpPlan<'a> {
 }
 
 /// Registers the checkout, starts its services, then runs the app.
-pub fn run_up(color: ColorChoice) -> Result<u8, ToolError> {
+pub fn run_up(color: ColorChoice, arguments: &UpArguments) -> Result<u8, ToolError> {
     let checkout = locate_checkout()?;
     let machine = Machine::from_process()?;
     let global = GlobalConfig::load(&machine.paths.config_file)?;
@@ -65,7 +67,7 @@ pub fn run_up(color: ColorChoice) -> Result<u8, ToolError> {
         instance: &registration.instance,
         target: &context.target,
         has_compose_file: context.has_compose_file,
-        runs_app: context.config.run.is_some(),
+        runs_app: runs_app(&context, arguments),
     };
     let outcome = start_services(&DockerRunner::from_environment(), &SystemPortProbe, &plan)?;
     if matches!(
@@ -74,11 +76,21 @@ pub fn run_up(color: ColorChoice) -> Result<u8, ToolError> {
     ) {
         return Ok(exit_code::ERROR);
     }
-    Ok(finish(&registration.instance, &context, outcome))
+    Ok(finish(&registration.instance, &context, outcome, arguments))
 }
 
-fn finish(instance: &InstanceRecord, context: &InstanceContext, outcome: UpOutcome) -> u8 {
-    let Some(run) = context.config.run.as_deref() else {
+fn runs_app(context: &InstanceContext, arguments: &UpArguments) -> bool {
+    !arguments.no_run && context.config.run.is_some()
+}
+
+fn finish(
+    instance: &InstanceRecord,
+    context: &InstanceContext,
+    outcome: UpOutcome,
+    arguments: &UpArguments,
+) -> u8 {
+    let run = context.config.run.as_deref().filter(|_| !arguments.no_run);
+    let Some(run) = run else {
         if outcome == UpOutcome::Started {
             eprintln!("ds: the services of {} are up", instance.name);
         }

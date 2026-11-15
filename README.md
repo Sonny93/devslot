@@ -74,7 +74,7 @@ In a project that has a compose file for development:
 
 ```sh
 ds doctor    # review the project: what ds manages, what would break isolation
-ds up        # register this checkout, write the .env block, start the services
+ds up        # register this checkout, write the .env block, start the services (--no-run: skip the run key)
 ds info      # name, slot, ports and URLs of this instance (--json for scripts)
 ds rm        # delete the instance's data, remove the block, opt the checkout out
 ```
@@ -114,7 +114,7 @@ DEVSLOT_SLOT=1
 | Command | What it does |
 | --- | --- |
 | `ds doctor [--json]` | Reviews the project without starting or writing anything. |
-| `ds up` | Registers the checkout, writes the block, starts the services, then runs the `run` key. |
+| `ds up` | Registers the checkout, writes the block, starts the services, then runs the `run` key (`--no-run`: services only). |
 | `ds down` | Stops the services and keeps the data. |
 | `ds run -- <command>` | Registers the checkout if needed and runs a command with the instance environment. |
 | `ds env [--format sh\|json]` | Prints the environment of the instance. |
@@ -148,7 +148,7 @@ Priority: `devslot.local.toml`, `devslot.toml`, the global config, the defaults.
 `devslot.toml` at the repository root (committed or not), overridden on your machine by `devslot.local.toml` (ignored by git):
 
 ```toml
-# App command, run by ds up in the foreground after the services.
+# App command, run by ds up (not ds up --no-run) in the foreground after the services.
 run = "node ace serve --hmr"
 
 [compose]
@@ -242,7 +242,7 @@ The plugin's skill gives Claude Code these rules. For other agents (Codex, Curso
 
 This repository runs several instances of its dev stack on one machine, one per checkout, through devslot (`ds`). Other agents work on the same machine.
 
-- Start the services with `ds up`. Run a command with the instance environment with `ds run -- <command>`.
+- Start the services with `ds up --no-run`. Plain `ds up` also runs the `run` key in the foreground and does not return: run it as a background command, only to get the app too. Run a command with the instance environment with `ds run -- <command>`.
 - Read ports and URLs with `ds info --json`. Never guess or hardcode them: 3333, 5432 and 24678 are the defaults of other instances.
 - Reset the data with `ds reset` (everything) or `ds reset <service>`.
 - Never run `ds rm`, `ds prune`, `ds worktree rm`, `docker compose down -v`, `docker volume rm` or remove containers by hand: it can delete another agent's data. Ask the user.

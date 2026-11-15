@@ -88,7 +88,7 @@ fn execute(cli: &Cli) -> Result<u8, ToolError> {
         Command::Reset(arguments) => run_reset(arguments.service.as_deref()),
         Command::Rm(arguments) => run_rm(arguments.yes.into()),
         Command::Run(arguments) => run_command(&arguments.command, cli.color),
-        Command::Up => run_up(cli.color),
+        Command::Up(arguments) => run_up(cli.color, arguments),
         Command::Worktree(arguments) => match &arguments.action {
             WorktreeAction::Rm(rm) => run_worktree_rm(rm),
         },
