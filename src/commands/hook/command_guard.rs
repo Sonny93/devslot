@@ -3,10 +3,12 @@
 //! gets through, and a quoted string such as `echo "ds rm"` is denied too.
 
 const SEPARATORS: [char; 9] = [';', '&', '|', '(', ')', '{', '}', '\n', '`'];
+const LINE_CONTINUATION: &str = "\\\n";
 const QUOTES: [char; 2] = ['"', '\''];
-const WRAPPERS: [&str; 16] = [
+const WRAPPERS: [&str; 22] = [
     "sudo", "env", "command", "exec", "nohup", "time", "then", "do", "else", "!", "timeout",
-    "nice", "ionice", "stdbuf", "xargs", "watch",
+    "nice", "ionice", "stdbuf", "xargs", "watch", "if", "elif", "while", "until", "eval",
+    "builtin",
 ];
 const DESTRUCTIVE_SUBCOMMANDS: [&str; 2] = ["rm", "prune"];
 const PROGRAM_NAME: &str = "ds";
@@ -24,6 +26,7 @@ const COLOR_OPTION_PREFIX: &str = "--color=";
 /// checked too. A quoted text is also read as a command of its own, so
 /// `bash -c 'ds rm'` is denied.
 pub fn is_destructive_ds_command(command: &str) -> bool {
+    let command = command.replace(LINE_CONTINUATION, " ");
     command.split(is_separator).any(is_destructive_segment)
         || command
             .split(|character| is_separator(character) || QUOTES.contains(&character))
@@ -163,6 +166,12 @@ mod tests {
             "ionice -c 2 ds rm",
             "stdbuf -oL ds rm",
             "xargs ds rm",
+            "ds \\\n  prune --yes",
+            "if ds rm --yes; then echo done; fi",
+            "until ds prune --yes; do sleep 1; done",
+            "while ds rm; do :; done",
+            "eval ds rm --yes",
+            "builtin exec ds rm",
             "watch -n 1 ds rm",
         ] {
             assert!(is_destructive_ds_command(command), "{command}");
