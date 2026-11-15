@@ -25,6 +25,7 @@ pub mod error;
 pub mod git_worktree;
 pub mod global_config;
 pub mod instance_name;
+pub mod instance_processes;
 pub mod paths;
 pub mod port_check;
 pub mod port_probe;
@@ -45,7 +46,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use cli::args::{Cli, Command};
+use cli::args::{Cli, Command, WorktreeAction};
 use cli::exit_code;
 use commands::doctor::run_doctor_command;
 use commands::down::run_down;
@@ -59,6 +60,7 @@ use commands::reset::run_reset;
 use commands::rm::run_rm;
 use commands::run::run_command;
 use commands::up::run_up;
+use commands::worktree_rm::run_worktree_rm;
 use error::ToolError;
 
 /// Parses the command line, runs the command and returns the exit code.
@@ -87,5 +89,8 @@ fn execute(cli: &Cli) -> Result<u8, ToolError> {
         Command::Rm(arguments) => run_rm(arguments.yes.into()),
         Command::Run(arguments) => run_command(&arguments.command, cli.color),
         Command::Up => run_up(cli.color),
+        Command::Worktree(arguments) => match &arguments.action {
+            WorktreeAction::Rm(rm) => run_worktree_rm(rm),
+        },
     }
 }

@@ -9,7 +9,7 @@ use super::exit_code::{
     describe_env_exit_codes, describe_exit_codes, describe_hook_exit_codes,
     describe_info_exit_codes, describe_ls_exit_codes, describe_prune_exit_codes,
     describe_reset_exit_codes, describe_rm_exit_codes, describe_run_exit_codes,
-    describe_up_exit_codes,
+    describe_up_exit_codes, describe_worktree_rm_exit_codes,
 };
 use super::style::ColorChoice;
 
@@ -96,6 +96,10 @@ fn prune_help() -> String {
     help_with(&describe_prune_exit_codes(), &[DOCKER_HELP, XDG_HELP])
 }
 
+fn worktree_rm_help() -> String {
+    help_with(&describe_worktree_rm_exit_codes(), &[DOCKER_HELP, XDG_HELP])
+}
+
 /// The `ds` command line.
 #[derive(Debug, Parser)]
 #[command(name = "ds", version, about = "Run several instances of the same dev stack on one machine", after_help = top_level_help())]
@@ -148,6 +152,38 @@ pub enum Command {
     /// Register this checkout if needed, start its services, then run the run key
     #[command(after_help = up_help())]
     Up,
+    /// Manage the linked worktrees of this repository
+    Worktree(WorktreeArguments),
+}
+
+/// The arguments of `ds worktree`.
+#[derive(Debug, Args)]
+pub struct WorktreeArguments {
+    /// What to do with a worktree
+    #[command(subcommand)]
+    pub action: WorktreeAction,
+}
+
+/// The actions of `ds worktree`.
+#[derive(Debug, Subcommand)]
+pub enum WorktreeAction {
+    /// Stop the processes of a worktree's instance, delete its data and remove the worktree
+    #[command(after_help = worktree_rm_help())]
+    Rm(WorktreeRmArguments),
+}
+
+/// The arguments of `ds worktree rm`.
+#[derive(Debug, Args)]
+pub struct WorktreeRmArguments {
+    /// A worktree name of this repository, or a path (it holds `/` or starts with `.`)
+    #[arg(value_name = "NAME_OR_PATH")]
+    pub target: String,
+    /// Do not ask for confirmation
+    #[arg(long)]
+    pub yes: bool,
+    /// Remove the worktree even with uncommitted changes or commits found nowhere else
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// The arguments of `ds hook`.
@@ -374,6 +410,43 @@ mod tests {
             cli.command,
             Command::Reset(ResetArguments { service: None })
         ));
+    }
+
+    #[test]
+    fn should_parse_worktree_rm_with_its_flags() {
+        let cli =
+            Cli::try_parse_from(["ds", "worktree", "rm", "feat", "--yes", "--force"]).unwrap();
+
+        let Command::Worktree(WorktreeArguments {
+            action: WorktreeAction::Rm(arguments),
+        }) = cli.command
+        else {
+            panic!("expected worktree rm");
+        };
+        assert_eq!(arguments.target, "feat");
+        assert!(arguments.yes);
+        assert!(arguments.force);
+    }
+
+    #[test]
+    fn should_ask_and_refuse_force_by_default_when_worktree_rm_has_no_flag() {
+        let cli = Cli::try_parse_from(["ds", "worktree", "rm", "./x"]).unwrap();
+
+        let Command::Worktree(WorktreeArguments {
+            action: WorktreeAction::Rm(arguments),
+        }) = cli.command
+        else {
+            panic!("expected worktree rm");
+        };
+        assert!(!arguments.yes);
+        assert!(!arguments.force);
+    }
+
+    #[test]
+    fn should_reject_worktree_without_an_action_or_rm_without_a_target() {
+        assert!(Cli::try_parse_from(["ds", "worktree"]).is_err());
+        assert!(Cli::try_parse_from(["ds", "worktree", "rm"]).is_err());
+        assert!(Cli::try_parse_from(["ds", "worktree", "remove", "x"]).is_err());
     }
 
     #[test]

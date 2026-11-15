@@ -45,9 +45,6 @@ pub enum HookFailure {
         /// The underlying error.
         source: io::Error,
     },
-    /// The path is not the root of a linked worktree, so nothing was removed.
-    #[error("{} is not the root of a linked worktree; nothing was removed", .0.display())]
-    NotLinkedWorktree(PathBuf),
     /// Git refused, or could not run.
     #[error(transparent)]
     Git(#[from] WorktreeGitError),
@@ -64,9 +61,7 @@ impl HookFailure {
     /// the tool itself failed or the input is invalid.
     pub const fn exit_code(&self) -> u8 {
         match self {
-            Self::Git(WorktreeGitError::Rejected { .. }) | Self::NotLinkedWorktree(_) => {
-                exit_code::ERROR
-            }
+            Self::Git(WorktreeGitError::Rejected { .. }) => exit_code::ERROR,
             _ => exit_code::TOOL_FAILURE,
         }
     }
@@ -74,8 +69,6 @@ impl HookFailure {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
     #[test]
@@ -83,13 +76,6 @@ mod tests {
         let failure = HookFailure::Git(WorktreeGitError::Rejected {
             command: "worktree add",
         });
-
-        assert_eq!(failure.exit_code(), 1);
-    }
-
-    #[test]
-    fn should_exit_1_when_the_path_is_not_a_linked_worktree() {
-        let failure = HookFailure::NotLinkedWorktree(PathBuf::from("/x"));
 
         assert_eq!(failure.exit_code(), 1);
     }

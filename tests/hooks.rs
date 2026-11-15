@@ -5,6 +5,7 @@
 
 mod support;
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -460,9 +461,40 @@ fn should_keep_the_data_and_the_entry_when_git_refuses_to_remove_a_locked_worktr
     let run = sandbox.remove(&path, &[]);
 
     assert_eq!(run.status, 1, "{}", run.stderr);
+    assert!(run.stderr.contains(&format!(
+        "ds: {} is locked (git worktree unlock first)",
+        path.display()
+    )));
     assert!(path.exists());
     assert_eq!(sandbox.machine().instance_names().len(), 1);
     assert_eq!(sandbox.machine().docker_log(), Vec::<String>::new());
+}
+
+#[test]
+fn should_go_on_and_warn_when_git_forgets_the_worktree_but_leaves_its_folder() {
+    let sandbox = sandbox();
+    let path = sandbox.created("feature-x");
+    let blocked = path.join("blocked");
+    std::fs::create_dir(&blocked).unwrap();
+    std::fs::write(blocked.join("file"), "x").unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    sandbox.machine().clear_docker_log();
+
+    let run = sandbox.remove(&path, &[]);
+
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(run.stderr.contains(&format!(
+        "ds: warning: git left {} on disk; remove it by hand",
+        path.display()
+    )));
+    assert!(path.exists());
+    assert!(
+        !git_output(&sandbox.main_path(), &["worktree", "list", "--porcelain"])
+            .contains(path.to_str().unwrap())
+    );
+    assert!(sandbox.machine().docker_log().join("\n").contains("ps -aq"));
+    assert_eq!(sandbox.machine().instance_names(), Vec::<String>::new());
 }
 
 #[test]
@@ -594,7 +626,7 @@ fn answer_of(run: &Run) -> Value {
 }
 
 #[test]
-fn should_deny_the_command_when_it_runs_ds_rm_or_ds_prune() {
+fn should_deny_the_command_when_it_runs_ds_rm_ds_prune_ds_worktree_rm_or_a_hook() {
     let project = git_project();
     for command in [
         "ds rm",
@@ -605,6 +637,8 @@ fn should_deny_the_command_when_it_runs_ds_rm_or_ds_prune() {
         "ds 'rm'",
         "ds run -- ds rm --yes",
         "timeout 5 ds prune",
+        "ds worktree rm feature-x --yes",
+        "ds hook worktree-remove",
     ] {
         let run = pre_tool_use(&project, Some(command), &[]);
 
@@ -614,7 +648,7 @@ fn should_deny_the_command_when_it_runs_ds_rm_or_ds_prune() {
         assert_eq!(output["permissionDecision"], "deny", "{command}");
         assert_eq!(
             output["permissionDecisionReason"],
-            "ds rm and ds prune delete data and other agents work on this machine; ask the user to run it",
+            "ds rm, ds prune and ds worktree rm delete data, ds hook is run by Claude Code itself, and other agents work on this machine; ask the user to run it",
             "{command}"
         );
     }
@@ -624,7 +658,14 @@ fn should_deny_the_command_when_it_runs_ds_rm_or_ds_prune() {
 #[test]
 fn should_not_deny_the_commands_that_only_look_like_ds_rm() {
     let project = git_project();
-    for command in ["ds reset", "ds run -- rm -rf build", "dsrm", "ds rmx", "ls"] {
+    for command in [
+        "ds reset",
+        "ds run -- rm -rf build",
+        "dsrm",
+        "ds rmx",
+        "ls",
+        "ds worktree --help",
+    ] {
         let run = pre_tool_use(&project, Some(command), &[]);
 
         assert_eq!(run.status, 0, "{command}: {}", run.stderr);
@@ -727,7 +768,7 @@ fn should_print_the_info_and_the_guidance_when_the_checkout_is_registered() {
     assert!(run.stdout.contains("Services:      run ds info to check\n"));
     assert!(run.stdout.contains("DB_PORT"));
     assert!(run.stdout.ends_with(
-        "Use ds info --json for ports and URLs; ds up starts the services; ds reset resets the data; never run ds rm, ds prune or delete containers or volumes by hand.\n"
+        "Use ds info --json for ports and URLs; ds up starts the services; ds reset resets the data; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand.\n"
     ));
     assert_eq!(project.machine().docker_log(), Vec::<String>::new());
 }

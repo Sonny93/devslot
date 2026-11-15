@@ -14,11 +14,16 @@ const DESTRUCTIVE_SUBCOMMANDS: [&str; 2] = ["rm", "prune"];
 const PROGRAM_NAME: &str = "ds";
 const PROGRAM_PATH_SUFFIX: &str = "/ds";
 const RUN_SUBCOMMAND: &str = "run";
+const HOOK_SUBCOMMAND: &str = "hook";
+const WORKTREE_SUBCOMMAND: &str = "worktree";
+const WORKTREE_REMOVE_ACTION: &str = "rm";
 const COMMAND_SEPARATOR: &str = "--";
 const COLOR_OPTION: &str = "--color";
 const COLOR_OPTION_PREFIX: &str = "--color=";
 
-/// Whether `command` runs `ds rm` or `ds prune`: `ds` as a whole word, at the
+/// Whether `command` runs `ds rm`, `ds prune`, `ds worktree rm` or any
+/// `ds hook` command (Claude Code runs the hooks itself, never through the
+/// Bash tool, so only an agent calling one by hand is blocked): `ds` as a whole word, at the
 /// start of the command or after a separator, a wrapper such as `sudo`,
 /// `env`, `timeout` or `xargs`, a variable assignment, a shell keyword, or a
 /// path ending in `/ds`, followed by `rm` or `prune`. Quotes and a leading
@@ -60,6 +65,8 @@ fn is_destructive_words(words: &[String]) -> bool {
     let mut rest = words[start + 1..].iter().map(String::as_str);
     match subcommand_of(&mut rest) {
         Some(subcommand) if DESTRUCTIVE_SUBCOMMANDS.contains(&subcommand) => true,
+        Some(HOOK_SUBCOMMAND) => true,
+        Some(WORKTREE_SUBCOMMAND) => subcommand_of(&mut rest) == Some(WORKTREE_REMOVE_ACTION),
         Some(RUN_SUBCOMMAND) => {
             let nested: Vec<String> = rest
                 .skip_while(|word| *word != COMMAND_SEPARATOR)
@@ -160,6 +167,25 @@ mod tests {
             "d\"s\" rm",
             "ds run -- ds rm --yes",
             "ds run -- bash -c 'ds prune'",
+            "ds worktree rm feat",
+            "ds worktree rm ./x --yes --force",
+            "ds worktree 'rm' feat",
+            "ds --color never worktree rm feat",
+            "ds worktree --color=never rm feat",
+            "/usr/local/bin/ds worktree rm feat",
+            "sudo ds worktree rm feat",
+            "cd x && ds worktree rm feat",
+            "bash -c 'ds worktree rm feat'",
+            "ds run -- ds worktree rm feat",
+            "ds worktree \\\n  rm feat",
+            "ds hook worktree-remove",
+            "ds hook worktree-create",
+            "ds hook pre-tool-use",
+            "ds hook session-start",
+            "ds hook",
+            "echo '{}' | ds hook worktree-remove",
+            "timeout 5 ds hook worktree-remove",
+            "ds run -- ds hook worktree-remove",
             "timeout 5 ds rm",
             "timeout --foreground 10s ds prune",
             "nice -n 10 ds prune",
@@ -194,6 +220,11 @@ mod tests {
             "ds ensure",
             "ds",
             "ds run -- ds reset",
+            "ds worktree",
+            "ds worktree --help",
+            "ds worktree -h",
+            "ds worktree help",
+            "ds run -- ds worktree --help",
             "ds run -- echo rm",
             "timeout 5 ds up",
         ] {
@@ -207,6 +238,10 @@ mod tests {
             "dsrm",
             "ds rmx",
             "ds prunes",
+            "ds hooks",
+            "ds worktrees rm",
+            "echo ds hook worktree-remove",
+            "grep hook file",
             "xds rm",
             "ls /ds/rm",
             "echo ds rm",

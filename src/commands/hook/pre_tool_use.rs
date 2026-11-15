@@ -18,8 +18,7 @@ use crate::error::ToolError;
 use crate::registry::record::InstanceRecord;
 
 const HOOK_EVENT_NAME: &str = "PreToolUse";
-const DENY_REASON: &str =
-    "ds rm and ds prune delete data and other agents work on this machine; ask the user to run it";
+const DENY_REASON: &str = "ds rm, ds prune and ds worktree rm delete data, ds hook is run by Claude Code itself, and other agents work on this machine; ask the user to run it";
 const PLAIN_STYLE: Style = Style { color: false };
 
 #[derive(Debug, Deserialize)]

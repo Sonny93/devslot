@@ -99,7 +99,9 @@ fn create_worktree(
     })
 }
 
-fn target_path(
+/// Where the worktree called `name` of the repository of `checkout` lives:
+/// `<[worktrees] root>/<repository>/<name>`.
+pub fn target_path(
     checkout: &Checkout,
     global: &GlobalConfig,
     name: &str,

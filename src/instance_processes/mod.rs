@@ -1,0 +1,194 @@
+//! The processes an instance runs in its worktree. Removing a worktree stops
+//! the ones that belong to the instance (they listen on one of its ports, or
+//! carry its `DEVSLOT_INSTANCE` marker) and lists the others without touching
+//! them: a tmux server, an ssh master, an editor or another session can have
+//! its working directory in a worktree. Linux only: elsewhere nothing is found
+//! and nothing is stopped.
+
+use std::fmt;
+use std::path::Path;
+
+#[cfg(target_os = "linux")]
+mod proc_root;
+#[cfg(target_os = "linux")]
+mod scan;
+#[cfg(target_os = "linux")]
+mod stop;
+#[cfg(test)]
+mod testing;
+
+/// The instance registered for a worktree: what ties a process to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceScope {
+    /// The instance name, the value of `DEVSLOT_INSTANCE`.
+    pub name: String,
+    /// The ports registered for the instance.
+    pub ports: Vec<u16>,
+}
+
+/// A process, as shown to the user: its id and its kernel name, never its
+/// command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessSummary {
+    /// The process id.
+    pub pid: i32,
+    /// `/proc/<pid>/comm`.
+    pub comm: String,
+}
+
+impl fmt::Display for ProcessSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} ({})", self.pid, self.comm)
+    }
+}
+
+/// The processes found in a worktree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessReport {
+    /// The processes that belong to the instance: to stop, or stopped.
+    pub targets: Vec<ProcessSummary>,
+    /// The processes that are still there: never signalled, or targets that
+    /// survived SIGKILL.
+    pub others: Vec<ProcessSummary>,
+}
+
+impl ProcessReport {
+    /// The `ds: still running in <path>: ...` line, when there is something to say.
+    pub fn still_running_line(&self, worktree: &Path) -> Option<String> {
+        if self.others.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "ds: still running in {}: {}",
+            worktree.display(),
+            join_summaries(&self.others)
+        ))
+    }
+
+    /// One `ds: stopped <pid> (<comm>)` line per stopped process.
+    pub fn stopped_lines(&self) -> Vec<String> {
+        self.targets
+            .iter()
+            .map(|summary| format!("ds: stopped {summary}"))
+            .collect()
+    }
+}
+
+/// `1 (a), 2 (b)`.
+pub fn join_summaries(summaries: &[ProcessSummary]) -> String {
+    summaries
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What stopping the instance's processes did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StopReport {
+    /// What was stopped and what was only found.
+    pub report: ProcessReport,
+    /// Targets that did not exit even after SIGKILL.
+    pub survivors: Vec<ProcessSummary>,
+}
+
+/// Lists, without signalling, what `stop_instance_processes` would stop
+/// (`targets`) and what it would leave alone (`others`). `worktree` is the
+/// canonical root of the worktree; `scope` is `None` when no instance is
+/// registered for it, so nothing is a target.
+#[cfg(target_os = "linux")]
+pub fn find_instance_processes(worktree: &Path, scope: Option<&InstanceScope>) -> ProcessReport {
+    let root = proc_root::ProcRoot::system();
+    let found = scan::scan(&system_context(&root, worktree, scope));
+    ProcessReport {
+        targets: found.targets,
+        others: found.others,
+    }
+}
+
+/// Stops the processes of the instance in `worktree` (same arguments as
+/// [`find_instance_processes`]): SIGTERM, a wait of up to 5 seconds, a rescan
+/// for respawned children, at most 3 rounds, then SIGKILL.
+#[cfg(target_os = "linux")]
+pub fn stop_instance_processes(worktree: &Path, scope: Option<&InstanceScope>) -> StopReport {
+    let root = proc_root::ProcRoot::system();
+    let context = system_context(&root, worktree, scope);
+    let signaller = stop::KernelSignaller::new(&context);
+    let outcome = stop::stop(&context, &signaller, &stop::StopPolicy::default());
+    StopReport {
+        report: ProcessReport {
+            targets: outcome.stopped,
+            others: outcome.others,
+        },
+        survivors: outcome.survivors,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn system_context<'a>(
+    root: &'a proc_root::ProcRoot,
+    worktree: &'a Path,
+    scope: Option<&'a InstanceScope>,
+) -> scan::ScanContext<'a> {
+    scan::ScanContext {
+        root,
+        own_pid: rustix::process::getpid().as_raw_pid(),
+        own_uid: rustix::process::getuid().as_raw(),
+        worktree,
+        scope,
+    }
+}
+
+/// Nothing is found outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn find_instance_processes(_worktree: &Path, _scope: Option<&InstanceScope>) -> ProcessReport {
+    ProcessReport::default()
+}
+
+/// Nothing is stopped outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn stop_instance_processes(_worktree: &Path, _scope: Option<&InstanceScope>) -> StopReport {
+    StopReport::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(pid: i32, comm: &str) -> ProcessSummary {
+        ProcessSummary {
+            pid,
+            comm: comm.to_owned(),
+        }
+    }
+
+    #[test]
+    fn should_say_nothing_when_no_other_process_is_left() {
+        let report = ProcessReport::default();
+
+        assert_eq!(report.still_running_line(Path::new("/w")), None);
+    }
+
+    #[test]
+    fn should_list_the_other_processes_by_pid_and_name() {
+        let report = ProcessReport {
+            targets: Vec::new(),
+            others: vec![summary(7, "tmux: server"), summary(9, "ssh")],
+        };
+
+        assert_eq!(
+            report.still_running_line(Path::new("/w")).unwrap(),
+            "ds: still running in /w: 7 (tmux: server), 9 (ssh)"
+        );
+    }
+
+    #[test]
+    fn should_give_one_line_per_stopped_process() {
+        let report = ProcessReport {
+            targets: vec![summary(3, "node")],
+            others: Vec::new(),
+        };
+
+        assert_eq!(report.stopped_lines(), vec!["ds: stopped 3 (node)"]);
+    }
+}

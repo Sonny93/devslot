@@ -3,7 +3,7 @@
 
 use std::ffi::OsStr;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -17,6 +17,9 @@ const BRANCH_FOUND_EXIT_CODE: i32 = 0;
 const BRANCH_MISSING_EXIT_CODE: i32 = 1;
 const ANCESTOR_EXIT_CODE: i32 = 0;
 const NOT_ANCESTOR_EXIT_CODE: i32 = 1;
+const STATUS_TIMEOUT: Duration = Duration::from_secs(60);
+const WORKTREE_LINE_PREFIX: &str = "worktree ";
+const LOCKED_MARKER: &str = "locked";
 
 /// Why a git operation of a worktree hook did not complete.
 #[derive(Debug, Error)]
@@ -130,6 +133,97 @@ pub fn remove_worktree(main_root: &Path, path: &Path) -> Result<(), WorktreeGitE
     )
 }
 
+/// A worktree as `git worktree list --porcelain` shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedWorktree {
+    /// The path git has recorded.
+    pub path: PathBuf,
+    /// Whether the worktree is locked.
+    pub is_locked: bool,
+}
+
+impl ListedWorktree {
+    /// Whether this entry is the worktree at the canonical `path`.
+    pub fn is_at(&self, path: &Path) -> bool {
+        self.path == path
+            || self
+                .path
+                .canonicalize()
+                .is_ok_and(|canonical| canonical == path)
+    }
+}
+
+/// The worktrees of the repository of `main_root`, as git lists them now.
+pub fn list_worktrees(main_root: &Path) -> Result<Vec<ListedWorktree>, CheckoutError> {
+    let output = run_git_within(
+        main_root,
+        ["worktree", "list", "--porcelain"],
+        QUICK_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return Err(git_failure("worktree", &output));
+    }
+    Ok(parse_worktree_listing(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn parse_worktree_listing(listing: &str) -> Vec<ListedWorktree> {
+    listing
+        .split("\n\n")
+        .filter_map(|entry| {
+            let path = entry
+                .lines()
+                .find_map(|line| line.strip_prefix(WORKTREE_LINE_PREFIX))?;
+            let is_locked = entry
+                .lines()
+                .any(|line| line == LOCKED_MARKER || line.starts_with("locked "));
+            Some(ListedWorktree {
+                path: PathBuf::from(path),
+                is_locked,
+            })
+        })
+        .collect()
+}
+
+/// How many lines `git status --porcelain` prints in `worktree`: the changed
+/// and the untracked files, ignored ones not counted.
+pub fn uncommitted_change_count(worktree: &Path) -> Result<usize, CheckoutError> {
+    let output = run_git_within(
+        worktree,
+        ["--no-optional-locks", "status", "--porcelain"],
+        STATUS_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return Err(git_failure("status", &output));
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .count())
+}
+
+/// How many commits are reachable from the `HEAD` of `worktree` and from no
+/// other branch, tag or remote branch. With `branch_to_delete`, that branch
+/// does not count as a place the commits are kept, since it is deleted too.
+pub fn unreachable_commit_count(
+    worktree: &Path,
+    branch_to_delete: Option<&str>,
+) -> Result<usize, CheckoutError> {
+    let exclusion = branch_to_delete.map(|branch| format!("--exclude={branch}"));
+    let mut arguments = vec!["rev-list", "--count", "HEAD", "--not"];
+    arguments.extend(exclusion.as_deref());
+    arguments.extend(["--branches", "--tags", "--remotes"]);
+    let output = run_git_within(worktree, arguments, QUICK_TIMEOUT)?;
+    if !output.status.success() {
+        return Err(git_failure("rev-list", &output));
+    }
+    trimmed_stdout(&output)
+        .parse()
+        .map_err(|_| git_failure("rev-list", &output))
+}
+
 /// Whether the local branch `branch` is an ancestor of the `HEAD` of the
 /// main worktree, that is merged into it (not into an upstream).
 pub fn is_branch_merged(main_root: &Path, branch: &str) -> Result<bool, CheckoutError> {
@@ -181,4 +275,53 @@ fn forward_output(output: &CapturedOutput) {
 
 fn trimmed_stdout(output: &CapturedOutput) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    const LISTING: &str = "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /wt/a\nHEAD def\nbranch refs/heads/a\nlocked\n\nworktree /wt/b\nHEAD 123\ndetached\nlocked in use by a session\n\nworktree /wt/c\nHEAD 456\nbranch refs/heads/c\nprunable gitdir file points to non-existent location\n";
+
+    #[test]
+    fn should_read_the_path_and_the_lock_of_every_worktree() {
+        let listed = parse_worktree_listing(LISTING);
+
+        let summary: Vec<(String, bool)> = listed
+            .iter()
+            .map(|entry| (entry.path.display().to_string(), entry.is_locked))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("/repo".to_owned(), false),
+                ("/wt/a".to_owned(), true),
+                ("/wt/b".to_owned(), true),
+                ("/wt/c".to_owned(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn should_not_read_a_lock_into_a_word_that_only_starts_like_it() {
+        let listed =
+            parse_worktree_listing("worktree /wt/a\nHEAD d\nbranch refs/heads/lockedness\n");
+
+        assert_eq!(listed[0].is_locked, false);
+    }
+
+    #[test]
+    fn should_match_an_entry_by_its_recorded_path_or_its_canonical_path() {
+        let folder = tempfile::tempdir().unwrap();
+        let canonical = folder.path().canonicalize().unwrap();
+        let entry = ListedWorktree {
+            path: folder.path().join("."),
+            is_locked: false,
+        };
+
+        assert!(entry.is_at(&canonical));
+        assert!(!entry.is_at(&canonical.join("other")));
+    }
 }

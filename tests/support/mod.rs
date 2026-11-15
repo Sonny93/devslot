@@ -250,6 +250,13 @@ impl Project {
         Run::from(self.command(arguments, environment).output().unwrap())
     }
 
+    /// Runs `ds` with `arguments` from `directory` instead of the project root.
+    pub fn run_in(&self, directory: &Path, arguments: &[&str]) -> Run {
+        let mut command = self.command(arguments, &[]);
+        command.current_dir(directory);
+        Run::from(command.output().unwrap())
+    }
+
     /// Runs `ds hook <event>` with `input` on stdin, as the Claude Code plugin does.
     pub fn run_hook(&self, event: &str, input: &str, environment: &[(&str, &str)]) -> Run {
         let mut command = self.command(&["hook", event], environment);

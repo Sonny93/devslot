@@ -205,6 +205,21 @@ pub fn describe_rm_exit_codes() -> String {
     ])
 }
 
+/// The exit codes in the form `ds worktree rm --help` shows them.
+pub fn describe_worktree_rm_exit_codes() -> String {
+    format_codes(&[
+        (SUCCESS, "the worktree is removed"),
+        (
+            ERROR,
+            "nothing was removed: not a linked worktree, locked, uncommitted changes or unpushed commits without --force, no terminal to ask in and no --yes, the answer was no, or git refused",
+        ),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed (git unavailable, unreadable registry), or invalid usage or name",
+        ),
+    ])
+}
+
 /// The exit codes in the form `ds prune --help` shows them.
 pub fn describe_prune_exit_codes() -> String {
     format_codes(&[
@@ -304,6 +319,7 @@ mod tests {
             describe_reset_exit_codes(),
             describe_rm_exit_codes(),
             describe_prune_exit_codes(),
+            describe_worktree_rm_exit_codes(),
         ];
 
         assert!(descriptions.iter().all(|description| {
