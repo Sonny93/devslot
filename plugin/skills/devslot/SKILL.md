@@ -13,6 +13,7 @@ devslot gives each checkout or worktree of a project its own slot of ports and i
 - Read ports and URLs with `ds info --json`. Never guess or hardcode them: 3333, 5432 and 24678 are the defaults of other instances.
 - Reset the data with `ds reset` (everything) or `ds reset <service>` (one service). It deletes the data and starts the services again.
 - Never run `ds rm`, `ds prune`, `ds worktree rm`, `docker compose down -v`, `docker volume rm` or remove containers by hand: that can delete another agent's data. Ask the user when something has to be removed.
+- The guard refuses any command whose text contains `ds rm`, `ds prune`, `ds worktree rm` or `ds hook`, even inside a quoted string. To search for one of them in files, use a pattern such as `ds.rm` instead of `ds rm`.
 - If `ds info` says the checkout is opted out, do not run `ds up` without asking the user first: `ds rm` opted it out on purpose.
 - `DEVSLOT_INSTANCE` names this instance. Show it in logs or on a health endpoint when that helps tell instances apart.
 - When the checkout cannot be isolated (a compose file with `container_name`, a literal port), `ds doctor` explains why and what to change.

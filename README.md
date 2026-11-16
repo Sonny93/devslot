@@ -30,43 +30,23 @@ v1 is in development and nothing is released. Available commands: `ds doctor`, `
 - One change to a project is recommended, never required: writing published ports as `${VAR:-default}`.
 - Integrations (Tunneler, proxies, process managers) are optional.
 
+
 ## Install
 
-From a clone of this repository:
+Requires Linux, Docker with the Compose plugin, git and rustup (the toolchain is pinned in `rust-toolchain.toml`). From a clone of this repository:
 
 ```sh
 cargo install --path . --locked
 ```
 
-`ds` must be on your `PATH`: the plugin hooks call it by name. Then, in Claude Code:
+Run the same command again after updating the clone: the hooks run the installed `ds`. `ds` must be on your `PATH`: the plugin hooks call it by name. Then, in Claude Code:
 
 ```
 /plugin marketplace add <path to the clone, or Sonny93/devslot>
 /plugin install devslot@devslot
 ```
 
-The plugin adds a `devslot` skill and four hooks (`WorktreeCreate`, `WorktreeRemove`, `PreToolUse` on `Bash`, `SessionStart`).
-
-The `WorktreeCreate` hook replaces Claude Code's own worktree creation: `ds hook worktree-create` runs `git worktree add` itself and puts the worktree in `~/dev/.worktrees/<repo>/<name>`, on a branch called `<name>` (the existing one when there is one, else a new one from the branch checked out in the main worktree). Change the folder with `[worktrees] root` in the global config (see Configuration). Without the plugin, Claude Code creates its worktrees where it always did.
-
-**Sessions started with `claude --worktree <name> --tmux`.** Claude Code creates the worktree before plugins load, so the plugin's `WorktreeCreate` hook does not run. If you start sessions that way, declare the `WorktreeCreate` and `WorktreeRemove` hooks yourself in `~/.claude/settings.json` (same commands as `plugin/hooks/hooks.json`):
-
-```json
-{
-  "hooks": {
-    "WorktreeCreate": [
-      { "hooks": [{ "type": "command", "command": "ds hook worktree-create", "timeout": 180 }] }
-    ],
-    "WorktreeRemove": [
-      { "hooks": [{ "type": "command", "command": "ds hook worktree-remove", "timeout": 180 }] }
-    ]
-  }
-}
-```
-
-Headless sessions (`claude -p`) never fire `WorktreeRemove`: their worktrees stay until you remove them by hand.
-
-Creating a worktree with a name that already exists reopens it: `ds hook worktree-create` prints its path and registers it if needed, like `claude --worktree <name>` does natively.
+The plugin adds a `devslot` skill and four hooks (`WorktreeCreate`, `WorktreeRemove`, `PreToolUse` on `Bash`, `SessionStart`). The `WorktreeCreate` hook replaces Claude Code's own worktree creation, and sessions started with `claude --worktree` need extra setup: see [Worktrees](docs/worktrees.md).
 
 ## Quick start
 
@@ -100,140 +80,11 @@ DEVSLOT_SLOT=1
 
 `COMPOSE_PROJECT_NAME` gives the instance its own containers, volumes and networks. ds only writes in a `.env` that git ignores, and creates it from the main checkout's `.env` (or `.env.example`) when a new worktree has none. `[write] enabled = false` turns every write off.
 
-**Worktree lifecycle.** With the plugin, a Claude Code session in a worktree goes like this:
-
-1. `WorktreeCreate`: `ds hook worktree-create` creates the worktree, then registers it (slot, `.env`, block). It never starts services.
-2. `PreToolUse`: before each Bash command, `ds hook pre-tool-use` registers a checkout that is not (worktrees entered mid-session included), tells the agent about its instance, and denies `ds rm`, `ds prune`, `ds worktree rm` and every `ds hook` command (Claude Code runs the hooks itself, never through the Bash tool, so this only stops an agent calling one by hand). It never blocks anything else.
-3. `SessionStart`: `ds hook session-start` adds the instance to the agent's context.
-4. `WorktreeRemove`: `ds hook worktree-remove` removes the worktree the way `ds worktree rm` does (see below): it refuses a locked worktree and a worktree that another session or program still uses (see below), stops the instance's processes, removes the git worktree, deletes the instance's containers, volumes and networks by label, forgets the instance, and deletes the branch only when it is merged into the main worktree's branch. When Docker fails, the registry keeps the entry and `ds prune` cleans it later.
+**Worktrees.** With the plugin, each Claude Code session gets its own worktree and instance, and the hooks register, protect and remove them: see [Worktrees](docs/worktrees.md).
 
 **Opt-out.** `ds rm` records the checkout as opted out: the hooks leave it alone until an explicit `ds up` or `ds run` registers it again.
 
-## Commands
-
-| Command | What it does |
-| --- | --- |
-| `ds doctor [--json]` | Reviews the project without starting or writing anything. |
-| `ds up` | Registers the checkout, writes the block, starts the services, then runs the `run` key (`--no-run`: services only). |
-| `ds down` | Stops the services and keeps the data. |
-| `ds run -- <command>` | Registers the checkout if needed and runs a command with the instance environment. |
-| `ds env [--format sh\|json]` | Prints the environment of the instance. |
-| `ds info [--json]` | Shows the name, slot, ports, URLs and services state of this checkout's instance. |
-| `ds ls [--json]` | Lists every instance of the machine with its ports and whether its services run. |
-| `ds ensure` | Registers the checkout and writes its block without starting anything (what the hook runs). |
-| `ds reset [service]` | Deletes the data of the instance, or of one service, and starts the services again. |
-| `ds rm [--yes]` | Deletes the instance's data, removes the block and opts the checkout out. |
-| `ds prune [--yes]` | Deletes the data of the instances whose folder is gone and forgets them. |
-| `ds worktree rm <name\|path> [--yes] [--force]` | Shows what would be lost, refuses a worktree in use by another session or program unless `--force`, then stops the instance's processes, removes a linked worktree, deletes its data and forgets its instance. |
-| `ds hook <event>` | Called by the Claude Code plugin: `worktree-create`, `worktree-remove`, `pre-tool-use`, `session-start`. Not meant to be run by hand. |
-
-**`ds worktree rm <name|path>`.** A name (letters, digits, `.`, `_`, `-`) is the worktree `<[worktrees] root>/<repo>/<name>` of the repository of the current folder; an argument that contains `/` or starts with `.` is a path, and any linked worktree root will do (never the main checkout or a subfolder). Before acting it prints the path, the branch, the instance (or "not registered"), the processes it would stop and the other processes found there, the number of uncommitted changes, and the number of commits found nowhere else (reachable from the worktree's `HEAD` only; the branch counts as a place only when it is kept). Ignored files (`.env`, local databases, uploads) are deleted with the folder, and the preview says so. It then asks like `ds rm` (a terminal, or `--yes`). A worktree with uncommitted changes or commits found nowhere else, or in use by another session or program (the preview shows an `In use` line), also needs `--force`. A locked worktree is refused (`git worktree unlock` first) before anything is stopped, deleted or forgotten. The hook runs the same removal without the preview and the gates, because Claude Code decides when a session ends, except for the use check below, which it applies without any way to skip it.
-
-**Worktrees in use (Linux only).** Another Claude Code session can work in the same worktree (`claude -w <name>` reopens it), and closing one session must not delete what the other still uses. Before anything is stopped or deleted, and again right before `git worktree remove` (stopping can take seconds, and `ds worktree rm` may wait at a prompt), removal looks for processes of somebody else running in the worktree: same user, working directory in the worktree, not `ds` or one of its ancestors. When it finds any, nothing is deleted (the worktree, its data and its slot stay), the message lists them as `pid (name)` and the exit code is 1; Claude Code then keeps the worktree. For the hook, the closing session's own processes are not counted: its `claude` process (taken from `CLAUDE_PID` when that is an ancestor of `ds`, else the nearest ancestor named `claude`; without either, nothing counts as the session's own) and everything below it, such as its MCP servers and subagents. Servers of the instance started by another session do count. Orphaned daemons (an `adb` server, an ssh master: parent process 1 or `systemd`) never count, but a `claude` process always does. For `ds worktree rm`, the instance's own processes are shown in the preview and stopped after confirmation, so only the other processes count. `ds worktree rm --force <name>` skips the check; the hook has no way to skip it. A session is seen only through processes whose working directory is in the worktree: sessions started with `claude --worktree` are covered (their `claude` runs there for the whole session), but one that entered the worktree with a `cd` (its `claude` stays in the main checkout) and sits idle with only containers running is invisible.
-
-**Which processes are stopped (Linux only).** Removing a worktree first stops the processes of its instance, and only when an instance is registered for it. A process is stopped only when all of these hold:
-
-- it runs as your user, and is not `ds` or one of its ancestors;
-- its working directory is the worktree or a folder below it (compared by path component: `feat` never matches `feat-2`);
-- it listens on TCP on one of the ports registered for the instance, or its environment holds exactly `DEVSLOT_INSTANCE=<instance name>` (the block puts that variable in `.env`, and `ds run` passes it). Only that marker is looked for; the environment is never printed or stored.
-
-Each process is signalled on its own, never as a group (an editor can be the leader of the group of the dev server it started). A stopped process's descendants are stopped too, when they also run as your user with their working directory in the worktree. Signals go through a pidfd after the checks are repeated, so a reused pid is never hit. They get SIGTERM and up to 5 seconds to exit; ds then looks again (children that were respawned and carry the marker or listen on a port) for at most 3 rounds, and sends SIGKILL to what is left. A parent that is not a target and respawns its child (for example `node ace serve` started by hand, without `ds run`) is listed as still running, not stopped: servers started through `ds run` or `ds up` carry the marker and are stopped entirely, the others may need stopping by hand. ds prints `ds: stopped <pid> (<name>)` for each, with the kernel name of the process, never its command line. Every other process whose working directory is in the worktree (a tmux server, an ssh master connection, an editor, another session) is listed on a `ds: still running in <path>: ...` line and never signalled (when the removal goes on, they are orphaned daemons or the removal was forced). On other systems nothing is stopped and nothing is listed.
-
-If `git worktree remove` fails after git has already forgotten the worktree (typically "Directory not empty" because a process recreated files), the removal goes on and ds warns that the folder is left on disk; it never deletes it itself.
-
-Exit codes: 0 success, 1 a refusal or an error in the project, 2 the tool itself failed or invalid usage. `--help` of each command lists its codes. `ds ls --json` and `ds info --json` are versioned contracts.
-
-## Configuration
-
-Priority: `devslot.local.toml`, `devslot.toml`, the global config, the defaults. Everything is optional.
-
-`devslot.toml` at the repository root (committed or not), overridden on your machine by `devslot.local.toml` (ignored by git):
-
-```toml
-# App command, run by ds up (not ds up --no-run) in the foreground after the services.
-run = "node ace serve --hmr"
-
-[compose]
-file = "dev.compose.yml"   # otherwise detected
-
-[ports]
-extra = ["FRONT_PORT"]     # variables to manage in addition to PORT
-ignore = ["MAILPIT_PORT"]  # compose variables to leave as they are
-
-[env]
-# values built from the ports of the instance, also written in the block
-VITE_API_URL = "http://localhost:${PORT}"
-
-[write]
-enabled = true             # false: nothing is written to .env
-```
-
-`~/.config/devslot/config.toml`, the global config:
-
-```toml
-[slots]
-first_port = 20000   # the range cut into slots; slot 0 is reserved
-last_port = 29999
-size = 50            # ports per slot, at most 100
-
-[auto]
-include = []         # path globs where the hooks may register; empty means everywhere
-exclude = []         # wins over include, e.g. ["~/clones/**"]
-
-[write]
-enabled = true       # false: ds never writes .env, unless a project file says otherwise
-
-[worktrees]
-root = "~/dev/.worktrees"   # where ds hook worktree-create puts worktrees: <root>/<repo>/<name>
-```
-
-## Project setup
-
-The only change devslot recommends, never requires: write the ports a compose file publishes as `${VAR:-default}`, so the default ports still work without devslot.
-
-```yaml
-services:
-  postgres:
-    ports:
-      - '${DB_PORT:-5432}:5432'
-```
-
-`ds doctor` reports a literal port (`"5432:5432"`); ds does not remap it.
-
-Vite has no environment variable for its HMR port. Add one line to `vite.config.ts`, which falls back to the default without devslot. From Vite 8, where `server.hmr.port` is deprecated:
-
-```ts
-server: { ws: { port: Number(process.env.VITE_HMR_PORT) || undefined } }
-```
-
-Before Vite 8, use `server: { hmr: { port: Number(process.env.VITE_HMR_PORT) || undefined } }`. AdonisJS projects that use `@adonisjs/assembler` need nothing: it sets `VITE_HMR_PORT` for the dev server itself, and `ds doctor` does not warn.
-
-**`env_file` rule.** The values in the block are host-side ports. A container that loads `.env` with `env_file` must pin its internal ports in `environment:`, which wins over `env_file`:
-
-```yaml
-  app:
-    env_file:
-      - .env
-    environment:
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - PORT=3333
-```
-
-**`[env]` builds values from the ports.** Use it for URLs that must follow the assigned ports, and to hand `DEVSLOT_INSTANCE` to a frontend or a mobile app, which only reads variables with its own prefix. Declare the key in `.env.example` too, empty:
-
-```toml
-[env]
-DATABASE_URL = "postgres://localhost:${DB_PORT}/app"
-EXPO_PUBLIC_DEVSLOT_INSTANCE = "${DEVSLOT_INSTANCE}"
-```
-
-```sh
-# .env.example
-EXPO_PUBLIC_DEVSLOT_INSTANCE=
-```
-
-The app can then show which instance it talks to. `DEVSLOT_INSTANCE` is also in the environment of everything `ds run` and `ds up` start.
+To configure a project, see [Configuration](docs/configuration.md) and [Make a project work with devslot](docs/project-setup.md). The commands are listed in [Commands](docs/commands.md). Exit codes: 0 success, 1 a refusal or an error in the project, 2 the tool itself failed or invalid usage.
 
 ## Rules for agents
 
@@ -258,7 +109,7 @@ This repository runs several instances of its dev stack on one machine, one per 
 - **Two Adonis servers started in the same second can share HMR port 24678.** `@adonisjs/assembler` 8 picks the HMR port itself (24678 when free, else a random free port) and ignores `VITE_HMR_PORT` from `.env`, so the slot value is not used. Started one after the other, instances get distinct ports. Workaround: start them a few seconds apart.
 - **A refused worktree removal is silent in Claude Code.** When the `WorktreeRemove` hook refuses because another session uses the worktree, Claude Code exits without showing the hook's message: the worktree stays. Run `ds worktree rm <name>` from a terminal later to see what holds it and remove it.
 - **Sessions started with `claude -p` keep their worktree.** Claude Code never fires `WorktreeRemove` for them, so the worktree, its instance and its data stay until you run `ds worktree rm <name>`.
-- **Sessions started with `--tmux` skip the plugin's `WorktreeCreate` hook.** See [Install](#install) for the hooks to declare yourself.
+- **Sessions started with `--tmux` skip the plugin's `WorktreeCreate` hook.** See [Worktrees](docs/worktrees.md#sessions-started-with-claude---worktree-name---tmux) for the hooks to declare yourself.
 - **A server started without `ds run` may survive a worktree removal.** Its process listening on an instance port is stopped, but a parent that respawns it (for example `node ace serve` run by hand) is only listed. Servers started through `ds run` or `ds up` are stopped entirely.
 - **Cookies are not isolated by port.** Two instances opened on `localhost` with the same session cookie name log each other out. Named URLs per instance (after v1) will fix it.
 - **Dev and local prod share the compose project** of a registered checkout, so `just prod` runs on the dev database volume. Workaround: `-p <name>` in the prod recipe (see the [spec](docs/spec.md)).
@@ -277,5 +128,9 @@ cargo test --locked
 
 ## Documentation
 
+- [Commands](docs/commands.md): reference of every `ds` command
+- [Configuration](docs/configuration.md): `devslot.toml`, `devslot.local.toml` and the global config
+- [Make a project work with devslot](docs/project-setup.md): compose rules, `env_file`, Vite, `DEVSLOT_INSTANCE`
+- [Worktrees](docs/worktrees.md): creation, lifecycle, worktrees in use, stopped processes
 - [Specification](docs/spec.md)
 - [Decisions](docs/decisions.md)
