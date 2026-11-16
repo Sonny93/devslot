@@ -1,7 +1,10 @@
 //! `ds hook worktree-remove`: removes the git worktree of a Claude Code
 //! session, stops the processes of its instance, deletes its data, forgets its
 //! instance, then deletes the branch when it is merged (see
-//! `commands::worktree_removal` for the order). Exit 0 means the folder is
+//! `commands::worktree_removal` for the order). A worktree that holds unsaved
+//! work (uncommitted changes, commits found nowhere else) is kept, whatever
+//! the user answered to Claude Code: only `ds worktree rm` from a terminal
+//! deletes it. Exit 0 means the folder is
 //! gone; any other exit tells Claude Code the removal failed and the worktree
 //! stays, which is also what happens when another session or program still
 //! runs in the worktree. The closing session is recognised through the

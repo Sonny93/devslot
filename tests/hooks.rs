@@ -475,6 +475,7 @@ fn should_keep_the_data_and_the_entry_when_git_refuses_to_remove_a_locked_worktr
 fn should_go_on_and_warn_when_git_forgets_the_worktree_but_leaves_its_folder() {
     let sandbox = sandbox();
     let path = sandbox.created("feature-x");
+    std::fs::write(sandbox.main_path().join(".git/info/exclude"), "blocked/\n").unwrap();
     let blocked = path.join("blocked");
     std::fs::create_dir(&blocked).unwrap();
     std::fs::write(blocked.join("file"), "x").unwrap();
@@ -878,4 +879,64 @@ fn should_exit_0_silently_under_the_kill_delay_when_a_slow_docker_and_a_taken_lo
         second.stderr
     );
     assert_eq!(project.machine().instance_names(), Vec::<String>::new());
+}
+
+fn ls_output(sandbox: &Sandbox) -> String {
+    sandbox.main.run(&["ls"]).stdout
+}
+
+#[test]
+fn should_refuse_and_keep_everything_when_the_worktree_has_uncommitted_changes() {
+    let sandbox = sandbox();
+    let path = sandbox.created("feature-x");
+    std::fs::write(path.join("notes.txt"), "unsaved").unwrap();
+    sandbox.machine().clear_docker_log();
+
+    let run = sandbox.remove(&path, &[]);
+
+    assert_eq!(run.status, 1, "{}", run.stderr);
+    assert!(
+        run.stderr
+            .contains("1 uncommitted change(s) and 0 commit(s) found nowhere else")
+    );
+    assert!(run.stderr.contains(&format!(
+        "ds worktree rm {} from a terminal",
+        path.display()
+    )));
+    assert!(!run.stderr.contains("--force"));
+    assert!(path.join("notes.txt").exists());
+    assert_eq!(sandbox.machine().instance_names().len(), 1);
+    assert_eq!(sandbox.machine().docker_log(), Vec::<String>::new());
+}
+
+#[test]
+fn should_refuse_when_a_detached_head_holds_a_commit_found_nowhere_else() {
+    let sandbox = sandbox();
+    let path = sandbox.created("feature-x");
+    git_output(&path, &["checkout", "-q", "--detach"]);
+    commit_in(&path);
+    sandbox.machine().clear_docker_log();
+
+    let run = sandbox.remove(&path, &[]);
+
+    assert_eq!(run.status, 1, "{}", run.stderr);
+    assert!(
+        run.stderr
+            .contains("0 uncommitted change(s) and 1 commit(s) found nowhere else")
+    );
+    assert!(path.exists());
+    assert_eq!(sandbox.machine().instance_names().len(), 1);
+    assert_eq!(sandbox.machine().docker_log(), Vec::<String>::new());
+}
+
+#[test]
+fn should_list_the_unsaved_work_reason_in_ds_ls_when_the_hook_refuses() {
+    let sandbox = sandbox();
+    let path = sandbox.created("feature-x");
+    std::fs::write(path.join("notes.txt"), "unsaved").unwrap();
+
+    sandbox.remove(&path, &[]);
+
+    let listing = ls_output(&sandbox);
+    assert!(listing.contains(&format!("{}: it holds unsaved work", path.display())));
 }

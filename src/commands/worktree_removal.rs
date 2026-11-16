@@ -4,8 +4,9 @@
 //! 1. checks with no side effect: the path is the root of a linked worktree
 //!    that git lists at exactly that path, the registry entry is read, the
 //!    worktree is not locked, no process of somebody else (another session,
-//!    an editor) runs in it, and no other Claude Code session holds a lease on
-//!    it (see `session_leases`);
+//!    an editor) runs in it, no other Claude Code session holds a lease on
+//!    it (see `session_leases`), and, when a session closes it, it holds no
+//!    unsaved work: only `ds worktree rm` from a terminal may delete that;
 //! 2. the instance's processes are stopped (only the ones that belong to it),
 //!    then the check for somebody else's processes runs again, because
 //!    stopping can take seconds and a person can wait at a prompt;
@@ -15,6 +16,7 @@
 //! 5. the branch is deleted when it is merged.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -23,6 +25,7 @@ use crate::cli::exit_code;
 use crate::commands::machine::Machine;
 use crate::commands::registering::LOCK_TIMEOUT;
 use crate::compose::runner::{ComposeRunner, DockerRunner, delete_project_data};
+use crate::deadline::Deadline;
 use crate::ensure_cache::remove_checkout_entries;
 use crate::error::ToolError;
 use crate::git_worktree::{
@@ -38,6 +41,12 @@ use crate::session_leases::{self, SessionLease, join_descriptions};
 use crate::worktree_lock::WorktreeKey;
 
 const DETACHED_HEAD_NAME: &str = "HEAD";
+const NO_WORK_SHOWN: UnsavedWork = UnsavedWork {
+    uncommitted_changes: 0,
+    unreachable_commits: 0,
+};
+/// Claude Code kills the removal hook after 180 seconds; the checks stop before that.
+const HOOK_REMOVAL_BUDGET: Duration = Duration::from_secs(150);
 const REMOVE_COMMAND: &str = "worktree remove";
 /// Why a worktree is kept when another creation or removal of it is running.
 pub const BUSY_REASON: &str = "another creation or removal of this worktree was running";
@@ -82,6 +91,16 @@ pub enum RemovalFailure {
         /// What it holds now.
         work: UnsavedWork,
     },
+    /// A closing session would delete unsaved work: nothing was stopped,
+    /// deleted or forgotten (or, when the work appeared meanwhile, nothing was
+    /// deleted or forgotten).
+    #[error("{}", describe_unsaved_work_in_session(.path, .work))]
+    UnsavedWorkInSession {
+        /// The worktree.
+        path: PathBuf,
+        /// What it holds.
+        work: UnsavedWork,
+    },
     /// The checkout cannot be examined.
     #[error(transparent)]
     Checkout(#[from] CheckoutError),
@@ -104,6 +123,7 @@ impl RemovalFailure {
             | Self::InUse { .. }
             | Self::SessionsActive { .. }
             | Self::UnsavedWork { .. }
+            | Self::UnsavedWorkInSession { .. }
             | Self::ChangedSincePreview(_)
             | Self::Busy(_)
             | Self::Git(WorktreeGitError::Rejected { .. }) => exit_code::ERROR,
@@ -123,7 +143,9 @@ impl RemovalFailure {
                 join_descriptions(sessions)
             ),
             Self::Git(_) => "git could not remove it".to_owned(),
-            Self::UnsavedWork { .. } => "it holds unsaved work".to_owned(),
+            Self::UnsavedWork { .. } | Self::UnsavedWorkInSession { .. } => {
+                "it holds unsaved work".to_owned()
+            }
             Self::Checkout(_) => "it could not be examined".to_owned(),
             Self::ChangedSincePreview(_) => "it changed while it was being removed".to_owned(),
             Self::Busy(_) => BUSY_REASON.to_owned(),
@@ -200,16 +222,36 @@ pub fn describe_unsaved_work(path: &Path, work: &UnsavedWork) -> String {
     )
 }
 
+/// The refusal message for a worktree that holds `work` when a session closes
+/// it: the way out is `ds worktree rm` from a terminal, not `--force`.
+pub fn describe_unsaved_work_in_session(path: &Path, work: &UnsavedWork) -> String {
+    format!(
+        "{path} has {} uncommitted change(s) and {} commit(s) found nowhere else; nothing was deleted. Run ds worktree rm {path} from a terminal to review the work and remove the worktree anyway.",
+        work.uncommitted_changes,
+        work.unreachable_commits,
+        path = path.display(),
+    )
+}
+
 /// Counts what removing the worktree would lose.
 pub fn count_unsaved_work(removal: &Removal) -> Result<UnsavedWork, CheckoutError> {
+    count_unsaved_work_within(removal, None)
+}
+
+/// Like [`count_unsaved_work`]; with a `deadline`, every git call stops at it
+/// with [`CheckoutError::Budget`].
+pub fn count_unsaved_work_within(
+    removal: &Removal,
+    deadline: Option<Deadline>,
+) -> Result<UnsavedWork, CheckoutError> {
     let branch_to_delete = if is_branch_deletable(removal) {
         removal.branch.as_deref()
     } else {
         None
     };
     Ok(UnsavedWork {
-        uncommitted_changes: uncommitted_change_count(&removal.path)?,
-        unreachable_commits: unreachable_commit_count(&removal.path, branch_to_delete)?,
+        uncommitted_changes: uncommitted_change_count(&removal.path, deadline)?,
+        unreachable_commits: unreachable_commit_count(&removal.path, branch_to_delete, deadline)?,
     })
 }
 
@@ -313,8 +355,13 @@ pub struct RemovalContext<'a> {
     /// (`ds worktree rm --force`).
     pub is_forced: bool,
     /// What the worktree held when it was shown, for a removal that must not
-    /// delete work saved since; `None` when nothing was shown (the hook).
+    /// delete work saved since; the hook shows an empty worktree, since it
+    /// refuses one that holds work. `None` for tests that show nothing.
     pub shown_work: Option<UnsavedWork>,
+    /// When the removal is killed from outside (the hook): the counts of
+    /// unsaved work stop there, and a count that cannot finish refuses the
+    /// removal. `None` for `ds worktree rm`.
+    pub deadline: Option<Deadline>,
 }
 
 /// Removes the worktree at `path` (canonical) for the `WorktreeRemove` hook:
@@ -333,7 +380,8 @@ pub fn remove_linked_worktree(
         state_directory,
         requester: Requester::Session { claude_pid },
         is_forced: false,
-        shown_work: None,
+        shown_work: Some(NO_WORK_SHOWN),
+        deadline: Some(Deadline::starting_now(HOOK_REMOVAL_BUDGET)),
     };
     remove_prepared(&prepared, &context)
 }
@@ -353,6 +401,7 @@ pub fn remove_from_terminal(
         requester: Requester::Terminal,
         is_forced,
         shown_work: Some(shown_work),
+        deadline: None,
     };
     remove_prepared(prepared, &context)
 }
@@ -365,15 +414,44 @@ pub fn remove_prepared(
     let removal = &prepared.removal;
     ensure_listed_and_unlocked(removal)?;
     ensure_not_in_use(prepared, context)?;
+    ensure_session_closes_no_unsaved_work(removal, context)?;
     stop_processes(prepared, context.processes);
     ensure_not_in_use(prepared, context)?;
     ensure_no_new_work(removal, context)?;
-    remove_git_worktree(removal)?;
+    remove_git_worktree(removal, context.deadline)?;
     if let Some(instance) = &prepared.instance {
         forget_instance(&instance.machine, &instance.record, context.runner);
     }
     delete_branch_when_merged(removal);
     Ok(())
+}
+
+/// A session closing the worktree never deletes unsaved work: it is counted
+/// before anything is stopped, and a non-empty count refuses the removal.
+fn ensure_session_closes_no_unsaved_work(
+    removal: &Removal,
+    context: &RemovalContext,
+) -> Result<(), RemovalFailure> {
+    if context.is_forced || !matches!(context.requester, Requester::Session { .. }) {
+        return Ok(());
+    }
+    let work = count_unsaved_work_within(removal, context.deadline)?;
+    if work.is_empty() {
+        return Ok(());
+    }
+    Err(unsaved_work_failure(removal, work, context.requester))
+}
+
+fn unsaved_work_failure(
+    removal: &Removal,
+    work: UnsavedWork,
+    requester: Requester,
+) -> RemovalFailure {
+    let path = removal.path.clone();
+    match requester {
+        Requester::Session { .. } => RemovalFailure::UnsavedWorkInSession { path, work },
+        Requester::Terminal => RemovalFailure::UnsavedWork { path, work },
+    }
 }
 
 /// Counts again right before the deletion: stopping the processes takes
@@ -382,14 +460,11 @@ fn ensure_no_new_work(removal: &Removal, context: &RemovalContext) -> Result<(),
     let Some(shown) = context.shown_work.filter(|_| !context.is_forced) else {
         return Ok(());
     };
-    let work = count_unsaved_work(removal)?;
+    let work = count_unsaved_work_within(removal, context.deadline)?;
     if !work.has_grown_since(&shown) {
         return Ok(());
     }
-    Err(RemovalFailure::UnsavedWork {
-        path: removal.path.clone(),
-        work,
-    })
+    Err(unsaved_work_failure(removal, work, context.requester))
 }
 
 fn ensure_not_in_use(
@@ -519,8 +594,11 @@ fn print_still_running(line: Option<String>) {
     }
 }
 
-fn remove_git_worktree(removal: &Removal) -> Result<(), RemovalFailure> {
-    match remove_worktree(&removal.main_root, &removal.path) {
+fn remove_git_worktree(
+    removal: &Removal,
+    deadline: Option<Deadline>,
+) -> Result<(), RemovalFailure> {
+    match remove_worktree(&removal.main_root, &removal.path, deadline) {
         Ok(()) => Ok(()),
         Err(WorktreeGitError::Rejected { .. }) => accept_partial_removal(removal),
         Err(error) => Err(error.into()),
@@ -629,6 +707,7 @@ mod tests {
         foreign_answers: RefCell<VecDeque<Vec<ProcessSummary>>>,
         stop_calls: Cell<u32>,
         file_created_on_stop: Option<PathBuf>,
+        pause_on_stop: Option<Duration>,
         live_sessions: Vec<SessionProcess>,
         own_session: Option<SessionProcess>,
     }
@@ -639,6 +718,7 @@ mod tests {
                 foreign_answers: RefCell::new(answers.into()),
                 stop_calls: Cell::new(0),
                 file_created_on_stop: None,
+                pause_on_stop: None,
                 live_sessions: Vec::new(),
                 own_session: None,
             }
@@ -651,6 +731,11 @@ mod tests {
 
         fn running_as(mut self, session: SessionProcess) -> Self {
             self.own_session = Some(session);
+            self
+        }
+
+        fn pausing_on_stop(mut self, pause: Duration) -> Self {
+            self.pause_on_stop = Some(pause);
             self
         }
 
@@ -667,6 +752,9 @@ mod tests {
 
         fn stop(&self, _worktree: &Path, _scope: Option<&InstanceScope>) -> StopReport {
             self.stop_calls.set(self.stop_calls.get() + 1);
+            if let Some(pause) = self.pause_on_stop {
+                std::thread::sleep(pause);
+            }
             if let Some(file) = &self.file_created_on_stop {
                 std::fs::write(file, "saved while stopping").unwrap();
             }
@@ -881,6 +969,7 @@ mod tests {
             requester,
             is_forced,
             shown_work: None,
+            deadline: None,
         }
     }
 
@@ -986,6 +1075,201 @@ mod tests {
             fixture.registered_names(),
             vec![INSTANCE_NAME, NEIGHBOUR_NAME]
         );
+    }
+
+    fn hook_context<'a>(
+        runner: &'a FakeComposeRunner,
+        processes: &'a FakeProcesses,
+        state_directory: &'a Path,
+    ) -> RemovalContext<'a> {
+        RemovalContext {
+            shown_work: Some(NO_WORK_SHOWN),
+            ..removal_context(runner, processes, HOOK, false, state_directory)
+        }
+    }
+
+    fn assert_nothing_changed(fixture: &Fixture, runner: &FakeComposeRunner) {
+        assert_eq!(deletion_commands(runner), Vec::<&str>::new());
+        assert_eq!(
+            fixture.registered_names(),
+            vec![INSTANCE_NAME, NEIGHBOUR_NAME]
+        );
+        assert!(fixture.is_listed());
+    }
+
+    #[test]
+    fn should_refuse_a_hook_and_stop_nothing_when_the_worktree_has_uncommitted_changes() {
+        let fixture = fixture();
+        let runner = runner();
+        let file = fixture.prepared.removal.path.join("notes.txt");
+        std::fs::write(&file, "unsaved").unwrap();
+        let processes = FakeProcesses::answering(Vec::new());
+
+        let failure = remove_prepared(
+            &fixture.prepared,
+            &hook_context(&runner, &processes, fixture.state_directory()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            failure,
+            RemovalFailure::UnsavedWorkInSession { .. }
+        ));
+        assert_eq!(failure.exit_code(), exit_code::ERROR);
+        assert_eq!(failure.kept_reason(), "it holds unsaved work");
+        assert_eq!(processes.stop_calls.get(), 0);
+        assert!(file.exists());
+        assert_nothing_changed(&fixture, &runner);
+    }
+
+    #[test]
+    fn should_tell_the_user_to_run_ds_worktree_rm_from_a_terminal_when_a_hook_refuses_unsaved_work()
+    {
+        let fixture = fixture();
+        let runner = runner();
+        let path = fixture.prepared.removal.path.clone();
+        std::fs::write(path.join("notes.txt"), "unsaved").unwrap();
+        let processes = FakeProcesses::answering(Vec::new());
+
+        let failure = remove_prepared(
+            &fixture.prepared,
+            &hook_context(&runner, &processes, fixture.state_directory()),
+        )
+        .unwrap_err();
+
+        let message = failure.to_string();
+        assert!(message.contains("1 uncommitted change(s) and 0 commit(s) found nowhere else"));
+        assert!(message.contains(&format!(
+            "ds worktree rm {} from a terminal",
+            path.display()
+        )));
+        assert!(!message.contains("--force"));
+    }
+
+    #[test]
+    fn should_refuse_a_hook_and_stop_nothing_when_a_detached_head_holds_a_new_commit() {
+        let fixture = fixture();
+        let runner = runner();
+        let path = fixture.prepared.removal.path.clone();
+        git(&path, &["checkout", "-q", "--detach"]);
+        git(
+            &path,
+            &["commit", "-q", "--allow-empty", "-m", "unreachable"],
+        );
+        let processes = FakeProcesses::answering(Vec::new());
+
+        let failure = remove_prepared(
+            &fixture.prepared,
+            &hook_context(&runner, &processes, fixture.state_directory()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            failure,
+            RemovalFailure::UnsavedWorkInSession { work, .. } if work.unreachable_commits == 1
+        ));
+        assert_eq!(processes.stop_calls.get(), 0);
+        assert_nothing_changed(&fixture, &runner);
+    }
+
+    #[test]
+    fn should_refuse_a_hook_and_delete_nothing_when_work_appears_while_the_processes_stop() {
+        let fixture = fixture();
+        let runner = runner();
+        let file = fixture.prepared.removal.path.join("notes.txt");
+        let processes = FakeProcesses::answering(Vec::new()).creating_on_stop(file.clone());
+
+        let failure = remove_prepared(
+            &fixture.prepared,
+            &hook_context(&runner, &processes, fixture.state_directory()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            failure,
+            RemovalFailure::UnsavedWorkInSession { .. }
+        ));
+        assert_eq!(processes.stop_calls.get(), 1);
+        assert!(file.exists());
+        assert_nothing_changed(&fixture, &runner);
+    }
+
+    #[test]
+    fn should_refuse_a_hook_and_delete_nothing_when_the_budget_is_spent_at_the_second_count() {
+        let fixture = fixture();
+        let runner = runner();
+        let processes =
+            FakeProcesses::answering(Vec::new()).pausing_on_stop(Duration::from_millis(1500));
+        let context = RemovalContext {
+            deadline: Some(Deadline::starting_now(Duration::from_millis(1000))),
+            ..hook_context(&runner, &processes, fixture.state_directory())
+        };
+
+        let failure = remove_prepared(&fixture.prepared, &context).unwrap_err();
+
+        assert!(matches!(
+            failure,
+            RemovalFailure::Checkout(CheckoutError::Budget(_))
+        ));
+        assert_eq!(processes.stop_calls.get(), 1);
+        assert_nothing_changed(&fixture, &runner);
+    }
+
+    #[test]
+    fn should_refuse_a_hook_and_delete_nothing_when_too_little_budget_is_left_for_git_to_remove() {
+        let fixture = fixture();
+        let runner = runner();
+        let processes = FakeProcesses::answering(Vec::new());
+        let context = RemovalContext {
+            deadline: Some(Deadline::starting_now(Duration::from_secs(5))),
+            ..hook_context(&runner, &processes, fixture.state_directory())
+        };
+
+        let failure = remove_prepared(&fixture.prepared, &context).unwrap_err();
+
+        assert!(matches!(failure, RemovalFailure::Git(_)));
+        assert_nothing_changed(&fixture, &runner);
+    }
+
+    #[test]
+    fn should_remove_a_clean_worktree_when_a_hook_closes_it() {
+        let fixture = fixture();
+        let runner = runner();
+        let processes = FakeProcesses::answering(Vec::new());
+
+        remove_prepared(
+            &fixture.prepared,
+            &hook_context(&runner, &processes, fixture.state_directory()),
+        )
+        .unwrap();
+
+        assert!(!fixture.is_listed());
+        assert_eq!(fixture.registered_names(), vec![NEIGHBOUR_NAME]);
+    }
+
+    #[test]
+    fn should_remove_a_worktree_with_uncommitted_changes_when_a_terminal_showed_them() {
+        let fixture = fixture();
+        let runner = runner();
+        std::fs::write(fixture.prepared.removal.path.join("notes.txt"), "unsaved").unwrap();
+        let processes = FakeProcesses::answering(Vec::new());
+        let context = RemovalContext {
+            shown_work: Some(UnsavedWork {
+                uncommitted_changes: 1,
+                unreachable_commits: 0,
+            }),
+            ..removal_context(
+                &runner,
+                &processes,
+                Requester::Terminal,
+                false,
+                fixture.state_directory(),
+            )
+        };
+
+        remove_prepared(&fixture.prepared, &context).unwrap();
+
+        assert!(!fixture.is_listed());
     }
 
     #[test]

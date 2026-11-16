@@ -9,7 +9,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::checkout::{CheckoutError, git_failure, run_git_within};
-use crate::deadline::{Deadline, timeout_within};
+use crate::deadline::{BudgetExhausted, Deadline, has_run_out, timeout_within};
 use crate::process::CapturedOutput;
 
 const WORKTREE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -18,6 +18,7 @@ const BRANCH_FOUND_EXIT_CODE: i32 = 0;
 const BRANCH_MISSING_EXIT_CODE: i32 = 1;
 const ANCESTOR_EXIT_CODE: i32 = 0;
 const NOT_ANCESTOR_EXIT_CODE: i32 = 1;
+const MINIMUM_REMOVE_TIME: Duration = Duration::from_secs(10);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(60);
 const WORKTREE_LINE_PREFIX: &str = "worktree ";
 const LOCKED_MARKER: &str = "locked";
@@ -153,11 +154,24 @@ pub fn add_on_new_branch(
 }
 
 /// `git worktree remove --force <path>`: deletes the folder and forgets the
-/// worktree, even with local changes.
-pub fn remove_worktree(main_root: &Path, path: &Path) -> Result<(), WorktreeGitError> {
+/// worktree, even with local changes. With a `deadline`, the call is clamped to
+/// what is left of it, and nothing is run when no more than
+/// [`MINIMUM_REMOVE_TIME`] is left: git killed half way leaves a half-removed
+/// worktree.
+pub fn remove_worktree(
+    main_root: &Path,
+    path: &Path,
+    deadline: Option<Deadline>,
+) -> Result<(), WorktreeGitError> {
+    let timeout = match deadline {
+        None => WORKTREE_TIMEOUT,
+        Some(deadline) => deadline
+            .clamp_leaving(WORKTREE_TIMEOUT, MINIMUM_REMOVE_TIME)
+            .ok_or(CheckoutError::Budget(BudgetExhausted))?,
+    };
     run_forwarded(
         main_root,
-        WORKTREE_TIMEOUT,
+        timeout,
         [
             OsStr::new("worktree"),
             OsStr::new("remove"),
@@ -255,13 +269,19 @@ fn parse_worktree_listing(listing: &str) -> Vec<ListedWorktree> {
 }
 
 /// How many lines `git status --porcelain` prints in `worktree`: the changed
-/// and the untracked files, ignored ones not counted.
-pub fn uncommitted_change_count(worktree: &Path) -> Result<usize, CheckoutError> {
+/// and the untracked files, ignored ones not counted. With a `deadline`, the
+/// call stops at it with [`CheckoutError::Budget`].
+pub fn uncommitted_change_count(
+    worktree: &Path,
+    deadline: Option<Deadline>,
+) -> Result<usize, CheckoutError> {
+    let timeout = timeout_within(deadline, STATUS_TIMEOUT)?;
     let output = run_git_within(
         worktree,
         ["--no-optional-locks", "status", "--porcelain"],
-        STATUS_TIMEOUT,
-    )?;
+        timeout,
+    )
+    .map_err(|error| timeout_as_budget(error, deadline))?;
     if !output.status.success() {
         return Err(git_failure("status", &output));
     }
@@ -275,15 +295,18 @@ pub fn uncommitted_change_count(worktree: &Path) -> Result<usize, CheckoutError>
 /// How many commits are reachable from the `HEAD` of `worktree` and from no
 /// other branch, tag or remote branch. With `branch_to_delete`, that branch
 /// does not count as a place the commits are kept, since it is deleted too.
+/// With a `deadline`, the call stops at it with [`CheckoutError::Budget`].
 pub fn unreachable_commit_count(
     worktree: &Path,
     branch_to_delete: Option<&str>,
+    deadline: Option<Deadline>,
 ) -> Result<usize, CheckoutError> {
     let exclusion = branch_to_delete.map(|branch| format!("--exclude={branch}"));
     let mut arguments = vec!["rev-list", "--count", "HEAD", "--not"];
     arguments.extend(exclusion.as_deref());
     arguments.extend(["--branches", "--tags", "--remotes"]);
-    let output = run_git_within(worktree, arguments, QUICK_TIMEOUT)?;
+    let output = run_git_within(worktree, arguments, quick_timeout(deadline)?)
+        .map_err(|error| timeout_as_budget(error, deadline))?;
     if !output.status.success() {
         return Err(git_failure("rev-list", &output));
     }
@@ -329,6 +352,15 @@ pub fn delete_branch_within(
         return Ok(());
     }
     Err(git_failure("branch", &output))
+}
+
+fn timeout_as_budget(error: CheckoutError, deadline: Option<Deadline>) -> CheckoutError {
+    match error {
+        CheckoutError::GitTimedOut { .. } if has_run_out(deadline) => {
+            CheckoutError::Budget(BudgetExhausted)
+        }
+        other => other,
+    }
 }
 
 fn quick_timeout(deadline: Option<Deadline>) -> Result<Duration, CheckoutError> {
