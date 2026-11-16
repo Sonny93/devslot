@@ -153,7 +153,11 @@ fn should_refuse_worktree_rm_and_keep_everything_when_a_live_session_holds_the_l
         run.stderr
             .contains("another Claude Code session (session abc-123)")
     );
-    assert!(run.stderr.contains("without --force"));
+    assert!(run.stderr.contains("pass --force"));
+    assert!(
+        run.stdout
+            .contains("In use (blocks removal without --force): session abc-123")
+    );
     assert!(path.exists());
     assert_eq!(sandbox.main.machine().instance_names().len(), 1);
     assert_eq!(sandbox.lease_names(&path).len(), 1);

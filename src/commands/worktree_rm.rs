@@ -10,8 +10,9 @@ use std::time::Duration;
 use super::hook::worktree_create::{target_path, validate_name};
 use super::machine::{Machine, locate_checkout};
 use super::worktree_removal::{
-    PreparedRemoval, RemovalFailure, UnsavedWork, count_unsaved_work, describe_unsaved_work,
-    describe_users, ensure_listed_and_unlocked, prepare_removal, remove_from_terminal,
+    PreparedRemoval, RemovalFailure, UnsavedWork, count_unsaved_work, describe_sessions,
+    describe_unsaved_work, describe_users, ensure_listed_and_unlocked, live_other_sessions,
+    prepare_removal, remove_from_terminal,
 };
 use crate::checkout::CheckoutError;
 use crate::cli::args::WorktreeRmArguments;
@@ -21,12 +22,12 @@ use crate::cli::output::write_stdout;
 use crate::error::ToolError;
 use crate::global_config::GlobalConfig;
 use crate::instance_processes::{
-    ProcessReport, ProcessSummary, Requester, find_foreign_processes, find_instance_processes,
-    join_summaries,
+    ProcessReport, ProcessSummary, Requester, SystemProcesses, find_foreign_processes,
+    find_instance_processes, join_summaries,
 };
 use crate::kept_worktrees::{self, KeptWorktree};
 use crate::paths::DevslotPaths;
-use crate::session_leases;
+use crate::session_leases::{self, SessionLease, join_descriptions};
 use crate::worktree_identity::WorktreeIdentity;
 use crate::worktree_lock::{LockPurpose, WorktreeKey, WorktreeLock};
 
@@ -60,6 +61,7 @@ struct Preview {
     instance_name: Option<String>,
     processes: ProcessReport,
     in_use: Vec<ProcessSummary>,
+    sessions: Vec<SessionLease>,
     uncommitted_changes: usize,
     unreachable_commits: usize,
     kept: Option<KeptWorktree>,
@@ -98,7 +100,7 @@ pub fn run_worktree_rm(arguments: &WorktreeRmArguments) -> Result<u8, ToolError>
         key,
     };
     let kept = kept_worktrees::read(&previewed.state_directory, &previewed.key);
-    let preview = build_preview(&prepared, kept)?;
+    let preview = build_preview(&prepared, &previewed, kept)?;
     write_stdout(&render_preview(&preview))?;
     if let Some(code) = refusal_without_force(&preview, arguments.force) {
         return Ok(code);
@@ -261,6 +263,7 @@ fn resolve_path(
 
 fn build_preview(
     prepared: &PreparedRemoval,
+    previewed: &Previewed,
     kept: Option<KeptWorktree>,
 ) -> Result<Preview, ToolError> {
     let removal = &prepared.removal;
@@ -272,6 +275,12 @@ fn build_preview(
         instance_name: scope.as_ref().map(|scope| scope.name.clone()),
         processes: find_instance_processes(&removal.path, scope.as_ref()),
         in_use: find_foreign_processes(&removal.path, scope.as_ref(), Requester::Terminal),
+        sessions: live_other_sessions(
+            &previewed.state_directory,
+            &previewed.key,
+            &SystemProcesses,
+            Requester::Terminal,
+        ),
         uncommitted_changes: work.uncommitted_changes,
         unreachable_commits: work.unreachable_commits,
         kept,
@@ -293,20 +302,24 @@ fn render_preview(preview: &Preview) -> String {
         preview.path.display(),
         listed_or_none(&preview.processes.targets),
         listed_or_none(&preview.processes.others),
-        in_use_line(&preview.in_use),
+        in_use_line(&preview.in_use, &preview.sessions),
         kept_line(preview.kept.as_ref()),
         preview.uncommitted_changes,
         preview.unreachable_commits,
     )
 }
 
-fn in_use_line(in_use: &[ProcessSummary]) -> String {
-    if in_use.is_empty() {
+fn in_use_line(in_use: &[ProcessSummary], sessions: &[SessionLease]) -> String {
+    let users: Vec<String> = [join_summaries(in_use), join_descriptions(sessions)]
+        .into_iter()
+        .filter(|list| !list.is_empty())
+        .collect();
+    if users.is_empty() {
         return String::new();
     }
     format!(
         "In use (blocks removal without --force): {}\n",
-        join_summaries(in_use)
+        users.join(", ")
     )
 }
 
@@ -345,13 +358,20 @@ fn refusal_without_force(preview: &Preview, is_forced: bool) -> Option<u8> {
 }
 
 fn in_use_reason(preview: &Preview) -> Option<String> {
-    if preview.in_use.is_empty() {
+    let users: Vec<String> = [
+        (!preview.in_use.is_empty()).then(|| describe_users(&preview.in_use)),
+        (!preview.sessions.is_empty()).then(|| describe_sessions(&preview.sessions)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if users.is_empty() {
         return None;
     }
     Some(format!(
         "{} is in use by {}; nothing was removed, close them or pass --force to remove it anyway",
         preview.path.display(),
-        describe_users(&preview.in_use)
+        users.join(", ")
     ))
 }
 
@@ -378,6 +398,8 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use crate::instance_processes::SessionProcess;
+
     fn preview() -> Preview {
         Preview {
             path: PathBuf::from("/wt/app/feat"),
@@ -394,6 +416,7 @@ mod tests {
                 }],
             },
             in_use: Vec::new(),
+            sessions: Vec::new(),
             uncommitted_changes: 0,
             unreachable_commits: 0,
             kept: None,
@@ -479,6 +502,52 @@ mod tests {
             Some(exit_code::ERROR)
         );
         assert_eq!(refusal_without_force(&in_use_by_claude(), true), None);
+    }
+
+    fn held_by_session(session_id: Option<&str>) -> Preview {
+        let mut busy = preview();
+        busy.sessions = vec![SessionLease {
+            session: SessionProcess {
+                pid: 77,
+                start_time: 5,
+            },
+            session_id: session_id.map(str::to_owned),
+        }];
+        busy
+    }
+
+    #[test]
+    fn should_list_the_session_on_the_in_use_line_when_only_a_session_holds_the_worktree() {
+        let text = render_preview(&held_by_session(Some("abc-1")));
+
+        assert!(text.contains("In use (blocks removal without --force): session abc-1\n"));
+    }
+
+    #[test]
+    fn should_list_processes_then_sessions_on_the_in_use_line_when_both_hold_the_worktree() {
+        let mut both = held_by_session(None);
+        both.in_use = in_use_by_claude().in_use;
+
+        let text = render_preview(&both);
+
+        assert!(
+            text.contains("In use (blocks removal without --force): 1234 (claude), claude 77\n")
+        );
+    }
+
+    #[test]
+    fn should_refuse_without_force_when_a_session_holds_the_worktree() {
+        let held = held_by_session(Some("abc-1"));
+
+        assert_eq!(refusal_without_force(&held, false), Some(exit_code::ERROR));
+        assert_eq!(refusal_without_force(&held, true), None);
+    }
+
+    #[test]
+    fn should_name_the_session_in_the_reason_when_a_session_holds_the_worktree() {
+        let reason = in_use_reason(&held_by_session(Some("abc-1"))).unwrap();
+
+        assert!(reason.contains("in use by another Claude Code session (session abc-1);"));
     }
 
     #[test]

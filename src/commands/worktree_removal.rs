@@ -151,10 +151,18 @@ fn describe_in_use(path: &Path, processes: &[ProcessSummary]) -> String {
     )
 }
 
+/// `another Claude Code session (session a, claude 12)`.
+pub fn describe_sessions(sessions: &[SessionLease]) -> String {
+    format!(
+        "another Claude Code session ({})",
+        join_descriptions(sessions)
+    )
+}
+
 fn describe_sessions_active(path: &Path, sessions: &[SessionLease]) -> String {
     format!(
-        "{path} is in use by another Claude Code session ({}); nothing was deleted (the worktree, its data and its slot are kept). Close {}, or run ds worktree rm --force {path} from a terminal: without --force, ds worktree rm is refused too, even typed inside a session.",
-        join_descriptions(sessions),
+        "{path} is in use by {}; nothing was deleted (the worktree, its data and its slot are kept). Close {}, or run ds worktree rm --force {path} from a terminal: without --force, ds worktree rm is refused too, even typed inside a session.",
+        describe_sessions(sessions),
         if sessions.len() == 1 { "it" } else { "them" },
         path = path.display(),
     )
@@ -422,13 +430,12 @@ fn ensure_no_other_session(
     let Some(key) = WorktreeKey::of(path) else {
         return Ok(());
     };
-    let own = context.processes.own_session(context.requester);
-    let is_alive = |session| context.processes.is_session_alive(session);
-    let sessions: Vec<SessionLease> =
-        session_leases::live(context.state_directory, &key, &is_alive)
-            .into_iter()
-            .filter(|lease| Some(lease.session) != own)
-            .collect();
+    let sessions = live_other_sessions(
+        context.state_directory,
+        &key,
+        context.processes,
+        context.requester,
+    );
     if sessions.is_empty() {
         return Ok(());
     }
@@ -436,6 +443,22 @@ fn ensure_no_other_session(
         path: path.clone(),
         sessions,
     })
+}
+
+/// The live leases of the worktree of `key` held by sessions other than
+/// `requester`'s own. Dead leases are deleted on the way.
+pub fn live_other_sessions(
+    state_directory: &Path,
+    key: &WorktreeKey,
+    processes: &dyn ProcessControl,
+    requester: Requester,
+) -> Vec<SessionLease> {
+    let own = processes.own_session(requester);
+    let is_alive = |session| processes.is_session_alive(session);
+    session_leases::live(state_directory, key, &is_alive)
+        .into_iter()
+        .filter(|lease| Some(lease.session) != own)
+        .collect()
 }
 
 fn locate_removal(path: PathBuf) -> Result<Removal, RemovalFailure> {
