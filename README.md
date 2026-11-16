@@ -113,7 +113,7 @@ This repository runs several instances of its dev stack on one machine, one per 
 - **A server started without `ds run` may survive a worktree removal.** Its process listening on an instance port is stopped, but a parent that respawns it (for example `node ace serve` run by hand) is only listed. Servers started through `ds run` or `ds up` are stopped entirely.
 - **Cookies are not isolated by port.** Two instances opened on `localhost` with the same session cookie name log each other out. Named URLs per instance (after v1) will fix it.
 - **Dev and local prod share the compose project** of a registered checkout, so `just prod` runs on the dev database volume. Workaround: `-p <name>` in the prod recipe (see the [spec](docs/spec.md)).
-- **An idle session that only `cd`'d into a worktree is not seen.** Another session's removal can then delete its data. Sessions started with `claude --worktree` are covered.
+- **A session that only `cd`'d into a worktree is seen once it ran `ds up`, `ds run` or `ds reset` there.** Containers started by hand (`docker compose up`) and agents other than Claude Code stay invisible: another session's removal can delete their data. The lease lasts as long as the session's `claude` process (`/clear` and subagents included), so `ds worktree rm` from a terminal needs `--force` while it runs. See [Worktrees in use](docs/worktrees.md#worktrees-in-use-linux-only).
 - **Processes are stopped on Linux only.** Elsewhere, a worktree removal stops nothing and lists nothing, and it cannot tell that another session uses the worktree.
 
 ## Develop

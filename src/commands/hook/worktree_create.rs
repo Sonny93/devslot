@@ -29,6 +29,7 @@ use crate::kept_worktrees;
 use crate::project_config::ProjectConfig;
 use crate::registration::{Intent, RegistrationOutcome};
 use crate::registry::record::normalize_path;
+use crate::session_leases;
 use crate::worktree_lock::{LockPurpose, WorktreeKey, WorktreeLock};
 
 const MAX_NAME_LENGTH: usize = 100;
@@ -146,7 +147,7 @@ fn create_within(
         let holder = WorktreeLock::purpose_of_holder(state_directory, &key);
         return reopen_after_lock_timeout(creation, holder, deadline);
     };
-    let path = create_or_reopen(target, creation.main_root, creation.name, deadline)?;
+    let path = create_or_reopen(creation, &key, deadline)?;
     kept_worktrees::forget(state_directory, &key);
     Ok(path)
 }
@@ -173,15 +174,16 @@ fn reopen_after_lock_timeout(
 }
 
 fn create_or_reopen(
-    target: &Path,
-    main_root: &Path,
-    name: &str,
+    creation: &Creation,
+    key: &WorktreeKey,
     deadline: Deadline,
 ) -> Result<PathBuf, HookFailure> {
+    let target = creation.target;
     if std::fs::symlink_metadata(target).is_ok() {
-        return reopen_worktree(target, main_root, deadline);
+        return reopen_worktree(target, creation.main_root, deadline);
     }
-    add_worktree(main_root, target, name, deadline)?;
+    add_worktree(creation.main_root, target, creation.name, deadline)?;
+    session_leases::clear(creation.state_directory, key);
     target.canonicalize().map_err(|source| {
         HookFailure::Checkout(CheckoutError::Resolve {
             path: target.to_path_buf(),

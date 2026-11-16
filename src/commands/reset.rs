@@ -12,6 +12,7 @@ use crate::compose::runner::{ComposeRunner, ComposeTarget, DockerRunner, delete_
 use crate::docker::DockerCompose;
 use crate::error::ToolError;
 use crate::reset_plan::{ServiceReset, plan_service_reset};
+use crate::session_leases;
 
 const NOT_REGISTERED_MESSAGE: &str = "ds: error: this checkout is not registered; nothing to reset";
 
@@ -24,6 +25,7 @@ pub fn run_reset(service: Option<&str>) -> Result<u8, ToolError> {
         eprintln!("{NOT_REGISTERED_MESSAGE}");
         return Ok(exit_code::ERROR);
     };
+    session_leases::record_current_session(machine.paths.state_directory(), &checkout);
     let context = load_instance_context(&checkout, instance)?;
     eprintln!(
         "ds: resetting the data of {} ({})",

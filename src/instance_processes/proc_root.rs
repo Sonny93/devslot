@@ -18,6 +18,9 @@ const STATE_COLUMN: usize = 3;
 const INODE_COLUMN: usize = 9;
 const UID_PREFIX: &str = "Uid:";
 const DEAD_STATES: [char; 2] = ['Z', 'X'];
+/// Fields 6 to 21 of `stat` sit between the process group (field 5) and the
+/// start time (field 22): 16 tokens to skip.
+const START_TIME_TOKENS_AFTER_GROUP: usize = 16;
 
 /// What `/proc/<pid>/stat` says about the family of a process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +31,9 @@ pub struct ProcessStat {
     pub parent: i32,
     /// The process group.
     pub group: i32,
+    /// When the process started, in clock ticks since boot: with the pid, it
+    /// tells a process from a later one that reused the pid.
+    pub start_time: u64,
 }
 
 impl ProcessStat {
@@ -65,7 +71,7 @@ impl ProcRoot {
             .collect()
     }
 
-    /// The state, parent and group of `pid`; `None` when it is gone.
+    /// The state, parent, group and start time of `pid`; `None` when it is gone.
     pub fn stat(&self, pid: i32) -> Option<ProcessStat> {
         let text = std::fs::read_to_string(self.process_file(pid, "stat")).ok()?;
         parse_stat(&text)
@@ -154,10 +160,12 @@ fn parse_stat(text: &str) -> Option<ProcessStat> {
     let state = fields.next()?.chars().next()?;
     let parent = fields.next()?.parse().ok()?;
     let group = fields.next()?.parse().ok()?;
+    let start_time = fields.nth(START_TIME_TOKENS_AFTER_GROUP)?.parse().ok()?;
     Some(ProcessStat {
         state,
         parent,
         group,
+        start_time,
     })
 }
 
@@ -194,6 +202,10 @@ mod tests {
 
     const TCP_HEADER: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
 
+    fn stat_line(name: &str, start_time: u64) -> String {
+        format!("{name} S 7 9 9 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 {start_time} 0 0")
+    }
+
     fn line(local: &str, state: &str, inode: u64) -> String {
         format!(
             "   0: {local} 00000000:0000 {state} 00000000:00000000 00:00000000 00000000  1000        0 {inode} 1 0000000000000000 100 0 0 10 0"
@@ -202,21 +214,33 @@ mod tests {
 
     #[test]
     fn should_read_the_state_parent_and_group_when_the_name_holds_parentheses() {
-        let stat = parse_stat("42 (my (odd) name) S 7 9 9 0 -1").unwrap();
+        let stat = parse_stat(&stat_line("42 (my (odd) name)", 123_456)).unwrap();
 
         assert_eq!(
             stat,
             ProcessStat {
                 state: 'S',
                 parent: 7,
-                group: 9
+                group: 9,
+                start_time: 123_456
             }
         );
     }
 
     #[test]
+    fn should_read_the_start_time_from_the_twenty_second_field() {
+        let stat = parse_stat(&stat_line("1 (x)", 987_654_321)).unwrap();
+
+        assert_eq!(stat.start_time, 987_654_321);
+    }
+
+    #[test]
     fn should_reject_a_stat_line_that_is_cut_short() {
         assert_eq!(parse_stat("42 (x) S 7"), None);
+        assert_eq!(
+            parse_stat("42 (x) S 7 9 9 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0"),
+            None
+        );
     }
 
     #[test]
@@ -225,6 +249,7 @@ mod tests {
             state: 'S',
             parent: 1,
             group: 1,
+            start_time: 1,
         };
 
         assert!(!alive.is_dead());

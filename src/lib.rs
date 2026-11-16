@@ -42,6 +42,7 @@ pub mod report;
 pub mod reserved_names;
 pub mod reset_plan;
 pub mod services_state;
+pub mod session_leases;
 pub mod shell_quote;
 pub mod worktree_identity;
 pub mod worktree_lock;

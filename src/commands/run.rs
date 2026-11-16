@@ -10,6 +10,7 @@ use crate::commands::registering::{announce, register_checkout, registration_or_
 use crate::error::ToolError;
 use crate::global_config::GlobalConfig;
 use crate::registration::Intent;
+use crate::session_leases;
 
 const REFUSAL_CLOSING_LINE: &str = "ds run does not start the command until the errors are fixed";
 
@@ -27,6 +28,7 @@ pub fn run_command(command: &[OsString], color: ColorChoice) -> Result<u8, ToolE
             Err(code) => return Ok(code),
         };
     announce(&registration, style);
+    session_leases::record_current_session(machine.paths.state_directory(), &checkout);
     let environment = load_environment(&checkout, &registration.instance)?;
     warn_about_replacements(&environment);
     Ok(exec_command(command, &environment))

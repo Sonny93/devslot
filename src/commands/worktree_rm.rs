@@ -26,6 +26,7 @@ use crate::instance_processes::{
 };
 use crate::kept_worktrees::{self, KeptWorktree};
 use crate::paths::DevslotPaths;
+use crate::session_leases;
 use crate::worktree_identity::WorktreeIdentity;
 use crate::worktree_lock::{LockPurpose, WorktreeKey, WorktreeLock};
 
@@ -138,9 +139,15 @@ fn remove_under_lock(
         Ok(prepared) => prepared,
         Err(failure) => return Ok(refuse(&failure)),
     };
-    match remove_from_terminal(&prepared, is_forced, shown_work(preview)) {
+    match remove_from_terminal(
+        &prepared,
+        is_forced,
+        shown_work(preview),
+        &previewed.state_directory,
+    ) {
         Ok(()) => {
             kept_worktrees::forget(&previewed.state_directory, &previewed.key);
+            session_leases::clear(&previewed.state_directory, &previewed.key);
             eprintln!("ds: removed {}", preview.path.display());
             Ok(exit_code::SUCCESS)
         }

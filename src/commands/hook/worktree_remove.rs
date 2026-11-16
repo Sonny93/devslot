@@ -19,11 +19,11 @@ use crate::checkout::CheckoutError;
 use crate::cli::exit_code;
 use crate::commands::worktree_removal::{BUSY_REASON, remove_linked_worktree};
 use crate::error::ToolError;
+use crate::instance_processes::claude_pid_from_environment;
 use crate::kept_worktrees;
 use crate::paths::DevslotPaths;
+use crate::session_leases;
 use crate::worktree_lock::{LockPurpose, WorktreeKey, WorktreeLock};
-
-const CLAUDE_PID_VARIABLE: &str = "CLAUDE_PID";
 
 #[derive(Debug, Deserialize)]
 struct WorktreeRemoveInput {
@@ -63,9 +63,10 @@ fn remove_locked(
             .into());
         }
     };
-    match remove_linked_worktree(path, claude_pid_from_environment()) {
+    match remove_linked_worktree(path, claude_pid_from_environment(), state_directory) {
         Ok(()) => {
             kept_worktrees::forget(state_directory, key);
+            session_leases::clear(state_directory, key);
             Ok(exit_code::SUCCESS)
         }
         Err(failure) => {
@@ -86,8 +87,4 @@ fn keep_noted(state_directory: &Path, key: &WorktreeKey, reason: &str) {
             key.path().display()
         );
     }
-}
-
-fn claude_pid_from_environment() -> Option<i32> {
-    std::env::var(CLAUDE_PID_VARIABLE).ok()?.trim().parse().ok()
 }

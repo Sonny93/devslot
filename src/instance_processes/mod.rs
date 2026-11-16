@@ -9,12 +9,16 @@
 use std::fmt;
 use std::path::Path;
 
+const CLAUDE_PID_VARIABLE: &str = "CLAUDE_PID";
+
 #[cfg(target_os = "linux")]
 mod foreign;
 #[cfg(target_os = "linux")]
 mod proc_root;
 #[cfg(target_os = "linux")]
 mod scan;
+#[cfg(target_os = "linux")]
+mod session;
 #[cfg(target_os = "linux")]
 mod stop;
 #[cfg(test)]
@@ -80,6 +84,22 @@ impl ProcessReport {
 /// The kernel name of a Claude Code session's process.
 pub const CLAUDE_COMM: &str = "claude";
 
+/// A Claude Code session, told apart from any later process that reuses its
+/// pid by the time the process started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionProcess {
+    /// The pid of the `claude` process.
+    pub pid: i32,
+    /// When it started, in clock ticks since boot (`/proc/<pid>/stat`).
+    pub start_time: u64,
+}
+
+/// `CLAUDE_PID` from the environment: the `claude` process Claude Code names
+/// for its hooks, to be trusted only when it is an ancestor of `ds`.
+pub fn claude_pid_from_environment() -> Option<i32> {
+    std::env::var(CLAUDE_PID_VARIABLE).ok()?.trim().parse().ok()
+}
+
 /// Who asks for the removal of a worktree, which decides what counts as
 /// somebody else's process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +130,12 @@ pub trait ProcessControl {
         scope: Option<&InstanceScope>,
         requester: Requester,
     ) -> Vec<ProcessSummary>;
+
+    /// See [`is_session_alive`].
+    fn is_session_alive(&self, session: SessionProcess) -> bool;
+
+    /// The session `requester` is: the one that closes, none for a terminal.
+    fn own_session(&self, requester: Requester) -> Option<SessionProcess>;
 }
 
 /// The processes of this machine, read from `/proc`.
@@ -132,6 +158,17 @@ impl ProcessControl for SystemProcesses {
         requester: Requester,
     ) -> Vec<ProcessSummary> {
         find_foreign_processes(worktree, scope, requester)
+    }
+
+    fn is_session_alive(&self, session: SessionProcess) -> bool {
+        is_session_alive(session)
+    }
+
+    fn own_session(&self, requester: Requester) -> Option<SessionProcess> {
+        match requester {
+            Requester::Session { claude_pid } => current_session(claude_pid),
+            Requester::Terminal => None,
+        }
     }
 }
 
@@ -198,6 +235,22 @@ pub fn find_foreign_processes(
     foreign::foreign_processes(&system_context(&root, worktree, scope), requester)
 }
 
+/// The Claude Code session that runs `ds`: `claude_pid` when it is an
+/// ancestor of `ds`, otherwise the nearest ancestor named `claude`; `None`
+/// when there is none.
+#[cfg(target_os = "linux")]
+pub fn current_session(claude_pid: Option<i32>) -> Option<SessionProcess> {
+    let root = proc_root::ProcRoot::system();
+    session::current_session(&root, rustix::process::getpid().as_raw_pid(), claude_pid)
+}
+
+/// Whether `session` still runs: its pid exists, is not a zombie, is named
+/// `claude` and started when the lease says.
+#[cfg(target_os = "linux")]
+pub fn is_session_alive(session: SessionProcess) -> bool {
+    session::is_session_alive(&proc_root::ProcRoot::system(), session)
+}
+
 #[cfg(target_os = "linux")]
 fn system_context<'a>(
     root: &'a proc_root::ProcRoot,
@@ -227,6 +280,18 @@ pub fn find_foreign_processes(
     _requester: Requester,
 ) -> Vec<ProcessSummary> {
     Vec::new()
+}
+
+/// No session is found outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn current_session(_claude_pid: Option<i32>) -> Option<SessionProcess> {
+    None
+}
+
+/// No session is known to run outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn is_session_alive(_session: SessionProcess) -> bool {
+    false
 }
 
 /// Nothing is stopped outside Linux.

@@ -18,6 +18,7 @@ use crate::port_check::busy_ports;
 use crate::port_probe::SystemPortProbe;
 use crate::registration::Intent;
 use crate::registry::record::InstanceRecord;
+use crate::session_leases;
 
 const REFUSAL_CLOSING_LINE: &str = "ds up does not start the services until the errors are fixed";
 const DEFAULT_RUN_ORIGIN: &str = "devslot.toml";
@@ -62,6 +63,7 @@ pub fn run_up(color: ColorChoice, arguments: &UpArguments) -> Result<u8, ToolErr
             Err(code) => return Ok(code),
         };
     announce(&registration, style);
+    session_leases::record_current_session(machine.paths.state_directory(), &checkout);
     let context = load_instance_context(&checkout, &registration.instance)?;
     let plan = UpPlan {
         instance: &registration.instance,

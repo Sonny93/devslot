@@ -238,6 +238,17 @@ impl Project {
         }
     }
 
+    /// The linked worktree at `root`, made by something else than
+    /// [`Self::add_worktree`] (the worktree hook), on the same machine.
+    pub fn linked_at(main: &Project, root: &Path) -> Project {
+        Project {
+            root: root.to_path_buf(),
+            directory: tempfile::tempdir().unwrap(),
+            scenario: main.scenario,
+            machine: Arc::clone(&main.machine),
+        }
+    }
+
     pub fn doctor(&self, arguments: &[&str]) -> Run {
         self.run_with(arguments, &[])
     }
@@ -255,6 +266,34 @@ impl Project {
         let mut command = self.command(arguments, &[]);
         command.current_dir(directory);
         Run::from(command.output().unwrap())
+    }
+
+    /// Runs `ds` with `arguments` as the child of `session_program` (a copy of
+    /// a shell named `claude`), the way a Claude Code session runs it.
+    pub fn run_under_session(
+        &self,
+        session_program: &Path,
+        arguments: &[&str],
+        environment: &[(&str, &str)],
+    ) -> Run {
+        let ds = self.command(arguments, environment);
+        let mut session = Command::new(session_program);
+        session
+            .current_dir(ds.get_current_dir().unwrap())
+            .env_remove("CLAUDE_PID")
+            .env_remove("CLAUDE_CODE_SESSION_ID");
+        for (name, value) in ds.get_envs() {
+            match value {
+                Some(value) => session.env(name, value),
+                None => session.env_remove(name),
+            };
+        }
+        let quoted: Vec<String> = std::iter::once(ds.get_program())
+            .chain(ds.get_args())
+            .map(|word| format!("'{}'", word.to_str().unwrap()))
+            .collect();
+        session.args(["-c", &format!("{}; exit $?", quoted.join(" "))]);
+        Run::from(session.output().unwrap())
     }
 
     /// Runs `ds hook <event>` with `input` on stdin, as the Claude Code plugin does.

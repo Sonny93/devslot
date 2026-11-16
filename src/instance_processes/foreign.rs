@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 
+use super::proc_root::ProcRoot;
 use super::scan::{ScanContext, scan, with_descendants};
 use super::{CLAUDE_COMM, ProcessSummary, Requester};
 
@@ -35,39 +36,40 @@ fn own_pids(context: &ScanContext, requester: Requester) -> HashSet<i32> {
     let Requester::Session { claude_pid } = requester else {
         return HashSet::new();
     };
-    session_root(context, claude_pid).map_or_default(|root| with_descendants(context, &[root]))
+    session_root(context.root, context.own_pid, claude_pid)
+        .map_or_default(|session_pid| with_descendants(context, &[session_pid]))
 }
 
 /// The `claude` process of the closing session: the hinted pid when it is an
 /// ancestor of `ds`, otherwise the nearest ancestor named `claude`. Without
 /// either there is no root and nothing is the session's own, so the removal
 /// is refused when anything else runs in the worktree.
-fn session_root(context: &ScanContext, claude_pid: Option<i32>) -> Option<i32> {
-    let ancestors = ancestors_nearest_first(context);
+pub fn session_root(root: &ProcRoot, own_pid: i32, claude_pid: Option<i32>) -> Option<i32> {
+    let ancestors = ancestors_nearest_first(root, own_pid);
     if let Some(hinted) = claude_pid.filter(|pid| ancestors.contains(pid)) {
         return Some(hinted);
     }
     ancestors
         .into_iter()
-        .find(|pid| context.root.comm(*pid) == CLAUDE_COMM)
+        .find(|pid| root.comm(*pid) == CLAUDE_COMM)
 }
 
 /// The proper ancestors of `ds`, parent first, without init and the user's
 /// systemd instance: they are never the root of a session, and taking one
 /// would make every process of the machine the session's own.
-fn ancestors_nearest_first(context: &ScanContext) -> Vec<i32> {
+fn ancestors_nearest_first(root: &ProcRoot, own_pid: i32) -> Vec<i32> {
     let mut ancestors = Vec::new();
-    let mut next = context.root.stat(context.own_pid).map(|stat| stat.parent);
+    let mut next = root.stat(own_pid).map(|stat| stat.parent);
     while let Some(pid) = next.filter(|pid| *pid > 0 && !ancestors.contains(pid)) {
         ancestors.push(pid);
-        next = context.root.stat(pid).map(|stat| stat.parent);
+        next = root.stat(pid).map(|stat| stat.parent);
     }
-    ancestors.retain(|pid| *pid != INIT_PID && !is_subreaper(context, *pid));
+    ancestors.retain(|pid| *pid != INIT_PID && !is_subreaper(root, *pid));
     ancestors
 }
 
-fn is_subreaper(context: &ScanContext, pid: i32) -> bool {
-    context.root.comm(pid) == SUBREAPER_COMM
+fn is_subreaper(root: &ProcRoot, pid: i32) -> bool {
+    root.comm(pid) == SUBREAPER_COMM
 }
 
 /// Whether nobody owns the process any more: its parent is init or a
@@ -81,7 +83,7 @@ fn is_orphan(context: &ScanContext, pid: i32) -> bool {
     let Some(stat) = context.root.stat(pid) else {
         return true;
     };
-    stat.parent == INIT_PID || is_subreaper(context, stat.parent)
+    stat.parent == INIT_PID || is_subreaper(context.root, stat.parent)
 }
 
 #[cfg(test)]

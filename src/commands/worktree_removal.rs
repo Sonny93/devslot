@@ -3,8 +3,9 @@
 //!
 //! 1. checks with no side effect: the path is the root of a linked worktree
 //!    that git lists at exactly that path, the registry entry is read, the
-//!    worktree is not locked, and no process of somebody else (another
-//!    session, an editor) runs in it;
+//!    worktree is not locked, no process of somebody else (another session,
+//!    an editor) runs in it, and no other Claude Code session holds a lease on
+//!    it (see `session_leases`);
 //! 2. the instance's processes are stopped (only the ones that belong to it),
 //!    then the check for somebody else's processes runs again, because
 //!    stopping can take seconds and a person can wait at a prompt;
@@ -33,6 +34,8 @@ use crate::instance_processes::{
     join_summaries,
 };
 use crate::registry::record::{InstanceRecord, RegistryChange};
+use crate::session_leases::{self, SessionLease, join_descriptions};
+use crate::worktree_lock::WorktreeKey;
 
 const DETACHED_HEAD_NAME: &str = "HEAD";
 const REMOVE_COMMAND: &str = "worktree remove";
@@ -56,6 +59,16 @@ pub enum RemovalFailure {
         path: PathBuf,
         /// The processes of somebody else that run in it.
         processes: Vec<ProcessSummary>,
+    },
+    /// Another Claude Code session holds a lease on the worktree (it ran
+    /// `ds up`, `ds run` or `ds reset` there): nothing was deleted or
+    /// forgotten (instance processes may already be stopped).
+    #[error("{}", describe_sessions_active(.path, .sessions))]
+    SessionsActive {
+        /// The worktree.
+        path: PathBuf,
+        /// The sessions that hold it.
+        sessions: Vec<SessionLease>,
     },
     /// Git refused, or could not run.
     #[error(transparent)]
@@ -89,6 +102,7 @@ impl RemovalFailure {
             Self::NotLinkedWorktree(_)
             | Self::Locked(_)
             | Self::InUse { .. }
+            | Self::SessionsActive { .. }
             | Self::UnsavedWork { .. }
             | Self::ChangedSincePreview(_)
             | Self::Busy(_)
@@ -104,6 +118,10 @@ impl RemovalFailure {
             Self::NotLinkedWorktree(_) => "not the root of a linked worktree".to_owned(),
             Self::Locked(_) => "locked by git".to_owned(),
             Self::InUse { processes, .. } => format!("in use by {}", describe_users(processes)),
+            Self::SessionsActive { sessions, .. } => format!(
+                "in use by another Claude Code session ({})",
+                join_descriptions(sessions)
+            ),
             Self::Git(_) => "git could not remove it".to_owned(),
             Self::UnsavedWork { .. } => "it holds unsaved work".to_owned(),
             Self::Checkout(_) => "it could not be examined".to_owned(),
@@ -116,7 +134,9 @@ impl RemovalFailure {
     /// do about it, so they are not prefixed with `error:`.
     pub fn announce(&self) {
         match self {
-            Self::Locked(_) | Self::InUse { .. } => eprintln!("ds: {self}"),
+            Self::Locked(_) | Self::InUse { .. } | Self::SessionsActive { .. } => {
+                eprintln!("ds: {self}");
+            }
             _ => eprintln!("ds: error: {self}"),
         }
     }
@@ -127,6 +147,15 @@ fn describe_in_use(path: &Path, processes: &[ProcessSummary]) -> String {
         "{path} is in use by {}; nothing was deleted (the worktree, its data and its slot are kept). Close {}, or run ds worktree rm --force {path} from a terminal.",
         describe_users(processes),
         if processes.len() == 1 { "it" } else { "them" },
+        path = path.display(),
+    )
+}
+
+fn describe_sessions_active(path: &Path, sessions: &[SessionLease]) -> String {
+    format!(
+        "{path} is in use by another Claude Code session ({}); nothing was deleted (the worktree, its data and its slot are kept). Close {}, or run ds worktree rm --force {path} from a terminal: without --force, ds worktree rm is refused too, even typed inside a session.",
+        join_descriptions(sessions),
+        if sessions.len() == 1 { "it" } else { "them" },
         path = path.display(),
     )
 }
@@ -260,16 +289,20 @@ pub fn ensure_listed_and_unlocked(removal: &Removal) -> Result<(), RemovalFailur
     Ok(())
 }
 
-/// What a removal acts through: Docker, the processes of the machine, who
-/// asks, and whether the check for somebody else's processes is skipped.
+/// What a removal acts through: Docker, the processes of the machine, the
+/// state directory (where the session leases are), who asks, and whether the
+/// check for somebody else's processes and sessions is skipped.
 pub struct RemovalContext<'a> {
     /// Deletes the instance's containers, volumes and networks.
     pub runner: &'a dyn ComposeRunner,
-    /// Finds and stops processes.
+    /// Finds and stops processes, and tells which sessions run.
     pub processes: &'a dyn ProcessControl,
+    /// Where the session leases of the worktrees are kept.
+    pub state_directory: &'a Path,
     /// Whoever asked for the removal.
     pub requester: Requester,
-    /// Skips both checks for somebody else's processes (`ds worktree rm --force`).
+    /// Skips the checks for somebody else's processes and sessions
+    /// (`ds worktree rm --force`).
     pub is_forced: bool,
     /// What the worktree held when it was shown, for a removal that must not
     /// delete work saved since; `None` when nothing was shown (the hook).
@@ -277,16 +310,19 @@ pub struct RemovalContext<'a> {
 }
 
 /// Removes the worktree at `path` (canonical) for the `WorktreeRemove` hook:
-/// the whole sequence. `claude_pid` is `CLAUDE_PID` from the hook environment.
+/// the whole sequence. `claude_pid` is `CLAUDE_PID` from the hook environment;
+/// `state_directory` holds the session leases.
 pub fn remove_linked_worktree(
     path: PathBuf,
     claude_pid: Option<i32>,
+    state_directory: &Path,
 ) -> Result<(), RemovalFailure> {
     let prepared = prepare_removal(path)?;
     let runner = DockerRunner::from_environment();
     let context = RemovalContext {
         runner: &runner,
         processes: &SystemProcesses,
+        state_directory,
         requester: Requester::Session { claude_pid },
         is_forced: false,
         shown_work: None,
@@ -299,11 +335,13 @@ pub fn remove_from_terminal(
     prepared: &PreparedRemoval,
     is_forced: bool,
     shown_work: UnsavedWork,
+    state_directory: &Path,
 ) -> Result<(), RemovalFailure> {
     let runner = DockerRunner::from_environment();
     let context = RemovalContext {
         runner: &runner,
         processes: &SystemProcesses,
+        state_directory,
         requester: Requester::Terminal,
         is_forced,
         shown_work: Some(shown_work),
@@ -353,6 +391,14 @@ fn ensure_not_in_use(
     if context.is_forced {
         return Ok(());
     }
+    ensure_no_foreign_process(prepared, context)?;
+    ensure_no_other_session(prepared, context)
+}
+
+fn ensure_no_foreign_process(
+    prepared: &PreparedRemoval,
+    context: &RemovalContext,
+) -> Result<(), RemovalFailure> {
     let path = &prepared.removal.path;
     let processes = context
         .processes
@@ -363,6 +409,32 @@ fn ensure_not_in_use(
     Err(RemovalFailure::InUse {
         path: path.clone(),
         processes,
+    })
+}
+
+/// The live leases of sessions other than the one that closes (none of them
+/// is "own" for a terminal) refuse the removal. Dead leases are deleted.
+fn ensure_no_other_session(
+    prepared: &PreparedRemoval,
+    context: &RemovalContext,
+) -> Result<(), RemovalFailure> {
+    let path = &prepared.removal.path;
+    let Some(key) = WorktreeKey::of(path) else {
+        return Ok(());
+    };
+    let own = context.processes.own_session(context.requester);
+    let is_alive = |session| context.processes.is_session_alive(session);
+    let sessions: Vec<SessionLease> =
+        session_leases::live(context.state_directory, &key, &is_alive)
+            .into_iter()
+            .filter(|lease| Some(lease.session) != own)
+            .collect();
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    Err(RemovalFailure::SessionsActive {
+        path: path.clone(),
+        sessions,
     })
 }
 
@@ -521,7 +593,7 @@ mod tests {
     use super::*;
     use crate::compose::runner::testing::FakeComposeRunner;
     use crate::discovery::PortKind;
-    use crate::instance_processes::{ProcessReport, StopReport};
+    use crate::instance_processes::{ProcessReport, SessionProcess, StopReport};
     use crate::paths::{DevslotPaths, PathVariables};
     use crate::port_range::PortRange;
     use crate::registry::record::{AssignedPort, PortDetail};
@@ -534,6 +606,8 @@ mod tests {
         foreign_answers: RefCell<VecDeque<Vec<ProcessSummary>>>,
         stop_calls: Cell<u32>,
         file_created_on_stop: Option<PathBuf>,
+        live_sessions: Vec<SessionProcess>,
+        own_session: Option<SessionProcess>,
     }
 
     impl FakeProcesses {
@@ -542,7 +616,19 @@ mod tests {
                 foreign_answers: RefCell::new(answers.into()),
                 stop_calls: Cell::new(0),
                 file_created_on_stop: None,
+                live_sessions: Vec::new(),
+                own_session: None,
             }
+        }
+
+        fn with_live_sessions(mut self, sessions: Vec<SessionProcess>) -> Self {
+            self.live_sessions = sessions;
+            self
+        }
+
+        fn running_as(mut self, session: SessionProcess) -> Self {
+            self.own_session = Some(session);
+            self
         }
 
         fn creating_on_stop(mut self, file: PathBuf) -> Self {
@@ -574,6 +660,22 @@ mod tests {
                 .borrow_mut()
                 .pop_front()
                 .unwrap_or_default()
+        }
+
+        fn is_session_alive(&self, session: SessionProcess) -> bool {
+            self.live_sessions.contains(&session)
+        }
+
+        fn own_session(&self, requester: Requester) -> Option<SessionProcess> {
+            self.own_session
+                .filter(|_| matches!(requester, Requester::Session { .. }))
+        }
+    }
+
+    const fn session_process(pid: i32) -> SessionProcess {
+        SessionProcess {
+            pid,
+            start_time: 70,
         }
     }
 
@@ -684,6 +786,29 @@ mod tests {
     }
 
     impl Fixture {
+        fn state_directory(&self) -> &Path {
+            self.prepared
+                .instance
+                .as_ref()
+                .unwrap()
+                .machine
+                .paths
+                .state_directory()
+        }
+
+        fn key(&self) -> WorktreeKey {
+            WorktreeKey::of(&self.prepared.removal.path).unwrap()
+        }
+
+        fn write_lease(&self, session: SessionProcess, session_id: Option<&str>) {
+            session_leases::write(self.state_directory(), &self.key(), session, session_id)
+                .unwrap();
+        }
+
+        fn lease_count(&self) -> usize {
+            session_leases::live(self.state_directory(), &self.key(), &|_| true).len()
+        }
+
         fn is_listed(&self) -> bool {
             list_worktrees(&self.main)
                 .unwrap()
@@ -724,10 +849,12 @@ mod tests {
         processes: &'a FakeProcesses,
         requester: Requester,
         is_forced: bool,
+        state_directory: &'a Path,
     ) -> RemovalContext<'a> {
         RemovalContext {
             runner,
             processes,
+            state_directory,
             requester,
             is_forced,
             shown_work: None,
@@ -744,7 +871,7 @@ mod tests {
 
         let failure = remove_prepared(
             &fixture.prepared,
-            &removal_context(&runner, &processes, HOOK, false),
+            &removal_context(&runner, &processes, HOOK, false, fixture.state_directory()),
         )
         .unwrap_err();
 
@@ -767,7 +894,7 @@ mod tests {
 
         let failure = remove_prepared(
             &fixture.prepared,
-            &removal_context(&runner, &processes, HOOK, false),
+            &removal_context(&runner, &processes, HOOK, false, fixture.state_directory()),
         )
         .unwrap_err();
 
@@ -789,7 +916,7 @@ mod tests {
 
         remove_prepared(
             &fixture.prepared,
-            &removal_context(&runner, &processes, HOOK, false),
+            &removal_context(&runner, &processes, HOOK, false, fixture.state_directory()),
         )
         .unwrap();
 
@@ -815,7 +942,13 @@ mod tests {
                 uncommitted_changes: 0,
                 unreachable_commits: 0,
             }),
-            ..removal_context(&runner, &processes, Requester::Terminal, false)
+            ..removal_context(
+                &runner,
+                &processes,
+                Requester::Terminal,
+                false,
+                fixture.state_directory(),
+            )
         };
 
         let failure = remove_prepared(&fixture.prepared, &context).unwrap_err();
@@ -843,7 +976,13 @@ mod tests {
                 uncommitted_changes: 0,
                 unreachable_commits: 0,
             }),
-            ..removal_context(&runner, &processes, Requester::Terminal, true)
+            ..removal_context(
+                &runner,
+                &processes,
+                Requester::Terminal,
+                true,
+                fixture.state_directory(),
+            )
         };
 
         remove_prepared(&fixture.prepared, &context).unwrap();
@@ -869,6 +1008,119 @@ mod tests {
     }
 
     #[test]
+    fn should_refuse_a_hook_when_another_live_session_holds_a_lease_and_change_nothing() {
+        let fixture = fixture();
+        fixture.write_lease(session_process(7), Some("abc-1"));
+        let runner = runner();
+        let processes = FakeProcesses::answering(Vec::new())
+            .with_live_sessions(vec![session_process(7), session_process(5)])
+            .running_as(session_process(5));
+
+        let failure = remove_prepared(
+            &fixture.prepared,
+            &removal_context(&runner, &processes, HOOK, false, fixture.state_directory()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(failure, RemovalFailure::SessionsActive { .. }));
+        assert_eq!(failure.exit_code(), exit_code::ERROR);
+        assert_eq!(
+            failure.kept_reason(),
+            "in use by another Claude Code session (session abc-1)"
+        );
+        assert_eq!(processes.stop_calls.get(), 0);
+        assert_eq!(deletion_commands(&runner), Vec::<&str>::new());
+        assert_eq!(fixture.lease_count(), 1);
+        assert!(fixture.is_listed());
+    }
+
+    #[test]
+    fn should_not_block_a_hook_on_the_lease_of_the_closing_session() {
+        let fixture = fixture();
+        fixture.write_lease(session_process(5), None);
+        let runner = runner();
+        let processes = FakeProcesses::answering(Vec::new())
+            .with_live_sessions(vec![session_process(5)])
+            .running_as(session_process(5));
+
+        remove_prepared(
+            &fixture.prepared,
+            &removal_context(&runner, &processes, HOOK, false, fixture.state_directory()),
+        )
+        .unwrap();
+
+        assert!(!fixture.is_listed());
+    }
+
+    #[test]
+    fn should_block_a_terminal_on_any_live_lease_and_say_so_by_pid_without_a_session_id() {
+        let fixture = fixture();
+        fixture.write_lease(session_process(5), None);
+        let runner = runner();
+        let processes = FakeProcesses::answering(Vec::new())
+            .with_live_sessions(vec![session_process(5)])
+            .running_as(session_process(5));
+
+        let failure = remove_prepared(
+            &fixture.prepared,
+            &removal_context(
+                &runner,
+                &processes,
+                Requester::Terminal,
+                false,
+                fixture.state_directory(),
+            ),
+        )
+        .unwrap_err();
+
+        let message = failure.to_string();
+        assert!(matches!(failure, RemovalFailure::SessionsActive { .. }));
+        assert!(message.contains("another Claude Code session (claude 5)"));
+        assert!(message.contains("without --force, ds worktree rm is refused too"));
+        assert!(fixture.is_listed());
+    }
+
+    #[test]
+    fn should_remove_the_worktree_and_delete_the_dead_lease_when_its_session_is_gone() {
+        let fixture = fixture();
+        fixture.write_lease(session_process(9), None);
+        let runner = runner();
+        let processes = FakeProcesses::answering(Vec::new());
+
+        remove_prepared(
+            &fixture.prepared,
+            &removal_context(&runner, &processes, HOOK, false, fixture.state_directory()),
+        )
+        .unwrap();
+
+        assert_eq!(fixture.lease_count(), 0);
+        assert!(!fixture.is_listed());
+    }
+
+    #[test]
+    fn should_ignore_the_leases_when_forced() {
+        let fixture = fixture();
+        fixture.write_lease(session_process(7), None);
+        let runner = runner();
+        let processes =
+            FakeProcesses::answering(Vec::new()).with_live_sessions(vec![session_process(7)]);
+
+        remove_prepared(
+            &fixture.prepared,
+            &removal_context(
+                &runner,
+                &processes,
+                Requester::Terminal,
+                true,
+                fixture.state_directory(),
+            ),
+        )
+        .unwrap();
+
+        assert!(!fixture.is_listed());
+    }
+
+    #[test]
     fn should_remove_the_worktree_despite_another_session_when_forced() {
         let fixture = fixture();
         let runner = runner();
@@ -876,7 +1128,13 @@ mod tests {
 
         remove_prepared(
             &fixture.prepared,
-            &removal_context(&runner, &processes, Requester::Terminal, true),
+            &removal_context(
+                &runner,
+                &processes,
+                Requester::Terminal,
+                true,
+                fixture.state_directory(),
+            ),
         )
         .unwrap();
 

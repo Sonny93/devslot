@@ -13,8 +13,10 @@ use crate::commands::registering::LOCK_TIMEOUT;
 use crate::compose::runner::{ComposeRunner, DockerRunner, delete_project_data};
 use crate::ensure_cache::{remove_checkout_entries, sweep_stale};
 use crate::error::ToolError;
+use crate::instance_processes::is_session_alive;
 use crate::registry::record::{InstanceRecord, Registry, RegistryChange};
 use crate::registry::store::RegistryStore;
+use crate::session_leases;
 
 const COMMAND_NAME: &str = "ds prune";
 
@@ -40,6 +42,7 @@ pub fn is_gone(path: &Path) -> bool {
 pub fn run_prune(policy: ConfirmationPolicy) -> Result<u8, ToolError> {
     let machine = Machine::from_process()?;
     sweep_stale(machine.paths.state_directory(), SystemTime::now());
+    session_leases::sweep_dead(machine.paths.state_directory(), &is_session_alive);
     let registry = machine.store.read()?;
     let gone_instances: Vec<InstanceRecord> = registry
         .instances

@@ -14,7 +14,7 @@ Reference of the `ds` commands. `ds <command> --help` lists the options and the 
 | `ds ensure` | Registers the checkout and writes its block without starting anything (what the hook runs). |
 | `ds reset [service]` | Deletes the data of the instance, or of one service, and starts the services again. |
 | `ds rm [--yes]` | Deletes the instance's data, removes the block and opts the checkout out. |
-| `ds prune [--yes]` | Deletes the data of the instances whose folder is gone and forgets them. |
+| `ds prune [--yes]` | Deletes the data of the instances whose folder is gone and forgets them, and the session leases whose session ended (see [Worktrees in use](worktrees.md#worktrees-in-use-linux-only)). |
 | `ds worktree rm <name\|path> [--yes] [--force]` | Shows what would be lost, refuses a worktree in use by another session or program unless `--force`, then stops the instance's processes, removes a linked worktree, deletes its data, forgets its instance and deletes its branch when that is merged. |
 | `ds hook <event>` | Called by the Claude Code plugin: `worktree-create`, `worktree-remove`, `pre-tool-use`, `session-start`. Not meant to be run by hand. |
 

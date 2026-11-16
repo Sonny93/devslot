@@ -10,6 +10,9 @@ use super::proc_root::ProcRoot;
 
 const TCP_HEADER: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
 const OWN_UID: u32 = 1000;
+/// The start time every fake process has until a test sets another one.
+pub const DEFAULT_START_TIME: u64 = 1_000;
+const START_TIME_TOKEN: usize = 19;
 
 /// A `/proc` tree and a folder for the working directories of its processes.
 pub struct FakeProc {
@@ -57,7 +60,9 @@ impl FakeProc {
         symlink(link, folder.join("cwd")).unwrap();
         fs::write(
             folder.join("stat"),
-            format!("{pid} ({comm}) S {parent} {group} {group} 0 -1 0"),
+            format!(
+                "{pid} ({comm}) S {parent} {group} {group} 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 {DEFAULT_START_TIME} 0 0"
+            ),
         )
         .unwrap();
         self.set_uid(pid, OWN_UID);
@@ -89,6 +94,16 @@ impl FakeProc {
         let (head, tail) = text.split_once(") ").unwrap();
         let rest = &tail[1..];
         fs::write(path, format!("{head}) {state}{rest}")).unwrap();
+    }
+
+    /// Sets the start time of `pid`, as a process that reused the pid would have.
+    pub fn set_start_time(&self, pid: i32, start_time: u64) {
+        let path = self.process_folder(pid).join("stat");
+        let text = fs::read_to_string(&path).unwrap();
+        let (head, tail) = text.split_once(") ").unwrap();
+        let mut tokens: Vec<String> = tail.split_whitespace().map(str::to_owned).collect();
+        tokens[START_TIME_TOKEN] = start_time.to_string();
+        fs::write(path, format!("{head}) {}", tokens.join(" "))).unwrap();
     }
 
     /// Makes `pid` hold the socket `inode`.
