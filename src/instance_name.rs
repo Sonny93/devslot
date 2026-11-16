@@ -51,8 +51,7 @@ pub fn sanitize(text: &str) -> String {
 pub fn repository_name_from_common_dir(common_dir: &Path) -> String {
     let folder_name = |path: &Path| {
         path.file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
+            .map_or_default(|name| name.to_string_lossy().into_owned())
     };
     if common_dir
         .file_name()
@@ -95,8 +94,7 @@ pub fn derive_name(repository: &str, checkout_root: &Path, hash_length: usize) -
     let folder = sanitize(
         &checkout_root
             .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+            .map_or_default(|name| name.to_string_lossy().into_owned()),
     );
     let hash = path_hash(checkout_root, hash_length);
     [repository.clone(), folder_part(&repository, &folder), hash]

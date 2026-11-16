@@ -35,9 +35,7 @@ fn own_pids(context: &ScanContext, requester: Requester) -> HashSet<i32> {
     let Requester::Session { claude_pid } = requester else {
         return HashSet::new();
     };
-    session_root(context, claude_pid)
-        .map(|root| with_descendants(context, &[root]))
-        .unwrap_or_default()
+    session_root(context, claude_pid).map_or_default(|root| with_descendants(context, &[root]))
 }
 
 /// The `claude` process of the closing session: the hinted pid when it is an

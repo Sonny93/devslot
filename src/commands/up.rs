@@ -134,15 +134,12 @@ pub fn start_services(
 }
 
 fn own_published_ports(runner: &dyn ComposeRunner, target: &ComposeTarget) -> Vec<u16> {
-    runner
-        .containers(target)
-        .map(|containers| {
-            containers
-                .into_iter()
-                .flat_map(|container| container.published_ports)
-                .collect()
-        })
-        .unwrap_or_default()
+    runner.containers(target).map_or_default(|containers| {
+        containers
+            .into_iter()
+            .flat_map(|container| container.published_ports)
+            .collect()
+    })
 }
 
 #[cfg(test)]

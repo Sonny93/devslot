@@ -90,8 +90,7 @@ pub fn is_target(context: &ScanContext, pid: i32) -> bool {
 fn listening_inodes(context: &ScanContext) -> HashSet<u64> {
     context
         .scope
-        .map(|scope| context.root.listening_inodes(&scope.ports))
-        .unwrap_or_default()
+        .map_or_default(|scope| context.root.listening_inodes(&scope.ports))
 }
 
 fn summary_of(context: &ScanContext, pid: i32) -> ProcessSummary {

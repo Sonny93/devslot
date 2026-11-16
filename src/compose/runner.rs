@@ -61,8 +61,7 @@ pub enum RunnerError {
 }
 
 fn exit_code_suffix(code: Option<i32>) -> String {
-    code.map(|code| format!(" (exit code {code})"))
-        .unwrap_or_default()
+    code.map_or_default(|code| format!(" (exit code {code})"))
 }
 
 /// The compose project a command acts on.
@@ -538,16 +537,10 @@ pub mod testing {
         ) -> Result<(), RunnerError> {
             self.calls.borrow_mut().push(RecordedCall {
                 command,
-                project: target
-                    .map(|target| target.project_name.clone())
-                    .unwrap_or_default(),
-                files: target
-                    .map(|target| target.files.clone())
-                    .unwrap_or_default(),
+                project: target.map_or_default(|target| target.project_name.clone()),
+                files: target.map_or_default(|target| target.files.clone()),
                 services,
-                environment: target
-                    .map(|target| target.environment.clone())
-                    .unwrap_or_default(),
+                environment: target.map_or_default(|target| target.environment.clone()),
             });
             if self.failing_commands.contains(&command) {
                 return Err(RunnerError::Failed {
