@@ -11,6 +11,7 @@ use crate::commands::docker_step::checked_step;
 use crate::commands::machine::{Machine, locate_checkout};
 use crate::commands::registering::LOCK_TIMEOUT;
 use crate::compose::runner::{ComposeRunner, DockerRunner, delete_project_data};
+use crate::ensure_cache::remove_checkout_entries;
 use crate::env_sync::EnvSyncError;
 use crate::error::ToolError;
 use crate::project::dotenv_block::split_block;
@@ -75,6 +76,7 @@ fn finish_registered(checkout: &Checkout, machine: &Machine, instance: &Instance
     ];
     match remove_block_then_apply(&machine.store, &checkout.root, |_| changes) {
         Ok(lines) => {
+            remove_checkout_entries(machine.paths.state_directory(), &instance.path);
             announce_removal(&lines, &checkout.root);
             exit_code::SUCCESS
         }

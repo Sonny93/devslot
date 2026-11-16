@@ -22,6 +22,7 @@ use crate::cli::exit_code;
 use crate::commands::machine::Machine;
 use crate::commands::registering::LOCK_TIMEOUT;
 use crate::compose::runner::{ComposeRunner, DockerRunner, delete_project_data};
+use crate::ensure_cache::remove_checkout_entries;
 use crate::error::ToolError;
 use crate::git_worktree::{
     WorktreeGitError, current_branch, delete_branch, is_branch_merged, list_worktrees,
@@ -438,7 +439,9 @@ fn forget_instance(machine: &Machine, instance: &InstanceRecord, runner: &dyn Co
             "ds: warning: could not forget {}: {error}; ds prune cleans it later",
             instance.name
         );
+        return;
     }
+    remove_checkout_entries(machine.paths.state_directory(), &instance.path);
 }
 
 /// Whether `delete_branch_when_merged` would delete the branch of `removal`.

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
+use devslot::ensure_cache::{CacheEntry, Fingerprint, entry_path, write_entry};
 use serde_json::Value;
 use support::{FAKE_ENV, Machine, Project, TEST_SLOTS};
 
@@ -921,6 +922,39 @@ fn should_forget_only_the_gone_instance_and_leave_the_other_entry_untouched() {
         !log.iter()
             .any(|line| line.contains(&alive_name) || line.contains(" down"))
     );
+}
+
+fn write_ensure_entry(machine: &Machine, root: &Path) -> PathBuf {
+    let path = entry_path(&machine.state_directory(), root);
+    write_entry(&path, &CacheEntry::refusal(Fingerprint::none())).unwrap();
+    path
+}
+
+#[test]
+fn should_delete_the_ensure_entry_of_a_pruned_checkout_and_keep_the_other() {
+    let (alive, gone) = two_registered_projects();
+    let gone_entry = write_ensure_entry(alive.machine(), &canonical(&gone));
+    let alive_entry = write_ensure_entry(alive.machine(), &canonical(&alive));
+    std::fs::remove_dir_all(gone.path()).unwrap();
+
+    let run = alive.run(&["prune", "--yes"]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(!gone_entry.exists());
+    assert!(alive_entry.exists());
+}
+
+#[test]
+fn should_delete_the_ensure_entry_of_a_removed_checkout_and_keep_the_other() {
+    let (alive, removed) = two_registered_projects();
+    let removed_entry = write_ensure_entry(alive.machine(), &canonical(&removed));
+    let alive_entry = write_ensure_entry(alive.machine(), &canonical(&alive));
+
+    let run = removed.run(&["rm", "--yes"]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(!removed_entry.exists());
+    assert!(alive_entry.exists());
 }
 
 #[test]

@@ -4,12 +4,14 @@
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::cli::confirm::{ConfirmationPolicy, exit_code_unless_confirmed};
 use crate::cli::exit_code;
 use crate::commands::machine::Machine;
 use crate::commands::registering::LOCK_TIMEOUT;
 use crate::compose::runner::{ComposeRunner, DockerRunner, delete_project_data};
+use crate::ensure_cache::{remove_checkout_entries, sweep_stale};
 use crate::error::ToolError;
 use crate::registry::record::{InstanceRecord, Registry, RegistryChange};
 use crate::registry::store::RegistryStore;
@@ -37,6 +39,7 @@ pub fn is_gone(path: &Path) -> bool {
 /// Deletes the data of the instances whose folder is gone and forgets them.
 pub fn run_prune(policy: ConfirmationPolicy) -> Result<u8, ToolError> {
     let machine = Machine::from_process()?;
+    sweep_stale(machine.paths.state_directory(), SystemTime::now());
     let registry = machine.store.read()?;
     let gone_instances: Vec<InstanceRecord> = registry
         .instances
@@ -64,7 +67,9 @@ pub fn run_prune(policy: ConfirmationPolicy) -> Result<u8, ToolError> {
             .read()
             .is_ok_and(|registry| is_still_prunable(&registry, instance))
     });
-    forget(&machine.store, &cleanup.cleaned)?;
+    for path in forget(&machine.store, &cleanup.cleaned)? {
+        remove_checkout_entries(machine.paths.state_directory(), &path);
+    }
     Ok(if cleanup.failures == 0 {
         exit_code::SUCCESS
     } else {
@@ -136,8 +141,8 @@ pub fn clean_instances(
 }
 
 /// In one lock hold: forgets the cleaned instances that are still gone and the
-/// opted-out paths that are gone.
-pub fn forget(store: &RegistryStore, cleaned: &[PathBuf]) -> Result<(), ToolError> {
+/// opted-out paths that are gone. Returns the paths of the instances forgotten.
+pub fn forget(store: &RegistryStore, cleaned: &[PathBuf]) -> Result<Vec<PathBuf>, ToolError> {
     store.locked(LOCK_TIMEOUT, |locked| {
         let removed: Vec<PathBuf> = cleaned
             .iter()
@@ -161,7 +166,7 @@ pub fn forget(store: &RegistryStore, cleaned: &[PathBuf]) -> Result<(), ToolErro
         for path in removed.iter().chain(&forgotten) {
             eprintln!("ds: forgot {}", path.display());
         }
-        Ok(())
+        Ok(removed)
     })
 }
 

@@ -19,6 +19,17 @@ pub const DOCKER_FAILURE_LIFETIME: Duration = Duration::from_mins(10);
 /// taken by another instance) silences `ds ensure`.
 pub const SHARED_STATE_LIFETIME: Duration = Duration::from_mins(5);
 
+/// How old a temporary file left by `write_entry` must be before the sweep
+/// deletes it: a live write takes milliseconds.
+pub const STALE_TEMP_FILE_AGE: Duration = Duration::from_hours(1);
+/// How long past its expiry an entry of a folder must be before the sweep
+/// deletes it.
+pub const EXPIRED_LOCATE_ENTRY_AGE: Duration = Duration::from_hours(24);
+
+/// How long an entry or lock file of a checkout can stay unwritten before the
+/// sweep deletes it: a checkout in use is rewritten by `ds ensure` long before.
+pub const ABANDONED_CHECKOUT_FILE_AGE: Duration = Duration::from_hours(24 * 30);
+
 /// How long a run that ran out of its time budget silences `ds ensure`, by
 /// number of consecutive exhaustions of the same checkout; the last one holds
 /// for every exhaustion after it.
@@ -31,6 +42,8 @@ pub const BUDGET_EXHAUSTION_LIFETIMES: [Duration; 4] = [
 
 const CACHE_DIRECTORY: &str = "ensure";
 const LOCATE_DIRECTORY: &str = "locate";
+const LOCK_EXTENSION: &str = "lock";
+const TEMP_EXTENSION_PREFIX: &str = "tmp-";
 const KEY_BYTES: usize = 8;
 const EXPIRY_PREFIX: &str = "expires_at=";
 const STREAK_PREFIX: &str = "budget_streak=";
@@ -318,6 +331,83 @@ pub fn remove_budget_entry(path: &Path) {
     }
 }
 
+/// Deletes the entry and the lock file of the checkout at `root`, for a
+/// checkout whose instance is gone. Best effort: a failure is ignored.
+pub fn remove_checkout_entries(state_directory: &Path, root: &Path) {
+    let entry = entry_path(state_directory, root);
+    remove_entry(&entry.with_extension(LOCK_EXTENSION));
+    remove_entry(&entry);
+}
+
+/// Deletes what no checkout refreshes any more: temporary files older than
+/// [`STALE_TEMP_FILE_AGE`] and entries of folders expired for more than
+/// [`EXPIRED_LOCATE_ENTRY_AGE`], and the entries and locks of checkouts
+/// nobody wrote for [`ABANDONED_CHECKOUT_FILE_AGE`] (a checkout deleted
+/// without `ds rm`). A live checkout that loses its entry is evaluated once
+/// more, which is harmless. Best effort: a failure is ignored.
+pub fn sweep_stale(state_directory: &Path, now: SystemTime) {
+    let cache = state_directory.join(CACHE_DIRECTORY);
+    let locate = cache.join(LOCATE_DIRECTORY);
+    sweep_temp_files(&cache, now);
+    sweep_temp_files(&locate, now);
+    sweep_abandoned_checkout_files(&cache, now);
+    sweep_expired_locate_entries(&locate, now);
+}
+
+fn sweep_temp_files(directory: &Path, now: SystemTime) {
+    for path in files_in(directory) {
+        if is_temp_file(&path) && is_older_than(&path, STALE_TEMP_FILE_AGE, now) {
+            remove_entry(&path);
+        }
+    }
+}
+
+fn sweep_abandoned_checkout_files(directory: &Path, now: SystemTime) {
+    for path in files_in(directory) {
+        if !is_temp_file(&path) && is_older_than(&path, ABANDONED_CHECKOUT_FILE_AGE, now) {
+            remove_entry(&path);
+        }
+    }
+}
+
+fn sweep_expired_locate_entries(directory: &Path, now: SystemTime) {
+    let limit = EXPIRED_LOCATE_ENTRY_AGE.as_secs();
+    for path in files_in(directory) {
+        let expiry = path
+            .extension()
+            .is_none()
+            .then(|| read_entry(&path).and_then(|entry| entry.expires_at))
+            .flatten();
+        if expiry.is_some_and(|expiry| unix_seconds(now) > expiry.saturating_add(limit)) {
+            remove_entry(&path);
+        }
+    }
+}
+
+fn files_in(directory: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|file| file.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|file| file.path())
+        .collect()
+}
+
+fn is_temp_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.starts_with(TEMP_EXTENSION_PREFIX))
+}
+
+fn is_older_than(path: &Path, age: Duration, now: SystemTime) -> bool {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|elapsed| elapsed > age)
+}
+
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
@@ -467,6 +557,91 @@ mod tests {
         assert_eq!(read_entry(&budget_path), None);
         assert!(read_entry(&refusal_path).is_some());
         assert!(read_entry(&neighbour_path).is_some());
+    }
+
+    fn write_aged(path: &Path, text: &str, modified: SystemTime) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(modified).unwrap();
+    }
+
+    #[test]
+    fn should_remove_the_entry_and_the_lock_of_a_checkout_and_keep_its_neighbour() {
+        let state = tempfile::tempdir().unwrap();
+        let gone = Path::new("/work/gone");
+        let neighbour = Path::new("/work/neighbour");
+        for root in [gone, neighbour] {
+            write_entry(
+                &entry_path(state.path(), root),
+                &CacheEntry::refusal(fingerprint()),
+            )
+            .unwrap();
+            drop(try_take_flight(state.path(), root));
+        }
+
+        remove_checkout_entries(state.path(), gone);
+
+        let gone_entry = entry_path(state.path(), gone);
+        let neighbour_entry = entry_path(state.path(), neighbour);
+        assert!(!gone_entry.exists());
+        assert!(!gone_entry.with_extension("lock").exists());
+        assert!(neighbour_entry.exists());
+        assert!(neighbour_entry.with_extension("lock").exists());
+    }
+
+    #[test]
+    fn should_sweep_old_temp_files_and_expired_folder_entries_and_keep_the_rest() {
+        let state = tempfile::tempdir().unwrap();
+        let now = moment(1_000_000);
+        let cache = state.path().join("ensure");
+        let locate = cache.join("locate");
+        let old = now - Duration::from_hours(2);
+        write_aged(&cache.join("aaaa.tmp-123"), "", old);
+        write_aged(&locate.join("bbbb.tmp-123"), "", old);
+        write_aged(&cache.join("cccc.tmp-456"), "", now);
+        let expired = CacheEntry::docker_failure(fingerprint(), now - Duration::from_hours(30));
+        let recent = CacheEntry::docker_failure(fingerprint(), now - Duration::from_hours(2));
+        write_entry(
+            &locate_entry_path(state.path(), Path::new("/old")),
+            &expired,
+        )
+        .unwrap();
+        write_entry(&locate_entry_path(state.path(), Path::new("/new")), &recent).unwrap();
+        let expired_checkout = entry_path(state.path(), Path::new("/work/expired"));
+        let refusal_checkout = entry_path(state.path(), Path::new("/work/refused"));
+        write_entry(&expired_checkout, &expired).unwrap();
+        write_entry(&refusal_checkout, &CacheEntry::refusal(fingerprint())).unwrap();
+        let abandoned = Duration::from_hours(24 * 31);
+        write_aged(&cache.join("dddd"), "", now - abandoned);
+        write_aged(&cache.join("dddd.lock"), "", now - abandoned);
+        write_aged(&cache.join("eeee"), "", now);
+        write_aged(&cache.join("eeee.lock"), "", now);
+        write_aged(&locate.join("ffff"), "", now - abandoned);
+
+        sweep_stale(state.path(), now);
+
+        assert!(!cache.join("aaaa.tmp-123").exists());
+        assert!(!locate.join("bbbb.tmp-123").exists());
+        assert!(cache.join("cccc.tmp-456").exists());
+        assert!(!locate_entry_path(state.path(), Path::new("/old")).exists());
+        assert!(locate_entry_path(state.path(), Path::new("/new")).exists());
+        assert!(expired_checkout.exists());
+        assert!(refusal_checkout.exists());
+        assert!(!cache.join("dddd").exists());
+        assert!(!cache.join("dddd.lock").exists());
+        assert!(cache.join("eeee").exists());
+        assert!(cache.join("eeee.lock").exists());
+        assert!(locate.join("ffff").exists());
+    }
+
+    #[test]
+    fn should_sweep_nothing_when_the_cache_folder_does_not_exist() {
+        let state = tempfile::tempdir().unwrap();
+
+        sweep_stale(state.path(), moment(1_000_000));
+
+        assert!(!state.path().join("ensure").exists());
     }
 
     #[test]
