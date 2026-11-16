@@ -17,5 +17,6 @@ pub mod reset;
 pub mod rm;
 pub mod run;
 pub mod up;
+pub mod worktree_land;
 pub mod worktree_removal;
 pub mod worktree_rm;

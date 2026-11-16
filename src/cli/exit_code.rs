@@ -205,6 +205,24 @@ pub fn describe_rm_exit_codes() -> String {
     ])
 }
 
+/// The exit codes in the form `ds worktree land --help` shows them.
+pub fn describe_worktree_land_exit_codes() -> String {
+    format_codes(&[
+        (
+            SUCCESS,
+            "the branch was fast-forwarded, or there was nothing to land",
+        ),
+        (
+            ERROR,
+            "nothing was landed: not a linked worktree, detached HEAD, no base known and no --onto, uncommitted changes, the main checkout is not on the target branch or is in the middle of an operation, the base moved, or git refused",
+        ),
+        (
+            TOOL_FAILURE,
+            "the tool itself failed (git unavailable or timed out), or invalid usage",
+        ),
+    ])
+}
+
 /// The exit codes in the form `ds worktree rm --help` shows them.
 pub fn describe_worktree_rm_exit_codes() -> String {
     format_codes(&[
@@ -320,6 +338,7 @@ mod tests {
             describe_rm_exit_codes(),
             describe_prune_exit_codes(),
             describe_worktree_rm_exit_codes(),
+            describe_worktree_land_exit_codes(),
         ];
 
         assert!(descriptions.iter().all(|description| {

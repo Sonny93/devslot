@@ -9,7 +9,7 @@ use super::exit_code::{
     describe_env_exit_codes, describe_exit_codes, describe_hook_exit_codes,
     describe_info_exit_codes, describe_ls_exit_codes, describe_prune_exit_codes,
     describe_reset_exit_codes, describe_rm_exit_codes, describe_run_exit_codes,
-    describe_up_exit_codes, describe_worktree_rm_exit_codes,
+    describe_up_exit_codes, describe_worktree_land_exit_codes, describe_worktree_rm_exit_codes,
 };
 use super::style::ColorChoice;
 
@@ -96,6 +96,10 @@ fn prune_help() -> String {
     help_with(&describe_prune_exit_codes(), &[DOCKER_HELP, XDG_HELP])
 }
 
+fn worktree_land_help() -> String {
+    help_with(&describe_worktree_land_exit_codes(), &[])
+}
+
 fn worktree_rm_help() -> String {
     help_with(&describe_worktree_rm_exit_codes(), &[DOCKER_HELP, XDG_HELP])
 }
@@ -167,9 +171,20 @@ pub struct WorktreeArguments {
 /// The actions of `ds worktree`.
 #[derive(Debug, Subcommand)]
 pub enum WorktreeAction {
+    /// Fast-forward the main checkout's branch onto this worktree's branch
+    #[command(after_help = worktree_land_help())]
+    Land(WorktreeLandArguments),
     /// Stop the processes of a worktree's instance, delete its data and remove the worktree
     #[command(after_help = worktree_rm_help())]
     Rm(WorktreeRmArguments),
+}
+
+/// The arguments of `ds worktree land`.
+#[derive(Debug, Args)]
+pub struct WorktreeLandArguments {
+    /// The branch to fast-forward, default the base recorded when the worktree was created
+    #[arg(long, value_name = "BRANCH")]
+    pub onto: Option<String>,
 }
 
 /// The arguments of `ds worktree rm`.
@@ -448,6 +463,27 @@ mod tests {
         };
         assert!(!arguments.yes);
         assert!(!arguments.force);
+    }
+
+    #[test]
+    fn should_parse_worktree_land_with_and_without_onto() {
+        let plain = Cli::try_parse_from(["ds", "worktree", "land"]).unwrap();
+        let explicit =
+            Cli::try_parse_from(["ds", "worktree", "land", "--onto", "develop"]).unwrap();
+
+        let (
+            Command::Worktree(WorktreeArguments {
+                action: WorktreeAction::Land(plain),
+            }),
+            Command::Worktree(WorktreeArguments {
+                action: WorktreeAction::Land(explicit),
+            }),
+        ) = (plain.command, explicit.command)
+        else {
+            panic!("expected worktree land");
+        };
+        assert_eq!(plain.onto, None);
+        assert_eq!(explicit.onto.as_deref(), Some("develop"));
     }
 
     #[test]

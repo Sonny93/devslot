@@ -940,3 +940,59 @@ fn should_list_the_unsaved_work_reason_in_ds_ls_when_the_hook_refuses() {
     let listing = ls_output(&sandbox);
     assert!(listing.contains(&format!("{}: it holds unsaved work", path.display())));
 }
+
+#[test]
+fn should_record_the_base_branch_in_the_git_config_when_creating_a_new_branch() {
+    let sandbox = sandbox();
+
+    let run = sandbox.create("feature-x", &[]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(
+        git_output(
+            &sandbox.main_path(),
+            &["config", "--get", "branch.feature-x.devslotBase"]
+        ),
+        sandbox.main_branch()
+    );
+}
+
+#[test]
+fn should_not_record_a_base_when_the_main_worktree_is_detached() {
+    let sandbox = sandbox();
+    sandbox.main.git(&["checkout", "-q", "--detach"]);
+
+    let run = sandbox.create("feature-x", &[]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(
+        git_output(
+            &sandbox.main_path(),
+            &["config", "--get", "branch.feature-x.devslotBase"]
+        ),
+        ""
+    );
+}
+
+#[test]
+fn should_announce_the_reused_branch_and_print_only_the_path_when_the_branch_has_commits() {
+    let sandbox = sandbox();
+    let base = sandbox.main_branch();
+    sandbox.main.git(&["checkout", "-q", "-b", "feature-y"]);
+    commit_in(&sandbox.main_path());
+    commit_in(&sandbox.main_path());
+    sandbox.main.git(&["checkout", "-q", &base]);
+
+    let run = sandbox.create("feature-y", &[]);
+
+    let path = sandbox.expected_path("feature-y");
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(run.stdout, format!("{}\n", path.display()));
+    assert!(
+        run.stderr.contains(&format!(
+            "ds: reusing the existing branch feature-y: 2 commit(s) not in {base}"
+        )),
+        "{}",
+        run.stderr
+    );
+}

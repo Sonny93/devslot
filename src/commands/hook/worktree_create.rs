@@ -21,8 +21,9 @@ use crate::compose::selection::{DevComposeSelection, select_dev_compose};
 use crate::deadline::{BudgetExhausted, Deadline};
 use crate::error::ToolError;
 use crate::git_worktree::{
-    ListedWorktree, WorktreeGitError, add_on_existing_branch, add_on_new_branch, base_reference,
-    branch_exists, delete_branch_within, list_worktrees_within, remove_interrupted_worktree,
+    BaseReference, ListedWorktree, WorktreeGitError, add_on_existing_branch, add_on_new_branch,
+    base_reference, branch_exists, commits_between, delete_branch_within, list_worktrees_within,
+    record_branch_base, remove_interrupted_worktree,
 };
 use crate::global_config::{GlobalConfig, home_from_environment};
 use crate::kept_worktrees;
@@ -38,6 +39,10 @@ const WORKTREE_CREATE_BUDGET: Duration = Duration::from_secs(170);
 /// Registration is skipped when less than this is left: the first command of
 /// the agent registers the worktree anyway.
 const MIN_REGISTRATION_BUDGET: Duration = Duration::from_secs(20);
+/// The most the notes on a new or reused branch (the recorded base, the
+/// count of commits) may take together; they are skipped when less than
+/// [`MIN_REGISTRATION_BUDGET`] plus this is left.
+const BRANCH_NOTE_BUDGET: Duration = Duration::from_secs(10);
 /// The reason git gives the lock it holds on a worktree while creating it.
 const INITIALIZING_LOCK_REASON: &str = "initializing";
 /// What the wait for the lock of the worktree leaves of the budget: the copy
@@ -283,10 +288,11 @@ fn add_worktree(
     let timeout =
         add_timeout(deadline.remaining()).ok_or(CheckoutError::Budget(BudgetExhausted))?;
     let added = match &base {
-        Some(base) => add_on_new_branch(main_root, target, name, base, timeout),
+        Some(base) => add_on_new_branch(main_root, target, name, base.as_str(), timeout),
         None => add_on_existing_branch(main_root, target, name, timeout),
     };
     let Err(error) = &added else {
+        note_branch(main_root, name, base.as_ref(), deadline);
         return Ok(());
     };
     if !error.is_interruption() {
@@ -298,6 +304,7 @@ fn add_worktree(
                 "ds: warning: the post-checkout hook of the repository did not finish in time; the worktree {} was created",
                 target.display()
             );
+            note_branch(main_root, name, base.as_ref(), deadline);
             return Ok(());
         }
         InterruptionAction::CleanUp => {
@@ -306,6 +313,45 @@ fn add_worktree(
         InterruptionAction::LeaveAndFail => {}
     }
     Ok(added?)
+}
+
+/// Best effort, stderr only: records the base of a new branch, or says how
+/// many commits a reused branch already holds. Skipped when too little of the
+/// budget is left, and bounded by [`BRANCH_NOTE_BUDGET`] when it runs.
+fn note_branch(main_root: &Path, name: &str, base: Option<&BaseReference>, deadline: Deadline) {
+    let Some(budget) = deadline.clamp_leaving(BRANCH_NOTE_BUDGET, MIN_REGISTRATION_BUDGET) else {
+        return;
+    };
+    let notes = Some(Deadline::starting_now(budget));
+    match base {
+        Some(base) => record_base(main_root, name, base, notes),
+        None => announce_reused_branch(main_root, name, notes),
+    }
+}
+
+fn record_base(main_root: &Path, name: &str, base: &BaseReference, deadline: Option<Deadline>) {
+    let BaseReference::Branch(branch) = base else {
+        return;
+    };
+    if let Err(error) = record_branch_base(main_root, (name, branch), deadline) {
+        eprintln!(
+            "ds: warning: could not record {branch} as the base of {name}: {error}; pass --onto {branch} to ds worktree land"
+        );
+    }
+}
+
+fn announce_reused_branch(main_root: &Path, name: &str, deadline: Option<Deadline>) {
+    let Ok(base) = base_reference(main_root, deadline) else {
+        return;
+    };
+    let reference = format!("refs/heads/{name}");
+    let Ok(count) = commits_between(main_root, (base.as_str(), &reference), deadline) else {
+        return;
+    };
+    eprintln!(
+        "ds: reusing the existing branch {name}: {count} commit(s) not in {}",
+        base.as_str()
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

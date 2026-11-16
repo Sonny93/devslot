@@ -65,6 +65,7 @@ use commands::reset::run_reset;
 use commands::rm::run_rm;
 use commands::run::run_command;
 use commands::up::run_up;
+use commands::worktree_land::run_worktree_land;
 use commands::worktree_rm::run_worktree_rm;
 use error::ToolError;
 
@@ -95,6 +96,7 @@ fn execute(cli: &Cli) -> Result<u8, ToolError> {
         Command::Run(arguments) => run_command(&arguments.command, cli.color),
         Command::Up(arguments) => run_up(cli.color, arguments),
         Command::Worktree(arguments) => match &arguments.action {
+            WorktreeAction::Land(land) => run_worktree_land(land),
             WorktreeAction::Rm(rm) => run_worktree_rm(rm),
         },
     }

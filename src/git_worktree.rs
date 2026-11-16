@@ -3,6 +3,7 @@
 
 use std::ffi::OsStr;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -22,6 +23,19 @@ const MINIMUM_REMOVE_TIME: Duration = Duration::from_secs(10);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(60);
 const WORKTREE_LINE_PREFIX: &str = "worktree ";
 const LOCKED_MARKER: &str = "locked";
+const UNTRACKED_PREFIX: &[u8] = b"?? ";
+const CONFIG_KEY_MISSING_EXIT_CODE: i32 = 1;
+const BASE_CONFIG_NAME: &str = "devslotBase";
+const SHORT_COMMIT_LENGTH: &str = "--short=7";
+const OPERATION_MARKERS: [(&str, &str); 7] = [
+    ("MERGE_HEAD", "a merge"),
+    ("rebase-merge", "a rebase"),
+    ("rebase-apply", "a rebase"),
+    ("CHERRY_PICK_HEAD", "a cherry-pick"),
+    ("REVERT_HEAD", "a revert"),
+    ("BISECT_LOG", "a bisect"),
+    ("sequencer", "a cherry-pick or revert sequence"),
+];
 
 /// Why a git operation of a worktree hook did not complete.
 #[derive(Debug, Error)]
@@ -68,15 +82,33 @@ fn current_branch_within(
     Ok(Some(trimmed_stdout(&output)))
 }
 
+/// What a new branch starts from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseReference {
+    /// The branch checked out in the main worktree.
+    Branch(String),
+    /// The `HEAD` commit of the main worktree, when it is detached.
+    Commit(String),
+}
+
+impl BaseReference {
+    /// The branch name or the commit id, as git takes it.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Branch(reference) | Self::Commit(reference) => reference,
+        }
+    }
+}
+
 /// What a new branch starts from: the branch checked out in the main
 /// worktree, or its `HEAD` commit when that is detached. Every git call stops
 /// at `deadline` when there is one.
 pub fn base_reference(
     main_root: &Path,
     deadline: Option<Deadline>,
-) -> Result<String, WorktreeGitError> {
+) -> Result<BaseReference, WorktreeGitError> {
     if let Some(branch) = current_branch_within(main_root, deadline)? {
-        return Ok(branch);
+        return Ok(BaseReference::Branch(branch));
     }
     let output = run_git_within(main_root, ["rev-parse", "HEAD"], quick_timeout(deadline)?)?;
     if !output.status.success() {
@@ -85,7 +117,7 @@ pub fn base_reference(
             command: "rev-parse",
         });
     }
-    Ok(trimmed_stdout(&output))
+    Ok(BaseReference::Commit(trimmed_stdout(&output)))
 }
 
 /// Whether the local branch `name` exists. The git call stops at `deadline`
@@ -352,6 +384,195 @@ pub fn delete_branch_within(
         return Ok(());
     }
     Err(git_failure("branch", &output))
+}
+
+/// What `git status --porcelain` finds in a worktree, ignored files left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorktreeStatus {
+    /// Files with staged or unstaged changes to tracked content.
+    pub tracked_changes: usize,
+    /// Files git does not track and does not ignore.
+    pub untracked_files: usize,
+}
+
+/// The changed and the untracked files of `worktree`, counted apart.
+pub fn worktree_status(worktree: &Path) -> Result<WorktreeStatus, CheckoutError> {
+    let output = run_git_within(
+        worktree,
+        ["--no-optional-locks", "status", "--porcelain"],
+        STATUS_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return Err(git_failure("status", &output));
+    }
+    let lines = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty());
+    let (untracked, tracked): (Vec<_>, Vec<_>) =
+        lines.partition(|line| line.starts_with(UNTRACKED_PREFIX));
+    Ok(WorktreeStatus {
+        tracked_changes: tracked.len(),
+        untracked_files: untracked.len(),
+    })
+}
+
+/// The value of the git config `key` seen from `directory`; `None` when unset.
+pub fn read_config(directory: &Path, key: &str) -> Result<Option<String>, CheckoutError> {
+    let output = run_git_within(
+        directory,
+        ["config", "--get", "--end-of-options", key],
+        QUICK_TIMEOUT,
+    )?;
+    if output.status.success() {
+        return Ok(Some(trimmed_stdout(&output)));
+    }
+    match output.status.code() {
+        Some(CONFIG_KEY_MISSING_EXIT_CODE) => Ok(None),
+        _ => Err(git_failure("config", &output)),
+    }
+}
+
+/// The git config key that holds the branch `branch` was created from.
+pub fn base_config_key(branch: &str) -> String {
+    format!("branch.{branch}.{BASE_CONFIG_NAME}")
+}
+
+/// Records in the git config that `branch` was created from `base`. The git
+/// call stops at `deadline` when there is one.
+pub fn record_branch_base(
+    main_root: &Path,
+    (branch, base): (&str, &str),
+    deadline: Option<Deadline>,
+) -> Result<(), CheckoutError> {
+    let key = base_config_key(branch);
+    let output = run_git_within(
+        main_root,
+        ["config", "--end-of-options", key.as_str(), base],
+        quick_timeout(deadline)?,
+    )?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(git_failure("config", &output))
+}
+
+/// How many commits are reachable from `to` and not from `from`. The git call
+/// stops at `deadline` when there is one.
+pub fn commits_between(
+    directory: &Path,
+    (from, to): (&str, &str),
+    deadline: Option<Deadline>,
+) -> Result<usize, CheckoutError> {
+    let range = format!("{from}..{to}");
+    let output = run_git_within(
+        directory,
+        ["rev-list", "--count", range.as_str(), "--"],
+        quick_timeout(deadline)?,
+    )?;
+    if !output.status.success() {
+        return Err(git_failure("rev-list", &output));
+    }
+    trimmed_stdout(&output)
+        .parse()
+        .map_err(|_| git_failure("rev-list", &output))
+}
+
+/// The paths, relative to the root of `checkout_root`, that `to` adds to
+/// `from` (no renames: a renamed file counts as added at its new path).
+pub fn added_paths(
+    checkout_root: &Path,
+    (from, to): (&str, &str),
+) -> Result<Vec<PathBuf>, CheckoutError> {
+    let output = run_git_within(
+        checkout_root,
+        [
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--diff-filter=A",
+            from,
+            to,
+            "--",
+        ],
+        QUICK_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return Err(git_failure("diff", &output));
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| PathBuf::from(OsStr::from_bytes(name)))
+        .collect())
+}
+
+/// Whether the commit `ancestor` is reachable from `descendant` (or equal).
+pub fn is_ancestor(
+    directory: &Path,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool, CheckoutError> {
+    let output = run_git_within(
+        directory,
+        ["merge-base", "--is-ancestor", ancestor, descendant],
+        QUICK_TIMEOUT,
+    )?;
+    match output.status.code() {
+        Some(ANCESTOR_EXIT_CODE) => Ok(true),
+        Some(NOT_ANCESTOR_EXIT_CODE) => Ok(false),
+        _ => Err(git_failure("merge-base", &output)),
+    }
+}
+
+/// The abbreviated commit id `reference` points to.
+pub fn short_commit(directory: &Path, reference: &str) -> Result<String, CheckoutError> {
+    let output = run_git_within(
+        directory,
+        ["rev-parse", SHORT_COMMIT_LENGTH, "--verify", reference],
+        QUICK_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return Err(git_failure("rev-parse", &output));
+    }
+    Ok(trimmed_stdout(&output))
+}
+
+/// What the operation in progress in `checkout_root` is (a merge, a rebase,
+/// ...); `None` when there is none.
+pub fn operation_in_progress(checkout_root: &Path) -> Result<Option<&'static str>, CheckoutError> {
+    let output = run_git_within(
+        checkout_root,
+        ["rev-parse", "--absolute-git-dir"],
+        QUICK_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return Err(git_failure("rev-parse", &output));
+    }
+    let git_directory = PathBuf::from(trimmed_stdout(&output));
+    Ok(OPERATION_MARKERS
+        .iter()
+        .find(|(marker, _)| git_directory.join(marker).exists())
+        .map(|(_, description)| *description))
+}
+
+/// `git merge --ff-only <branch>` in `checkout_root`: moves its branch
+/// forward, never creates a merge commit. Git's own output goes to stderr.
+pub fn fast_forward_onto(checkout_root: &Path, branch: &str) -> Result<(), WorktreeGitError> {
+    let reference = format!("refs/heads/{branch}");
+    run_forwarded(
+        checkout_root,
+        WORKTREE_TIMEOUT,
+        [
+            OsStr::new("merge"),
+            OsStr::new("--ff-only"),
+            OsStr::new("--quiet"),
+            OsStr::new(reference.as_str()),
+        ],
+        "merge",
+    )
 }
 
 fn timeout_as_budget(error: CheckoutError, deadline: Option<Deadline>) -> CheckoutError {
