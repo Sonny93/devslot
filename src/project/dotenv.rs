@@ -179,10 +179,21 @@ fn read_value<'a>(
         return Some(strip_inline_comment(first_part).trim().to_owned());
     };
     let mut collected = first_part[1..].to_owned();
+    let mut scanned_until = 0;
+    let mut escape = EscapeState::Plain;
     loop {
-        if let Some(end) = find_closing_quote(&collected, quote) {
-            collected.truncate(end);
-            return Some(collected);
+        match find_closing_quote_from(&collected, quote, scanned_until, escape) {
+            Scan::Found(end) => {
+                collected.truncate(end);
+                return Some(collected);
+            }
+            Scan::NotFound {
+                scanned_until: next_start,
+                escape: next_escape,
+            } => {
+                scanned_until = next_start;
+                escape = next_escape;
+            }
         }
         let (_, next_line) = following.next()?;
         collected.push('\n');
@@ -190,22 +201,41 @@ fn read_value<'a>(
     }
 }
 
-fn find_closing_quote(text: &str, quote: char) -> Option<usize> {
-    let mut is_escaped = false;
-    for (index, character) in text.char_indices() {
-        if is_escaped {
-            is_escaped = false;
+/// Whether the next character of a double-quoted value is escaped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscapeState {
+    Plain,
+    Escaped,
+}
+
+/// Where a closing-quote scan stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    Found(usize),
+    NotFound {
+        scanned_until: usize,
+        escape: EscapeState,
+    },
+}
+
+fn find_closing_quote_from(text: &str, quote: char, start: usize, mut escape: EscapeState) -> Scan {
+    for (offset, character) in text[start..].char_indices() {
+        if escape == EscapeState::Escaped {
+            escape = EscapeState::Plain;
             continue;
         }
         if character == '\\' && quote == '"' {
-            is_escaped = true;
+            escape = EscapeState::Escaped;
             continue;
         }
         if character == quote {
-            return Some(index);
+            return Scan::Found(start + offset);
         }
     }
-    None
+    Scan::NotFound {
+        scanned_until: text.len(),
+        escape,
+    }
 }
 
 fn strip_inline_comment(value: &str) -> &str {
@@ -355,5 +385,30 @@ mod tests {
         let read = read_env_file(&directory.path().join(".env")).unwrap();
 
         assert_eq!(read, EnvRead::Missing);
+    }
+
+    #[test]
+    fn should_parse_an_unclosed_quote_in_linear_time_when_many_lines_follow() {
+        let text = format!("A=\"{}", "\n".repeat(200_000));
+
+        let started = std::time::Instant::now();
+        let outcome = EnvFile::parse(&text);
+
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn should_keep_the_backslash_when_a_double_quoted_value_continues_after_it() {
+        let entries = parse_raw_entries("A=\"one\\\ntwo\"\n").unwrap();
+
+        assert_eq!(entries[0].value, "one\\\ntwo");
+    }
+
+    #[test]
+    fn should_close_on_the_quote_when_the_backslash_escapes_the_line_break() {
+        let entries = parse_raw_entries("A=\"x\\\n\"y\"\n").unwrap();
+
+        assert_eq!(entries[0].value, "x\\\n");
     }
 }
