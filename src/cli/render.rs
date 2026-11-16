@@ -63,8 +63,12 @@ fn render_table<const COLUMNS: usize>(
     body: Vec<[String; COLUMNS]>,
 ) -> String {
     let rows: Vec<[String; COLUMNS]> = std::iter::once(header).chain(body).collect();
-    let widths: [usize; COLUMNS] =
-        std::array::from_fn(|column| rows.iter().map(|row| row[column].len()).max().unwrap_or(0));
+    let widths: [usize; COLUMNS] = std::array::from_fn(|column| {
+        rows.iter()
+            .map(|row| row[column].chars().count())
+            .max()
+            .unwrap_or(0)
+    });
     let mut output = String::new();
     for row in &rows {
         let cells: Vec<String> = row
@@ -396,6 +400,22 @@ mod tests {
         ));
         assert!(text.contains("\nPorts of web-9b1c\n"));
         assert!(text.ends_with("\nOpted out\n  /work/old\n"));
+    }
+
+    #[test]
+    fn should_align_the_columns_when_a_cell_has_non_ascii_characters() {
+        let header = ["PATH", "SLOT"].map(str::to_owned);
+        let rows = vec![
+            ["/home/me/dév".to_owned(), "1".to_owned()],
+            ["/home/me/dev".to_owned(), "2".to_owned()],
+        ];
+
+        assert_eq!(
+            render_table(header, rows),
+            "  PATH          SLOT\n\
+             \x20 /home/me/dév  1\n\
+             \x20 /home/me/dev  2\n"
+        );
     }
 
     #[test]
