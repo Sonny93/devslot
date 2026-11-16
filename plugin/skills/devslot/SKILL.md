@@ -17,3 +17,9 @@ devslot gives each checkout or worktree of a project its own slot of ports and i
 - If `ds info` says the checkout is opted out, do not run `ds up` without asking the user first: `ds rm` opted it out on purpose.
 - `DEVSLOT_INSTANCE` names this instance. Show it in logs or on a health endpoint when that helps tell instances apart.
 - When the checkout cannot be isolated (a compose file with `container_name`, a literal port), `ds doctor` explains why and what to change.
+
+## Good to know
+
+- `ds info --json` gives the `url` of each web port: use it instead of building `http://localhost:<port>` yourself.
+- `ds down` stops the services and keeps the data.
+- The block at the end of `.env` already gives the instance's ports to commands that read `.env` (the app, its tests, Compose), so plain commands work without `ds run`. Never edit the block by hand: ds rewrites it.
