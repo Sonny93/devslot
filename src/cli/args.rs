@@ -199,9 +199,9 @@ pub struct HookArguments {
 pub enum HookEvent {
     /// Create the git worktree of a session, register it and print its path
     WorktreeCreate,
-    /// Delete the data of a session's worktree, then the worktree and its merged branch
+    /// Stop the instance's processes, remove the session's worktree, delete its data, then its branch when merged
     WorktreeRemove,
-    /// Deny `ds rm` and `ds prune`, and make sure the checkout is registered
+    /// Deny `ds rm`, `ds prune`, `ds worktree rm` and every `ds hook` command, and make sure the checkout is registered
     PreToolUse,
     /// Tell the agent which instance its checkout is
     SessionStart,

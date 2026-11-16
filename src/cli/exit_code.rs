@@ -27,7 +27,7 @@ pub fn describe_exit_codes() -> String {
         (SUCCESS, "success"),
         (
             ERROR,
-            "error (doctor: at least one error was found; env, down, reset: checkout not registered; run, up, ensure: refused to register or start; down, reset, rm, prune: refused or Compose failed)",
+            "error (doctor: at least one error was found; env, down, reset: checkout not registered; run, up, ensure: refused to register or start; down, reset, rm, prune, worktree rm: refused, Compose failed or git refused)",
         ),
         (USAGE, "invalid usage, or the tool itself failed"),
     ]
