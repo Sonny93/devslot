@@ -40,6 +40,21 @@ enabled = true       # false: ds never writes .env, unless a project file says o
 
 [worktrees]
 root = "~/dev/.worktrees"   # where ds hook worktree-create puts worktrees: <root>/<repo>/<name>
+require = []                # path globs of the main checkouts where agents must work in a linked worktree; empty means the guard is off
+require_exclude = []        # wins over require, e.g. ["~/dev/scratch/**"]
 ```
 
 The registry of the machine is `~/.local/state/devslot/registry.toml`. `XDG_CONFIG_HOME` moves the global config (`devslot/config.toml`, default `~/.config`) and `XDG_STATE_HOME` moves the registry (`devslot/registry.toml`, default `~/.local/state`).
+
+## Worktree guard
+
+`[worktrees] require` lists the path globs (same syntax as `[auto] include`, `~` allowed) of the checkouts the worktree guard covers; `require_exclude` removes some of them. Unlike `[auto]`, an empty `require` covers nothing: the guard is off until you name what it covers. An invalid glob is a configuration error that names the key (`[worktrees] require` or `[worktrees] require_exclude`). What the guard does is in [Worktrees](worktrees.md#worktree-guard).
+
+To switch the guard off for one covered checkout, set the key in that checkout's `devslot.local.toml`:
+
+```toml
+[worktrees]
+require = false
+```
+
+Only an untracked `devslot.local.toml` is read for this key. The key in `devslot.toml`, or in a `devslot.local.toml` that git tracks, is ignored and `ds doctor` warns about it. The reason: `devslot.toml` comes with the repository, often one you have not reviewed, and it would let that repository turn off a protection the user asked for. An untracked local file is yours. A `devslot.local.toml` that cannot be read or parsed cannot be used for this key: the hook then cannot decide, lets the call go and tells the agent.

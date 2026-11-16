@@ -16,7 +16,7 @@ v1 is in development and nothing is released.
 - Data isolation: a mistake lets one instance wipe or read another instance's database.
 - Secrets: devslot reads `.env` files that hold credentials, and its output is read by agents and can end up in transcripts or logs. No `.env` value is ever printed.
 - Untrusted checkouts: `ds doctor` and the automatic registration hook run on repos the user may not have reviewed (fresh clones, agent sessions). Reading a repo must never run code from it.
-- Other work on the machine: devslot never stops or removes containers, volumes or compose projects it did not create for the current checkout. Removing a worktree (`ds worktree rm`, the `WorktreeRemove` hook) acts on that worktree's instance, stops only its processes, and refuses while another session or program uses the worktree.
+- Other work on the machine: devslot never stops or removes containers, volumes or compose projects it did not create for the current checkout. Removing a worktree (`ds worktree rm`, the `WorktreeRemove` hook) acts on that worktree's instance, stops only its processes, and refuses while another session or program uses the worktree, or when a closing session would delete uncommitted changes or commits found nowhere else.
 
 **Non-goals.**
 - Production or remote deployment: devslot is a dev tool.
@@ -27,6 +27,7 @@ v1 is in development and nothing is released.
 **Hard constraints.**
 - A repo works the same with or without devslot: after a clone or a `ds rm`, the default ports work.
 - The only write in a project is a delimited block at the end of `.env` (plus creating `.env` when it is missing), announced with the file path. devslot refuses to write into a `.env` that git does not ignore. The worktree hooks and `ds worktree rm` also create git worktrees (in the worktrees folder) and remove linked worktrees and their branches; a branch is deleted only when it is named like the worktree folder and merged.
+- `ds worktree land` is the one command that moves a branch of the main checkout: it runs `git merge --ff-only` there, so it updates that checkout's files and runs the repository's `post-merge` hook (the repository's own code, run by git). It never forces, stashes, resets or pushes, and it refuses when the branch adds a path that already exists in the main checkout untracked or ignored, so it overwrites no file git does not track there.
 - One change to a project is recommended, never required: writing published ports as `${VAR:-default}`.
 - Integrations (Tunneler, proxies, process managers) are optional.
 
@@ -46,7 +47,7 @@ Run the same command again after updating the clone: the hooks run the installed
 /plugin install devslot@devslot
 ```
 
-The plugin adds a `devslot` skill and four hooks (`WorktreeCreate`, `WorktreeRemove`, `PreToolUse` on `Bash`, `SessionStart`). The `WorktreeCreate` hook replaces Claude Code's own worktree creation, and sessions started with `claude --worktree` need extra setup: see [Worktrees](docs/worktrees.md).
+The plugin adds a `devslot` skill and four hooks (`WorktreeCreate`, `WorktreeRemove`, `PreToolUse` on `Bash` and on the file-writing tools, `SessionStart`). The `WorktreeCreate` hook replaces Claude Code's own worktree creation, and sessions started with `claude --worktree` need extra setup: see [Worktrees](docs/worktrees.md).
 
 ## Quick start
 
@@ -82,6 +83,8 @@ DEVSLOT_SLOT=1
 
 **Worktrees.** With the plugin, each Claude Code session gets its own worktree and instance, and the hooks register, protect and remove them: see [Worktrees](docs/worktrees.md).
 
+**Worktree guard.** Off until `[worktrees] require` in the global config lists the checkouts it covers. In a covered main checkout the agent reads and searches; the `PreToolUse` hook refuses its file writes (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) and `ds up`, `ds run` and `ds reset`, and tells it to enter a worktree with the `EnterWorktree` tool. It writes there, in a linked worktree. After the user approves the committed work, the agent runs `ds worktree land`, which fast-forwards the main checkout's branch onto the worktree's branch (never a push). A main checkout covered by the guard is not registered by the hooks. See [Worktrees](docs/worktrees.md#worktree-guard) and [Configuration](docs/configuration.md).
+
 **Opt-out.** `ds rm` records the checkout as opted out: the hooks leave it alone until an explicit `ds up` or `ds run` registers it again.
 
 To configure a project, see [Configuration](docs/configuration.md) and [Make a project work with devslot](docs/project-setup.md). The commands are listed in [Commands](docs/commands.md). Exit codes: 0 success, 1 a refusal or an error in the project, 2 the tool itself failed or invalid usage; `ds run`, and `ds up` with a `run` key, exit with the code of the command they run.
@@ -108,7 +111,7 @@ This repository runs several instances of its dev stack on one machine, one per 
 ## Known limitations
 
 - **Two Adonis servers started in the same second can share HMR port 24678.** `@adonisjs/assembler` 8 picks the HMR port itself (24678 when free, else a random free port) and ignores `VITE_HMR_PORT` from `.env`, so the slot value is not used. Started one after the other, instances get distinct ports. Workaround: start them a few seconds apart.
-- **A refused worktree removal is silent in Claude Code.** When the `WorktreeRemove` hook refuses (another session uses the worktree, or another creation or removal of it is running), Claude Code exits without showing the hook's message: the worktree stays. `ds ls` lists these worktrees with the reason; remove them with `ds worktree rm <name>`.
+- **A refused worktree removal is silent in Claude Code.** When the `WorktreeRemove` hook refuses (another session uses the worktree, it holds uncommitted changes or commits found nowhere else, or another creation or removal of it is running), Claude Code exits without showing the hook's message: the worktree stays. `ds ls` lists these worktrees with the reason; remove them with `ds worktree rm <name>` from a terminal (it shows the work, and needs `--force` to delete it).
 - **Sessions started with `claude -p` keep their worktree.** Claude Code never fires `WorktreeRemove` for them, so the worktree, its instance and its data stay until you run `ds worktree rm <name>`.
 - **Sessions started with `--tmux` skip the plugin's `WorktreeCreate` hook.** See [Worktrees](docs/worktrees.md#sessions-started-with-claude---worktree-name---tmux) for the hooks to declare yourself.
 - **A server started without `ds run` may survive a worktree removal.** Its process listening on an instance port is stopped, but a parent that respawns it (for example `node ace serve` run by hand) is only listed. Servers started through `ds run` or `ds up` are stopped entirely.
