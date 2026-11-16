@@ -36,6 +36,8 @@ use crate::registry::record::{InstanceRecord, RegistryChange};
 
 const DETACHED_HEAD_NAME: &str = "HEAD";
 const REMOVE_COMMAND: &str = "worktree remove";
+/// Why a worktree is kept when another creation or removal of it is running.
+pub const BUSY_REASON: &str = "another creation or removal of this worktree was running";
 
 /// Why a worktree was not removed, or not fully.
 #[derive(Debug, Error)]
@@ -70,6 +72,13 @@ pub enum RemovalFailure {
     /// The checkout cannot be examined.
     #[error(transparent)]
     Checkout(#[from] CheckoutError),
+    /// The worktree is not the one that was shown: it is gone or was replaced
+    /// while `ds worktree rm` waited, so nothing was removed.
+    #[error("the worktree {} changed since the preview; nothing was removed, run the command again", .0.display())]
+    ChangedSincePreview(PathBuf),
+    /// Another creation or removal of the worktree holds its lock.
+    #[error("another creation or removal of {} is running; nothing was removed, try again", .0.display())]
+    Busy(PathBuf),
 }
 
 impl RemovalFailure {
@@ -81,8 +90,25 @@ impl RemovalFailure {
             | Self::Locked(_)
             | Self::InUse { .. }
             | Self::UnsavedWork { .. }
+            | Self::ChangedSincePreview(_)
+            | Self::Busy(_)
             | Self::Git(WorktreeGitError::Rejected { .. }) => exit_code::ERROR,
             Self::Git(WorktreeGitError::Tool(_)) | Self::Checkout(_) => exit_code::TOOL_FAILURE,
+        }
+    }
+
+    /// Why the worktree was kept, in a few words, for `ds ls`: process names
+    /// and paths only.
+    pub fn kept_reason(&self) -> String {
+        match self {
+            Self::NotLinkedWorktree(_) => "not the root of a linked worktree".to_owned(),
+            Self::Locked(_) => "locked by git".to_owned(),
+            Self::InUse { processes, .. } => format!("in use by {}", describe_users(processes)),
+            Self::Git(_) => "git could not remove it".to_owned(),
+            Self::UnsavedWork { .. } => "it holds unsaved work".to_owned(),
+            Self::Checkout(_) => "it could not be examined".to_owned(),
+            Self::ChangedSincePreview(_) => "it changed while it was being removed".to_owned(),
+            Self::Busy(_) => BUSY_REASON.to_owned(),
         }
     }
 

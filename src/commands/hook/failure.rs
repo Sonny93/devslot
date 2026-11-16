@@ -10,6 +10,7 @@ use crate::checkout::CheckoutError;
 use crate::cli::exit_code;
 use crate::error::ToolError;
 use crate::git_worktree::WorktreeGitError;
+use crate::worktree_lock::WorktreeLockError;
 
 /// A failure of `worktree-create`, `worktree-remove` or `session-start`.
 #[derive(Debug, Error)]
@@ -43,6 +44,15 @@ pub enum HookFailure {
     /// The worktree exists and someone locked it.
     #[error("{} is locked; run git worktree unlock {} first", .0.display(), .0.display())]
     Locked(PathBuf),
+    /// Another creation of the worktree still holds its lock.
+    #[error("another creation of {} is still running; try again once it has finished", .0.display())]
+    CreationInProgress(PathBuf),
+    /// The lock of the worktree cannot be keyed: its parent folder is missing.
+    #[error("cannot lock the creation of {}: its parent folder cannot be resolved", .0.display())]
+    NoLockKey(PathBuf),
+    /// The lock file of the worktree cannot be used.
+    #[error(transparent)]
+    Lock(#[from] WorktreeLockError),
     /// A parent folder cannot be created.
     #[error("cannot create {}: {source}", path.display())]
     CreateDirectory {

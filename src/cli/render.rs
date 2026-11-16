@@ -5,13 +5,16 @@ use std::fmt::Write;
 use super::style::{Style, Tone};
 use crate::checks::finding::{Finding, Level};
 use crate::discovery::ManagedPort;
+use crate::kept_worktrees::KeptWorktree;
 use crate::report::{
     DoctorReport, InfoPort, InfoReport, ListReport, RegisteredInfo, UnregisteredInfo,
 };
+use crate::shell_quote::shell_quote;
 
 const LEVEL_WORD_WIDTH: usize = 7;
 const NO_VALUE: &str = "-";
 const SERVICES_NOT_CHECKED: &str = "run ds info to check";
+const KEPT_WORKTREES_HEADING: &str = "Worktrees Claude Code asked to remove that are still there:";
 const NO_INSTANCE_LINE: &str = "No instance is registered on this machine.\n";
 
 /// Renders the report as the text `ds doctor` prints.
@@ -133,6 +136,26 @@ pub fn render_list_text(report: &ListReport, opted_out: &[String]) -> String {
         for path in opted_out {
             let _ = writeln!(output, "  {path}");
         }
+    }
+    output
+}
+
+/// Renders the worktrees Claude Code asked to remove that are still there:
+/// nothing when there are none.
+pub fn render_kept_worktrees(kept: &[KeptWorktree]) -> String {
+    if kept.is_empty() {
+        return String::new();
+    }
+    let mut output = format!("\n{KEPT_WORKTREES_HEADING}\n");
+    for worktree in kept {
+        let path = worktree.path.display().to_string();
+        let _ = writeln!(
+            output,
+            "  {path}: {} ({}); remove with ds worktree rm {}",
+            worktree.reason,
+            worktree.date,
+            shell_quote(&path)
+        );
     }
     output
 }
@@ -416,6 +439,26 @@ mod tests {
              \x20 /home/me/dév  1\n\
              \x20 /home/me/dev  2\n"
         );
+    }
+
+    #[test]
+    fn should_list_the_kept_worktrees_with_the_command_that_removes_them() {
+        let kept = vec![KeptWorktree {
+            path: "/wt/app/feat".into(),
+            reason: "in use by 12 (node)".to_owned(),
+            date: "2026-11-16".to_owned(),
+        }];
+
+        assert_eq!(
+            render_kept_worktrees(&kept),
+            "\nWorktrees Claude Code asked to remove that are still there:\n\
+             \x20 /wt/app/feat: in use by 12 (node) (2026-11-16); remove with ds worktree rm '/wt/app/feat'\n"
+        );
+    }
+
+    #[test]
+    fn should_print_nothing_when_no_worktree_was_kept() {
+        assert_eq!(render_kept_worktrees(&[]), "");
     }
 
     #[test]

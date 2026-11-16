@@ -22,13 +22,14 @@ use crate::deadline::{BudgetExhausted, Deadline};
 use crate::error::ToolError;
 use crate::git_worktree::{
     ListedWorktree, WorktreeGitError, add_on_existing_branch, add_on_new_branch, base_reference,
-    branch_exists, delete_branch_within, list_worktrees, list_worktrees_within,
-    remove_interrupted_worktree,
+    branch_exists, delete_branch_within, list_worktrees_within, remove_interrupted_worktree,
 };
 use crate::global_config::{GlobalConfig, home_from_environment};
+use crate::kept_worktrees;
 use crate::project_config::ProjectConfig;
 use crate::registration::{Intent, RegistrationOutcome};
 use crate::registry::record::normalize_path;
+use crate::worktree_lock::{LockPurpose, WorktreeKey, WorktreeLock};
 
 const MAX_NAME_LENGTH: usize = 100;
 /// Claude Code kills the hook after 180 seconds; the work stops before that.
@@ -38,6 +39,11 @@ const WORKTREE_CREATE_BUDGET: Duration = Duration::from_secs(170);
 const MIN_REGISTRATION_BUDGET: Duration = Duration::from_secs(20);
 /// The reason git gives the lock it holds on a worktree while creating it.
 const INITIALIZING_LOCK_REASON: &str = "initializing";
+/// What the wait for the lock of the worktree leaves of the budget: the copy
+/// that waited then lists the worktrees and reopens it, with or without the
+/// lock. The first copy can
+/// hold the lock for minutes (a slow `post-checkout`), so the wait is long.
+const CREATE_LOCK_MARGIN: Duration = Duration::from_secs(10);
 /// How long each step of the cleanup of an interrupted creation may take.
 const CLEANUP_STEP_TIMEOUT: Duration = Duration::from_secs(10);
 const PLAIN_STYLE: Style = Style { color: false };
@@ -62,7 +68,7 @@ pub fn run_worktree_create() -> Result<u8, HookFailure> {
     })?;
     let machine = Machine::from_process()?;
     let global = GlobalConfig::load(&machine.paths.config_file).map_err(ToolError::from)?;
-    let path = create_worktree(&input, &global, deadline)?;
+    let path = create_worktree(&input, (&machine, &global), deadline)?;
     register_worktree(&path, (&machine, &global), deadline);
     write_stdout(&format!("{}\n", path.display()))?;
     Ok(exit_code::SUCCESS)
@@ -95,7 +101,7 @@ fn is_name_character(character: char) -> bool {
 
 fn create_worktree(
     input: &WorktreeCreateInput,
-    global: &GlobalConfig,
+    (machine, global): (&Machine, &GlobalConfig),
     deadline: Deadline,
 ) -> Result<PathBuf, HookFailure> {
     let checkout = Checkout::locate_within(&input.cwd, deadline)?;
@@ -104,14 +110,81 @@ fn create_worktree(
     }
     let target = target_path(&checkout, global, &input.name)?;
     let main_root = checkout.main_root.as_ref().unwrap_or(&checkout.root);
-    if std::fs::symlink_metadata(&target).is_ok() {
-        return reopen_worktree(&target, main_root, deadline);
-    }
     prepare_parent(&target)?;
-    add_worktree(main_root, &target, &input.name, deadline)?;
+    let creation = Creation {
+        target: &target,
+        main_root,
+        name: &input.name,
+        state_directory: machine.paths.state_directory(),
+    };
+    let wait = deadline.remaining().saturating_sub(CREATE_LOCK_MARGIN);
+    create_within(&creation, wait, deadline)
+}
+
+/// What one creation needs, whoever holds the lock.
+struct Creation<'a> {
+    target: &'a Path,
+    main_root: &'a Path,
+    name: &'a str,
+    state_directory: &'a Path,
+}
+
+/// Creates or reopens the worktree under its lock, waiting `wait` for another
+/// holder to let go.
+fn create_within(
+    creation: &Creation,
+    wait: Duration,
+    deadline: Deadline,
+) -> Result<PathBuf, HookFailure> {
+    let target = creation.target;
+    let key =
+        WorktreeKey::of(target).ok_or_else(|| HookFailure::NoLockKey(target.to_path_buf()))?;
+    let state_directory = creation.state_directory;
+    let Some(_lock) =
+        WorktreeLock::acquire_within(state_directory, &key, wait, LockPurpose::Create)?
+    else {
+        let holder = WorktreeLock::purpose_of_holder(state_directory, &key);
+        return reopen_after_lock_timeout(creation, holder, deadline);
+    };
+    let path = create_or_reopen(target, creation.main_root, creation.name, deadline)?;
+    kept_worktrees::forget(state_directory, &key);
+    Ok(path)
+}
+
+/// The lock is still held after the whole wait: when the holder is a creation
+/// and it already made the worktree, reopen it without the lock (this only
+/// reads); with any other holder (a removal, or one that did not say), or when
+/// the worktree is not ready, say that the other operation is running and
+/// print no path.
+fn reopen_after_lock_timeout(
+    creation: &Creation,
+    holder: Option<LockPurpose>,
+    deadline: Deadline,
+) -> Result<PathBuf, HookFailure> {
+    let target = creation.target;
+    let in_progress = || HookFailure::CreationInProgress(target.to_path_buf());
+    if holder != Some(LockPurpose::Create) || std::fs::symlink_metadata(target).is_err() {
+        return Err(in_progress());
+    }
+    reopen_worktree(target, creation.main_root, deadline).map_err(|failure| match failure {
+        HookFailure::HalfCreated(_) | HookFailure::Locked(_) => failure,
+        _ => in_progress(),
+    })
+}
+
+fn create_or_reopen(
+    target: &Path,
+    main_root: &Path,
+    name: &str,
+    deadline: Deadline,
+) -> Result<PathBuf, HookFailure> {
+    if std::fs::symlink_metadata(target).is_ok() {
+        return reopen_worktree(target, main_root, deadline);
+    }
+    add_worktree(main_root, target, name, deadline)?;
     target.canonicalize().map_err(|source| {
         HookFailure::Checkout(CheckoutError::Resolve {
-            path: target.clone(),
+            path: target.to_path_buf(),
             source,
         })
     })
@@ -148,7 +221,7 @@ fn reopen_worktree(
             path: target.to_path_buf(),
             source,
         })?;
-    refuse_locked(main_root, &canonical, target)?;
+    refuse_locked(main_root, (&canonical, target), deadline)?;
     let existing = Checkout::locate_within(&canonical, deadline)?;
     let is_linked_worktree_of_repository = existing.is_git
         && existing.root == canonical
@@ -161,8 +234,15 @@ fn reopen_worktree(
 
 /// Refuses a worktree git keeps locked: with the reason git writes during a
 /// creation, an interrupted one; with any other, one someone locked.
-fn refuse_locked(main_root: &Path, canonical: &Path, target: &Path) -> Result<(), HookFailure> {
-    let listed = list_worktrees(main_root)?;
+fn refuse_locked(
+    main_root: &Path,
+    (canonical, target): (&Path, &Path),
+    deadline: Deadline,
+) -> Result<(), HookFailure> {
+    let timeout = deadline
+        .clamp(CLEANUP_STEP_TIMEOUT)
+        .ok_or(CheckoutError::Budget(BudgetExhausted))?;
+    let listed = list_worktrees_within(main_root, timeout)?;
     let Some(worktree) = listed
         .iter()
         .find(|listed| listed.is_locked && listed.is_at(canonical))
@@ -396,6 +476,95 @@ mod tests {
     fn should_register_when_the_remaining_budget_is_at_least_the_minimum() {
         assert!(has_budget_to_register(MIN_REGISTRATION_BUDGET));
         assert!(has_budget_to_register(WORKTREE_CREATE_BUDGET));
+    }
+
+    const SHORT_WAIT: Duration = Duration::from_millis(100);
+
+    fn linked_worktree(name: &str) -> (tempfile::TempDir, tempfile::TempDir, PathBuf, PathBuf) {
+        let repository = repository_with_commit();
+        let main_root = repository.path().canonicalize().unwrap();
+        let worktrees = tempfile::tempdir().unwrap();
+        let target = worktrees.path().join(name);
+        git(
+            &main_root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                name,
+                target.to_str().unwrap(),
+            ],
+        );
+        (repository, worktrees, main_root, target)
+    }
+
+    fn create_while_held(purpose: LockPurpose) -> Result<PathBuf, HookFailure> {
+        let (_repository, _worktrees, main_root, target) = linked_worktree("feature");
+        let state = tempfile::tempdir().unwrap();
+        let key = WorktreeKey::of(&target).unwrap();
+        let _held = WorktreeLock::try_acquire(state.path(), &key, purpose)
+            .unwrap()
+            .unwrap();
+        let creation = Creation {
+            target: &target,
+            main_root: &main_root,
+            name: "feature",
+            state_directory: state.path(),
+        };
+
+        create_within(
+            &creation,
+            SHORT_WAIT,
+            Deadline::starting_now(WORKTREE_CREATE_BUDGET),
+        )
+    }
+
+    #[test]
+    fn should_say_the_creation_is_running_when_a_removal_holds_the_lock_of_an_existing_worktree() {
+        let result = create_while_held(LockPurpose::Remove);
+
+        assert!(matches!(result, Err(HookFailure::CreationInProgress(_))));
+    }
+
+    #[test]
+    fn should_reopen_the_worktree_without_the_lock_when_a_creation_holds_it() {
+        let result = create_while_held(LockPurpose::Create);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_say_the_creation_is_running_when_the_lock_timed_out_and_nothing_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("feat");
+        let creation = Creation {
+            target: &target,
+            main_root: directory.path(),
+            name: "feat",
+            state_directory: directory.path(),
+        };
+        let deadline = Deadline::starting_now(Duration::from_secs(60));
+
+        let result = reopen_after_lock_timeout(&creation, Some(LockPurpose::Create), deadline);
+
+        assert!(matches!(result, Err(HookFailure::CreationInProgress(_))));
+    }
+
+    #[test]
+    fn should_say_the_creation_is_running_when_the_holder_did_not_say_what_it_does() {
+        let (_repository, _worktrees, main_root, target) = linked_worktree("feature");
+        let creation = Creation {
+            target: &target,
+            main_root: &main_root,
+            name: "feature",
+            state_directory: &main_root,
+        };
+        let deadline = Deadline::starting_now(WORKTREE_CREATE_BUDGET);
+
+        let result = reopen_after_lock_timeout(&creation, None, deadline);
+
+        assert!(matches!(result, Err(HookFailure::CreationInProgress(_))));
     }
 
     #[test]

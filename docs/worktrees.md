@@ -28,6 +28,8 @@ Claude Code creates the worktree before plugins load, so the plugin's `WorktreeC
 }
 ```
 
+Claude Code does not merge a plugin's hook with the same hook declared in settings: for every session started without `--tmux`, both copies run, in parallel. ds takes a lock per worktree, so this is supported: the second creation waits for the first and prints the same path, and the second removal leaves the work to the first one.
+
 Headless sessions (`claude -p`) never fire `WorktreeRemove`: their worktrees stay until you remove them by hand.
 
 ## Worktree lifecycle

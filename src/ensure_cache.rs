@@ -291,7 +291,7 @@ pub fn locate_entry_path(state_directory: &Path, directory: &Path) -> PathBuf {
         .join(key_of(directory))
 }
 
-fn key_of(path: &Path) -> String {
+pub(crate) fn key_of(path: &Path) -> String {
     let digest = Sha256::digest(path.as_os_str().as_bytes());
     let mut key = String::with_capacity(KEY_BYTES * 2);
     for byte in digest.iter().take(KEY_BYTES) {

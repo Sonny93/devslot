@@ -27,6 +27,7 @@ pub mod git_worktree;
 pub mod global_config;
 pub mod instance_name;
 pub mod instance_processes;
+pub mod kept_worktrees;
 pub mod paths;
 pub mod port_check;
 pub mod port_probe;
@@ -42,6 +43,8 @@ pub mod reserved_names;
 pub mod reset_plan;
 pub mod services_state;
 pub mod shell_quote;
+pub mod worktree_identity;
+pub mod worktree_lock;
 
 use std::process::ExitCode;
 

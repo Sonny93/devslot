@@ -5,11 +5,12 @@ use std::collections::BTreeSet;
 
 use crate::cli::exit_code;
 use crate::cli::output::write_stdout;
-use crate::cli::render::render_list_text;
+use crate::cli::render::{render_kept_worktrees, render_list_text};
 use crate::commands::info::info_port;
 use crate::commands::machine::Machine;
 use crate::compose::runner::{ComposeRunner, DockerRunner};
 use crate::error::ToolError;
+use crate::kept_worktrees;
 use crate::registry::record::Registry;
 use crate::report::{ListReport, ListedInstance, REPORT_VERSION};
 
@@ -19,7 +20,13 @@ pub fn run_ls(as_json: bool) -> Result<u8, ToolError> {
     let registry = machine.store.read()?;
     let running = DockerRunner::from_environment().running_projects().ok();
     let report = list_report(&registry, running.as_ref());
-    write_stdout(&render(&report, &registry, as_json)?)?;
+    let mut text = render(&report, &registry, as_json)?;
+    if !as_json {
+        text.push_str(&render_kept_worktrees(&kept_worktrees::list(
+            machine.paths.state_directory(),
+        )));
+    }
+    write_stdout(&text)?;
     Ok(exit_code::SUCCESS)
 }
 

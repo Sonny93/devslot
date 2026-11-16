@@ -5,6 +5,7 @@
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::hook::worktree_create::{target_path, validate_name};
 use super::machine::{Machine, locate_checkout};
@@ -23,11 +24,18 @@ use crate::instance_processes::{
     ProcessReport, ProcessSummary, Requester, find_foreign_processes, find_instance_processes,
     join_summaries,
 };
+use crate::kept_worktrees::{self, KeptWorktree};
+use crate::paths::DevslotPaths;
+use crate::worktree_identity::WorktreeIdentity;
+use crate::worktree_lock::{LockPurpose, WorktreeKey, WorktreeLock};
 
 const COMMAND_NAME: &str = "ds worktree rm";
 const NOTHING: &str = "none";
 const DETACHED_HEAD_LABEL: &str = "none (detached HEAD)";
 const NOT_REGISTERED: &str = "not registered";
+/// How long `ds worktree rm` waits for another creation or removal of the
+/// worktree, once the person has confirmed.
+const LOCK_WAIT: Duration = Duration::from_secs(10);
 const IGNORED_FILES_WARNING: &str =
     "ignored files (.env, local databases, uploads) are deleted too";
 
@@ -37,6 +45,7 @@ enum Resolution {
     Refused(u8),
 }
 
+#[derive(Clone)]
 struct Target {
     path: PathBuf,
     repository_main_root: Option<PathBuf>,
@@ -52,6 +61,15 @@ struct Preview {
     in_use: Vec<ProcessSummary>,
     uncommitted_changes: usize,
     unreachable_commits: usize,
+    kept: Option<KeptWorktree>,
+}
+
+/// What `ds worktree rm` keeps from the preview to act on once confirmed.
+struct Previewed {
+    target: Target,
+    key: WorktreeKey,
+    identity: WorktreeIdentity,
+    state_directory: PathBuf,
 }
 
 /// Resolves the argument, shows the preview, asks, then removes the worktree.
@@ -60,11 +78,26 @@ pub fn run_worktree_rm(arguments: &WorktreeRmArguments) -> Result<u8, ToolError>
         Resolution::Found(target) => target,
         Resolution::Refused(code) => return Ok(code),
     };
-    let prepared = match prepare_checked(target) {
+    let paths = DevslotPaths::from_process()?;
+    let prepared = match prepare_checked(target.clone()) {
         Ok(prepared) => prepared,
         Err(failure) => return Ok(refuse(&failure)),
     };
-    let preview = build_preview(&prepared)?;
+    let Some(key) = WorktreeKey::of(&prepared.removal.path) else {
+        eprintln!(
+            "ds: error: cannot lock {}: its parent folder cannot be resolved",
+            prepared.removal.path.display()
+        );
+        return Ok(exit_code::ERROR);
+    };
+    let previewed = Previewed {
+        identity: identity_of(&prepared.removal.path)?,
+        state_directory: paths.state_directory().to_path_buf(),
+        target,
+        key,
+    };
+    let kept = kept_worktrees::read(&previewed.state_directory, &previewed.key);
+    let preview = build_preview(&prepared, kept)?;
     write_stdout(&render_preview(&preview))?;
     if let Some(code) = refusal_without_force(&preview, arguments.force) {
         return Ok(code);
@@ -74,13 +107,60 @@ pub fn run_worktree_rm(arguments: &WorktreeRmArguments) -> Result<u8, ToolError>
     if let Some(code) = exit_code_unless_confirmed(COMMAND_NAME, policy, &prompt) {
         return Ok(code);
     }
-    match remove_from_terminal(&prepared, arguments.force, shown_work(&preview)) {
+    remove_under_lock(&previewed, &preview, arguments.force)
+}
+
+fn identity_of(path: &Path) -> Result<WorktreeIdentity, CheckoutError> {
+    WorktreeIdentity::of(path).map_err(|source| CheckoutError::Resolve {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Takes the lock of the worktree after the confirmation (a person deciding
+/// must not block a creation of that name), checks that it is still the
+/// worktree that was shown, and removes it.
+fn remove_under_lock(
+    previewed: &Previewed,
+    preview: &Preview,
+    is_forced: bool,
+) -> Result<u8, ToolError> {
+    let lock = WorktreeLock::acquire_within(
+        &previewed.state_directory,
+        &previewed.key,
+        LOCK_WAIT,
+        LockPurpose::Remove,
+    )?;
+    let Some(_lock) = lock else {
+        return Ok(refuse(&RemovalFailure::Busy(preview.path.clone())));
+    };
+    let prepared = match prepare_unchanged(previewed) {
+        Ok(prepared) => prepared,
+        Err(failure) => return Ok(refuse(&failure)),
+    };
+    match remove_from_terminal(&prepared, is_forced, shown_work(preview)) {
         Ok(()) => {
+            kept_worktrees::forget(&previewed.state_directory, &previewed.key);
             eprintln!("ds: removed {}", preview.path.display());
             Ok(exit_code::SUCCESS)
         }
         Err(failure) => Ok(refuse(&failure)),
     }
+}
+
+fn prepare_unchanged(previewed: &Previewed) -> Result<PreparedRemoval, RemovalFailure> {
+    ensure_unchanged(&previewed.target.path, &previewed.identity)?;
+    prepare_checked(previewed.target.clone())
+}
+
+/// Fails unless the folder at `path` is the one that was shown.
+fn ensure_unchanged(path: &Path, previewed: &WorktreeIdentity) -> Result<(), RemovalFailure> {
+    let is_unchanged =
+        WorktreeIdentity::of(path).is_ok_and(|current| current.is_same_folder_as(previewed));
+    if is_unchanged {
+        return Ok(());
+    }
+    Err(RemovalFailure::ChangedSincePreview(path.to_path_buf()))
 }
 
 fn refuse(failure: &RemovalFailure) -> u8 {
@@ -172,7 +252,10 @@ fn resolve_path(
     }
 }
 
-fn build_preview(prepared: &PreparedRemoval) -> Result<Preview, ToolError> {
+fn build_preview(
+    prepared: &PreparedRemoval,
+    kept: Option<KeptWorktree>,
+) -> Result<Preview, ToolError> {
     let removal = &prepared.removal;
     let scope = prepared.scope();
     let work = count_unsaved_work(removal)?;
@@ -184,6 +267,7 @@ fn build_preview(prepared: &PreparedRemoval) -> Result<Preview, ToolError> {
         in_use: find_foreign_processes(&removal.path, scope.as_ref(), Requester::Terminal),
         uncommitted_changes: work.uncommitted_changes,
         unreachable_commits: work.unreachable_commits,
+        kept,
     })
 }
 
@@ -198,11 +282,12 @@ fn render_preview(preview: &Preview) -> String {
     let branch = preview.branch.as_deref().unwrap_or(DETACHED_HEAD_LABEL);
     let instance = preview.instance_name.as_deref().unwrap_or(NOT_REGISTERED);
     format!(
-        "worktree:             {}\nbranch:               {branch}\ninstance:             {instance}\nprocesses to stop:    {}\nother processes here: {} (left running)\n{}uncommitted changes:  {}\ncommits found nowhere else: {}\n{IGNORED_FILES_WARNING}\n",
+        "worktree:             {}\nbranch:               {branch}\ninstance:             {instance}\nprocesses to stop:    {}\nother processes here: {} (left running)\n{}{}uncommitted changes:  {}\ncommits found nowhere else: {}\n{IGNORED_FILES_WARNING}\n",
         preview.path.display(),
         listed_or_none(&preview.processes.targets),
         listed_or_none(&preview.processes.others),
         in_use_line(&preview.in_use),
+        kept_line(preview.kept.as_ref()),
         preview.uncommitted_changes,
         preview.unreachable_commits,
     )
@@ -215,6 +300,16 @@ fn in_use_line(in_use: &[ProcessSummary]) -> String {
     format!(
         "In use (blocks removal without --force): {}\n",
         join_summaries(in_use)
+    )
+}
+
+fn kept_line(kept: Option<&KeptWorktree>) -> String {
+    let Some(kept) = kept else {
+        return String::new();
+    };
+    format!(
+        "Claude Code asked to remove it on {}: {}\n",
+        kept.date, kept.reason
     )
 }
 
@@ -294,6 +389,7 @@ mod tests {
             in_use: Vec::new(),
             uncommitted_changes: 0,
             unreachable_commits: 0,
+            kept: None,
         }
     }
 
@@ -376,6 +472,70 @@ mod tests {
             Some(exit_code::ERROR)
         );
         assert_eq!(refusal_without_force(&in_use_by_claude(), true), None);
+    }
+
+    #[test]
+    fn should_say_when_claude_code_asked_to_remove_the_worktree() {
+        let mut kept = preview();
+        kept.kept = Some(KeptWorktree {
+            path: PathBuf::from("/wt/app/feat"),
+            reason: "in use by 12 (node)".to_owned(),
+            date: "2026-11-16".to_owned(),
+        });
+
+        let text = render_preview(&kept);
+
+        assert!(
+            text.contains("Claude Code asked to remove it on 2026-11-16: in use by 12 (node)\n")
+        );
+        assert!(!render_preview(&preview()).contains("Claude Code asked"));
+    }
+
+    fn worktree_at(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join(".git"), "gitdir: x").unwrap();
+    }
+
+    #[test]
+    fn should_accept_the_folder_that_was_shown() {
+        let directory = tempfile::tempdir().unwrap();
+        worktree_at(directory.path());
+        let shown = WorktreeIdentity::of(directory.path()).unwrap();
+
+        assert!(ensure_unchanged(directory.path(), &shown).is_ok());
+    }
+
+    #[test]
+    fn should_refuse_when_another_folder_took_the_place_of_the_one_shown() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("feat");
+        worktree_at(&path);
+        let shown = WorktreeIdentity::of(&path).unwrap();
+        std::fs::rename(&path, directory.path().join("feat-old")).unwrap();
+        worktree_at(&path);
+
+        let result = ensure_unchanged(&path, &shown);
+
+        assert!(matches!(
+            result,
+            Err(RemovalFailure::ChangedSincePreview(_))
+        ));
+    }
+
+    #[test]
+    fn should_refuse_when_the_folder_that_was_shown_is_gone() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("feat");
+        worktree_at(&path);
+        let shown = WorktreeIdentity::of(&path).unwrap();
+        std::fs::remove_dir_all(&path).unwrap();
+
+        let result = ensure_unchanged(&path, &shown);
+
+        assert!(matches!(
+            result,
+            Err(RemovalFailure::ChangedSincePreview(_))
+        ));
     }
 
     #[test]
