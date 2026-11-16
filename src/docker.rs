@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::deadline::{BudgetExhausted, Deadline, has_run_out, timeout_within};
 use crate::process::{kill_process_group, next_poll_delay, spawn_with_retry};
 
 /// The compose project name every probe uses, so implicit volume and network
@@ -61,6 +62,9 @@ pub enum DockerError {
         /// The call whose output was unreadable.
         stage: &'static str,
     },
+    /// The time budget of the command ran out.
+    #[error(transparent)]
+    Budget(#[from] BudgetExhausted),
 }
 
 impl DockerError {
@@ -97,6 +101,7 @@ pub struct DockerCompose {
     program: OsString,
     working_directory: PathBuf,
     timeout: Duration,
+    deadline: Option<Deadline>,
 }
 
 impl DockerCompose {
@@ -111,7 +116,16 @@ impl DockerCompose {
             program: program.into(),
             working_directory: working_directory.to_path_buf(),
             timeout,
+            deadline: None,
         }
+    }
+
+    /// Clamps the timeout of every call to what is left of `deadline`, and
+    /// fails with [`DockerError::Budget`] when nothing is left.
+    #[must_use]
+    pub const fn with_deadline(mut self, deadline: Option<Deadline>) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     fn compose_command(
@@ -145,7 +159,13 @@ impl DockerCompose {
 
     fn run(&self, command: Command) -> Result<String, DockerError> {
         let program = self.program.to_string_lossy().into_owned();
-        let output = run_with_timeout(command, self.timeout, &program)?;
+        let timeout = timeout_within(self.deadline, self.timeout)?;
+        let output = run_with_timeout(command, timeout, &program).map_err(|error| match error {
+            DockerError::TimedOut { .. } if has_run_out(self.deadline) => {
+                DockerError::Budget(BudgetExhausted)
+            }
+            other => other,
+        })?;
         if output.success {
             return Ok(output.stdout);
         }
@@ -476,5 +496,49 @@ mod tests {
 
         assert!(matches!(error, DockerError::UnexpectedOutput { .. }));
         assert!(!error.to_string().contains("not-json"));
+    }
+
+    #[test]
+    fn should_fail_with_the_budget_without_running_docker_when_the_deadline_is_exhausted() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("ran");
+        let program = script(directory.path(), &format!("touch {}", marker.display()));
+        let deadline = Deadline::starting_now(Duration::ZERO);
+
+        let error = docker(&program, directory.path(), TEST_TIMEOUT)
+            .with_deadline(Some(deadline))
+            .variables(&[])
+            .unwrap_err();
+
+        assert!(matches!(error, DockerError::Budget(_)));
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn should_fail_with_the_budget_and_not_the_timeout_when_the_deadline_cuts_the_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = script(directory.path(), "sleep 30");
+        let deadline = Deadline::starting_now(Duration::from_millis(300));
+
+        let error = docker(&program, directory.path(), TEST_TIMEOUT)
+            .with_deadline(Some(deadline))
+            .variables(&[])
+            .unwrap_err();
+
+        assert!(matches!(error, DockerError::Budget(_)));
+    }
+
+    #[test]
+    fn should_keep_the_own_timeout_when_it_is_shorter_than_what_the_deadline_leaves() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = script(directory.path(), "sleep 30");
+        let deadline = Deadline::starting_now(Duration::from_secs(60));
+
+        let error = docker(&program, directory.path(), Duration::from_millis(300))
+            .with_deadline(Some(deadline))
+            .variables(&[])
+            .unwrap_err();
+
+        assert!(matches!(error, DockerError::TimedOut { .. }));
     }
 }

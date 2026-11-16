@@ -32,6 +32,8 @@
 # when set, one compose project name per line, else nothing. It fails with the
 # same name as the other `docker ps` call, `docker_ps`.
 # `up`, `down`, `rm` and `volume rm` exit 0 after logging.
+# When $DOCKER_FAKE_SLEEP is set (seconds, decimals allowed), every `config`
+# call sleeps that long before it answers.
 # `compose -p <name> ... config --format json` (without --no-env-resolution)
 # answers the config fixture with `devslot-probe` replaced by <name>, or the file
 # $DOCKER_FAKE_MODEL when set (a model that only the real resolution, with .env
@@ -97,6 +99,10 @@ if [ "$subcommand" != "config" ] && [ -n "${DOCKER_FAKE_LOG:-}" ]; then
     logged_environment="$logged_environment$logged_name=$logged_value "
   done
   echo "COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-} $logged_environment$*" >>"$DOCKER_FAKE_LOG"
+fi
+
+if [ "$subcommand" = "config" ] && [ -n "${DOCKER_FAKE_SLEEP:-}" ]; then
+  sleep "$DOCKER_FAKE_SLEEP"
 fi
 
 subcommand_word=$(echo "$subcommand" | tr ' ' _)

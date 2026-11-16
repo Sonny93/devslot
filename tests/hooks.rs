@@ -8,6 +8,7 @@ mod support;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use support::{FAKE_ENV, Machine, Project, Run, TEST_SLOTS};
@@ -801,4 +802,80 @@ fn should_exit_2_when_the_worktree_hook_input_is_invalid() {
 
     assert_eq!(create.status, 2, "{}", create.stderr);
     assert_eq!(remove.status, 2, "{}", remove.stderr);
+}
+
+const HOOK_BUDGET_CEILING: Duration = Duration::from_secs(19);
+const SLOW_PROBE_SECONDS: &str = "3.0";
+
+fn hold_registry_lock(machine: &Machine) -> std::fs::File {
+    let path = machine.lock_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .unwrap();
+    file.lock().unwrap();
+    file
+}
+
+fn timed_pre_tool_use(project: &Project, environment: &[(&str, &str)]) -> (Run, Duration) {
+    let started = Instant::now();
+    let run = pre_tool_use(project, Some("ls"), environment);
+    (run, started.elapsed())
+}
+
+#[test]
+fn should_exit_0_silently_and_stay_silent_when_the_registry_lock_stays_taken() {
+    let project = git_project();
+    project.run(&["run", "--", "true"]);
+    project.write(".env", FAKE_ENV);
+    let lock = hold_registry_lock(project.machine());
+
+    let (first, elapsed) = timed_pre_tool_use(&project, &[]);
+    drop(lock);
+    let second = pre_tool_use(&project, Some("ls"), &[]);
+
+    assert_eq!(
+        (first.status, first.stdout.as_str()),
+        (0, ""),
+        "{}",
+        first.stderr
+    );
+    assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+    assert_eq!(
+        (second.status, second.stdout.as_str()),
+        (0, ""),
+        "{}",
+        second.stderr
+    );
+    assert!(!project.read(".env").contains(BLOCK_START));
+}
+
+#[test]
+fn should_exit_0_silently_under_the_kill_delay_when_a_slow_docker_and_a_taken_lock_use_the_budget()
+{
+    let project = git_project();
+    let slow = [("DOCKER_FAKE_SLEEP", SLOW_PROBE_SECONDS)];
+    let lock = hold_registry_lock(project.machine());
+
+    let (first, elapsed) = timed_pre_tool_use(&project, &slow);
+    drop(lock);
+    let second = pre_tool_use(&project, Some("ls"), &[]);
+
+    assert_eq!(
+        (first.status, first.stdout.as_str()),
+        (0, ""),
+        "{}",
+        first.stderr
+    );
+    assert!(elapsed < HOOK_BUDGET_CEILING, "{elapsed:?}");
+    assert_eq!(
+        (second.status, second.stdout.as_str()),
+        (0, ""),
+        "{}",
+        second.stderr
+    );
+    assert_eq!(project.machine().instance_names(), Vec::<String>::new());
 }

@@ -246,7 +246,7 @@ fn runner_error(error: DockerError, name: &'static str) -> RunnerError {
             RunnerError::Unavailable { program, reason }
         }
         DockerError::TimedOut { program, seconds } => RunnerError::TimedOut { program, seconds },
-        DockerError::Rejected => RunnerError::Failed {
+        DockerError::Rejected | DockerError::Budget(_) => RunnerError::Failed {
             command: name,
             code: None,
         },

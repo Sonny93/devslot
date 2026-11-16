@@ -16,16 +16,18 @@ use crate::commands::registering::{
     LOCK_TIMEOUT, announcement_lines, refusal_text, register_checkout_within,
 };
 use crate::compose::selection::{DevComposeSelection, select_dev_compose};
+use crate::deadline::{BudgetExhausted, Deadline};
 use crate::ensure_cache::{
-    CacheEntry, Fingerprint, Flight, entry_path, read_entry, remove_entry, try_take_flight,
-    write_entry,
+    CacheEntry, Fingerprint, Flight, entry_path, locate_entry_path, read_entry,
+    remove_budget_entry, remove_entry, try_take_flight, write_entry,
 };
 use crate::env_sync::{BlockTarget, EnvSyncError, expected_text, write_block, write_blockers};
 use crate::error::ToolError;
 use crate::global_config::{GlobalConfig, effective_write_enabled, home_from_environment};
 use crate::project::env_file::{EnvContent, read_env, remove_temp_files_older_than};
 use crate::project_config::ProjectConfig;
-use crate::registration::{Intent, Refusal, RegistrationOutcome};
+use crate::registration::{Intent, Refusal, RegistrationOutcome, lock_wait};
+use crate::registry::RegistryError;
 use crate::registry::record::InstanceRecord;
 use crate::registry::store::RegistryStore;
 
@@ -108,6 +110,68 @@ fn print_lines(lines: &[String]) {
 /// Makes sure the checkout that holds `directory` is registered and its block
 /// is current, and returns what happened instead of printing it.
 pub fn ensure_directory(directory: &Path, style: Style) -> Result<EnsureResult, ToolError> {
+    ensure_directory_within(directory, style, None)
+}
+
+/// Like [`ensure_directory`], for a caller that is killed when its time is up.
+/// The git calls, the compose probes and the wait for the registry lock stop
+/// at `deadline`; the work under the lock is never cut short. A run that runs
+/// out of budget is [`EnsureResult::Silent`]: it is remembered in the cache of
+/// the checkout when the checkout is known by then, so the next calls do not
+/// pay the same time again.
+pub fn ensure_directory_within(
+    directory: &Path,
+    style: Style,
+    deadline: Option<Deadline>,
+) -> Result<EnsureResult, ToolError> {
+    match ensure_checkout(directory, style, deadline) {
+        Err(error) if error.is_budget_exhausted() => Ok(EnsureResult::Silent),
+        other => other,
+    }
+}
+
+/// The checkout of `directory`, or `None` when an earlier run ran out of budget
+/// locating it and its entry still silences. Under a deadline, a failure to
+/// locate in time is remembered by folder, since no checkout key exists yet.
+fn locate_checkout(
+    directory: &Path,
+    machine: &Machine,
+    deadline: Option<Deadline>,
+) -> Result<Option<Checkout>, ToolError> {
+    let Some(deadline) = deadline else {
+        return Ok(Some(Checkout::locate(directory)?));
+    };
+    let file = locate_entry_path(machine.paths.state_directory(), directory);
+    let previous = read_entry(&file);
+    let silenced = previous
+        .as_ref()
+        .is_some_and(|entry| entry.silences(&Fingerprint::none(), SystemTime::now()));
+    if silenced {
+        return Ok(None);
+    }
+    match Checkout::locate_within(directory, deadline) {
+        Ok(checkout) => {
+            remove_entry(&file);
+            Ok(Some(checkout))
+        }
+        Err(error @ CheckoutError::Budget(_)) => {
+            let entry = CacheEntry::budget_exhaustion(
+                Fingerprint::none(),
+                SystemTime::now(),
+                previous.as_ref(),
+            );
+            let _ = write_entry(&file, &entry);
+            Err(error.into())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn ensure_checkout(
+    directory: &Path,
+    style: Style,
+    deadline: Option<Deadline>,
+) -> Result<EnsureResult, ToolError> {
     let machine = Machine::from_process()?;
     let global = GlobalConfig::load(&machine.paths.config_file)?;
     let home = home_from_environment();
@@ -120,7 +184,9 @@ pub fn ensure_directory(directory: &Path, style: Style) -> Result<EnsureResult, 
     if !global.auto.covers(&directory, home.as_deref()) {
         return Ok(EnsureResult::Silent);
     }
-    let checkout = Checkout::locate(&directory)?;
+    let Some(checkout) = locate_checkout(&directory, &machine, deadline)? else {
+        return Ok(EnsureResult::Silent);
+    };
     if !checkout.is_git || !global.auto.covers(&checkout.root, home.as_deref()) {
         return Ok(EnsureResult::Silent);
     }
@@ -134,29 +200,47 @@ pub fn ensure_directory(directory: &Path, style: Style) -> Result<EnsureResult, 
         return Ok(EnsureResult::Silent);
     };
     match registry.find(&checkout.root) {
-        Some(instance) => {
-            ensure_registered(&checkout, &machine, &global, (instance, dev_file), style)
-        }
-        None => ensure_unregistered(&checkout, &machine, &global, dev_file, style),
+        Some(instance) => ensure_registered(
+            (&checkout, &machine, &global),
+            (instance, dev_file),
+            (style, deadline),
+        ),
+        None => ensure_unregistered((&checkout, &machine, &global), dev_file, (style, deadline)),
     }
 }
 
 fn ensure_registered(
-    checkout: &Checkout,
-    machine: &Machine,
-    global: &GlobalConfig,
+    (checkout, machine, global): (&Checkout, &Machine, &GlobalConfig),
     (instance, dev_file): (&InstanceRecord, &str),
-    style: Style,
+    (style, deadline): (Style, Option<Deadline>),
 ) -> Result<EnsureResult, ToolError> {
     remove_temp_files_older_than(&checkout.root, STALE_TEMP_AGE).map_err(EnvSyncError::from)?;
     let config = ProjectConfig::load(&checkout.root)?;
     if !effective_write_enabled(&config, global) || is_env_current(checkout, instance, &config)? {
+        remove_budget_entry(&entry_path(machine.paths.state_directory(), &checkout.root));
         return Ok(EnsureResult::Silent);
     }
     let cache = RefusalCache::of(machine, checkout, dev_file);
     if cache.is_silent() {
         return Ok(EnsureResult::Silent);
     }
+    let flight = try_take_flight(machine.paths.state_directory(), &checkout.root);
+    if matches!(flight, Flight::Busy) {
+        return Ok(EnsureResult::Silent);
+    }
+    let result = write_registered(
+        (checkout, machine, global),
+        (instance, &cache),
+        (style, deadline),
+    );
+    cache.absorb_budget(result)
+}
+
+fn write_registered(
+    (checkout, machine, global): (&Checkout, &Machine, &GlobalConfig),
+    (instance, cache): (&InstanceRecord, &RefusalCache),
+    (style, deadline): (Style, Option<Deadline>),
+) -> Result<EnsureResult, ToolError> {
     let blockers = check_before_writing(checkout)?;
     if !blockers.is_empty() {
         return Ok(cache.refuse(
@@ -170,12 +254,12 @@ fn ensure_registered(
         checkout,
         store: &machine.store,
         global,
-        lock_timeout: LOCK_TIMEOUT,
+        lock_timeout: lock_wait(LOCK_TIMEOUT, deadline)?,
     });
-    let outcome = match written {
+    let outcome = match written.map_err(|error| lock_timeout_as_budget(error, deadline)) {
         Ok(outcome) => outcome,
         Err(error) => {
-            return refuse_or_fail(&error, &cache, (machine, style)).ok_or(error);
+            return refuse_or_fail(&error, cache, (machine, style)).ok_or(error);
         }
     };
     cache.clear();
@@ -186,6 +270,17 @@ fn ensure_registered(
             lines,
         },
     })
+}
+
+/// With a deadline, a registry lock that stayed taken is a budget that ran
+/// out: the lock wait was shortened to fit it.
+fn lock_timeout_as_budget(error: ToolError, deadline: Option<Deadline>) -> ToolError {
+    match error {
+        ToolError::Registry(RegistryError::LockTimeout { .. }) if deadline.is_some() => {
+            ToolError::Budget(BudgetExhausted)
+        }
+        other => other,
+    }
 }
 
 /// The errors that forbid writing `.env`, found without the registry lock:
@@ -248,11 +343,9 @@ pub fn write_if_registered(write: &EnsureWrite<'_>) -> Result<EnsureOutcome, Too
 }
 
 fn ensure_unregistered(
-    checkout: &Checkout,
-    machine: &Machine,
-    global: &GlobalConfig,
+    (checkout, machine, global): (&Checkout, &Machine, &GlobalConfig),
     dev_file: &str,
-    style: Style,
+    (style, deadline): (Style, Option<Deadline>),
 ) -> Result<EnsureResult, ToolError> {
     let cache = RefusalCache::of(machine, checkout, dev_file);
     if cache.is_silent() {
@@ -262,8 +355,22 @@ fn ensure_unregistered(
     if matches!(flight, Flight::Busy) {
         return Ok(EnsureResult::Silent);
     }
-    let outcome =
-        register_checkout_within(checkout, machine, global, Intent::Automatic, PROBE_TIMEOUT);
+    let outcome = register_checkout_within(
+        checkout,
+        machine,
+        global,
+        Intent::Automatic,
+        (PROBE_TIMEOUT, deadline),
+    )
+    .map_err(|error| lock_timeout_as_budget(error, deadline));
+    cache.absorb_budget(registration_result(outcome, &cache, (machine, style)))
+}
+
+fn registration_result(
+    outcome: Result<RegistrationOutcome, ToolError>,
+    cache: &RefusalCache,
+    (machine, style): (&Machine, Style),
+) -> Result<EnsureResult, ToolError> {
     match outcome {
         Ok(RegistrationOutcome::Registered(registration)) => {
             cache.clear();
@@ -280,11 +387,11 @@ fn ensure_unregistered(
         Ok(RegistrationOutcome::Refused(refusal)) => {
             Ok(cache.refuse(&refusal, machine, style, UNREGISTERED_CLOSING_LINE))
         }
-        Err(error @ ToolError::Docker(_)) => {
+        Err(error @ ToolError::Docker(_)) if !error.is_budget_exhausted() => {
             cache.remember_docker_failure();
             Err(error)
         }
-        Err(error) => refuse_or_fail(&error, &cache, (machine, style)).ok_or(error),
+        Err(error) => refuse_or_fail(&error, cache, (machine, style)).ok_or(error),
     }
 }
 
@@ -362,6 +469,30 @@ impl RefusalCache {
         }
     }
 
+    fn remember_budget_exhaustion(&self) {
+        let previous = read_entry(&self.file);
+        self.save(&CacheEntry::budget_exhaustion(
+            self.fingerprint.clone(),
+            SystemTime::now(),
+            previous.as_ref(),
+        ));
+    }
+
+    /// A run that ran out of budget is remembered and silent; any other result
+    /// goes through.
+    fn absorb_budget(
+        &self,
+        result: Result<EnsureResult, ToolError>,
+    ) -> Result<EnsureResult, ToolError> {
+        match result {
+            Err(error) if error.is_budget_exhausted() => {
+                self.remember_budget_exhaustion();
+                Ok(EnsureResult::Silent)
+            }
+            other => other,
+        }
+    }
+
     fn remember_docker_failure(&self) {
         self.save(&CacheEntry::docker_failure(
             self.fingerprint.clone(),
@@ -389,7 +520,7 @@ fn depends_on_other_checkouts(refusal: &Refusal) -> bool {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use pretty_assertions::assert_eq;
 
@@ -399,6 +530,7 @@ mod tests {
     use crate::compose::probe::testing::FakeComposeCli;
     use crate::paths::{DevslotPaths, PathVariables};
     use crate::registration::{RegistrationContext, register};
+    use crate::registry::lock::RegistryLock;
     use crate::registry::record::RegistryChange;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
@@ -429,15 +561,43 @@ mod tests {
             }
         }
 
+        fn paths(&self) -> DevslotPaths {
+            DevslotPaths::from_variables(&PathVariables {
+                config_home: Some(OsString::from(self.state.path().join("config"))),
+                state_home: Some(OsString::from(self.state.path().join("state"))),
+                home: None,
+            })
+            .unwrap()
+        }
+
         fn store(&self) -> RegistryStore {
-            RegistryStore::new(
-                DevslotPaths::from_variables(&PathVariables {
-                    config_home: Some(OsString::from(self.state.path().join("config"))),
-                    state_home: Some(OsString::from(self.state.path().join("state"))),
-                    home: None,
-                })
-                .unwrap(),
+            RegistryStore::new(self.paths())
+        }
+
+        fn entry_file(&self, root: &Path) -> PathBuf {
+            entry_path(self.paths().state_directory(), root)
+        }
+
+        fn budget_streak(&self) -> Option<u32> {
+            read_entry(&self.entry_file(&self.checkout().root))?.budget_streak
+        }
+
+        fn ensure_registered_within(&self, deadline: Deadline) -> EnsureResult {
+            let machine = Machine {
+                paths: self.paths(),
+                store: self.store(),
+            };
+            let instance = self.store().read().unwrap().instances[0].clone();
+            ensure_registered(
+                (&self.checkout(), &machine, &self.global),
+                (&instance, "dev.compose.yml"),
+                (Style { color: false }, Some(deadline)),
             )
+            .unwrap()
+        }
+
+        fn make_env_stale(&self, content: &str) {
+            std::fs::write(self.project.path().join(".env"), content).unwrap();
         }
 
         fn checkout(&self) -> Checkout {
@@ -453,6 +613,7 @@ mod tests {
                 global: &self.global,
                 probe: &AllFree,
                 lock_timeout: TIMEOUT,
+                deadline: None,
                 intent: Intent::Explicit,
             })
             .unwrap();
@@ -595,5 +756,183 @@ mod tests {
                 capacity: 1
             }
         )));
+    }
+
+    #[test]
+    fn should_stay_out_of_the_locked_section_and_remember_the_budget_when_no_time_is_left_for_the_lock()
+     {
+        let fixture = Fixture::new();
+        fixture.register();
+        fixture.make_env_stale("A=1\n");
+        let neighbour = fixture.entry_file(Path::new("/work/neighbour"));
+        write_entry(
+            &neighbour,
+            &CacheEntry::refusal(Fingerprint::of(
+                fixture.project.path(),
+                None,
+                "dev.compose.yml",
+            )),
+        )
+        .unwrap();
+        let _held = RegistryLock::acquire(&fixture.paths().lock_file, TIMEOUT).unwrap();
+        let started = std::time::Instant::now();
+
+        let result =
+            fixture.ensure_registered_within(Deadline::starting_now(Duration::from_millis(500)));
+
+        assert!(matches!(result, EnsureResult::Silent));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(fixture.budget_streak(), Some(1));
+        assert_eq!(fixture.env_text(), "A=1\n");
+        assert!(read_entry(&neighbour).is_some());
+    }
+
+    #[test]
+    fn should_give_up_the_wait_for_the_lock_within_the_budget_and_remember_it() {
+        let fixture = Fixture::new();
+        fixture.register();
+        fixture.make_env_stale("A=1\n");
+        let _held = RegistryLock::acquire(&fixture.paths().lock_file, TIMEOUT).unwrap();
+        let started = std::time::Instant::now();
+
+        let result =
+            fixture.ensure_registered_within(Deadline::starting_now(Duration::from_secs(2)));
+
+        assert!(matches!(result, EnsureResult::Silent));
+        assert!(started.elapsed() < LOCK_TIMEOUT);
+        assert_eq!(fixture.budget_streak(), Some(1));
+    }
+
+    #[test]
+    fn should_go_on_counting_the_streak_when_the_checkout_changed_and_the_budget_ran_out_again() {
+        let fixture = Fixture::new();
+        fixture.register();
+        fixture.make_env_stale("A=1\n");
+        let _held = RegistryLock::acquire(&fixture.paths().lock_file, TIMEOUT).unwrap();
+        let exhausted = Duration::from_millis(500);
+        fixture.ensure_registered_within(Deadline::starting_now(exhausted));
+
+        fixture.make_env_stale("A=22\n");
+        fixture.ensure_registered_within(Deadline::starting_now(exhausted));
+
+        assert_eq!(fixture.budget_streak(), Some(2));
+    }
+
+    #[test]
+    fn should_stay_silent_without_trying_again_while_the_budget_entry_lasts() {
+        let fixture = Fixture::new();
+        fixture.register();
+        fixture.make_env_stale("A=1\n");
+        let held = RegistryLock::acquire(&fixture.paths().lock_file, TIMEOUT).unwrap();
+        fixture.ensure_registered_within(Deadline::starting_now(Duration::from_millis(500)));
+        drop(held);
+
+        let result =
+            fixture.ensure_registered_within(Deadline::starting_now(Duration::from_secs(15)));
+
+        assert!(matches!(result, EnsureResult::Silent));
+        assert_eq!(fixture.env_text(), "A=1\n");
+    }
+
+    #[test]
+    fn should_forget_the_budget_entry_when_a_later_run_writes_the_block() {
+        let fixture = Fixture::new();
+        fixture.register();
+        fixture.make_env_stale("A=1\n");
+        let held = RegistryLock::acquire(&fixture.paths().lock_file, TIMEOUT).unwrap();
+        fixture.ensure_registered_within(Deadline::starting_now(Duration::from_millis(500)));
+        drop(held);
+        fixture.make_env_stale("A=22\n");
+
+        let result =
+            fixture.ensure_registered_within(Deadline::starting_now(Duration::from_secs(15)));
+
+        assert!(matches!(result, EnsureResult::Done { .. }));
+        assert_eq!(fixture.budget_streak(), None);
+        assert!(fixture.env_text().contains("COMPOSE_PROJECT_NAME="));
+    }
+
+    #[test]
+    fn should_forget_the_budget_entry_when_the_block_is_current_again() {
+        let fixture = Fixture::new();
+        fixture.register();
+        let current = fixture.env_text();
+        fixture.make_env_stale("A=1\n");
+        let held = RegistryLock::acquire(&fixture.paths().lock_file, TIMEOUT).unwrap();
+        fixture.ensure_registered_within(Deadline::starting_now(Duration::from_millis(500)));
+        drop(held);
+        fixture.make_env_stale(&current);
+
+        fixture.ensure_registered_within(Deadline::starting_now(Duration::from_secs(15)));
+
+        assert_eq!(fixture.budget_streak(), None);
+    }
+
+    #[test]
+    fn should_return_silent_at_once_when_another_hook_already_writes_the_block() {
+        let fixture = Fixture::new();
+        fixture.register();
+        fixture.make_env_stale("A=1\n");
+        let state = fixture.paths();
+        let _flight = try_take_flight(state.state_directory(), &fixture.checkout().root);
+        let _held = RegistryLock::acquire(&state.lock_file, TIMEOUT).unwrap();
+        let started = std::time::Instant::now();
+
+        let result =
+            fixture.ensure_registered_within(Deadline::starting_now(Duration::from_secs(15)));
+
+        assert!(matches!(result, EnsureResult::Silent));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(fixture.budget_streak(), None);
+        assert_eq!(fixture.env_text(), "A=1\n");
+    }
+
+    #[test]
+    fn should_stay_silent_without_locating_again_when_the_locate_stage_ran_out_of_budget() {
+        let fixture = Fixture::new();
+        let machine = Machine {
+            paths: fixture.paths(),
+            store: fixture.store(),
+        };
+        let directory = fixture.project.path();
+        let exhausted = Some(Deadline::starting_now(Duration::ZERO));
+        let first = locate_checkout(directory, &machine, exhausted);
+
+        let second = locate_checkout(
+            directory,
+            &machine,
+            Some(Deadline::starting_now(Duration::from_secs(60))),
+        );
+
+        assert!(first.unwrap_err().is_budget_exhausted());
+        assert!(second.unwrap().is_none());
+        let file = locate_entry_path(machine.paths.state_directory(), directory);
+        assert_eq!(read_entry(&file).unwrap().budget_streak, Some(1));
+    }
+
+    #[test]
+    fn should_forget_the_locate_entry_when_the_checkout_is_located_again() {
+        let fixture = Fixture::new();
+        let machine = Machine {
+            paths: fixture.paths(),
+            store: fixture.store(),
+        };
+        let directory = fixture.project.path();
+        let file = locate_entry_path(machine.paths.state_directory(), directory);
+        let expired = CacheEntry::budget_exhaustion(
+            Fingerprint::none(),
+            SystemTime::now() - Duration::from_secs(60),
+            None,
+        );
+        write_entry(&file, &expired).unwrap();
+
+        let located = locate_checkout(
+            directory,
+            &machine,
+            Some(Deadline::starting_now(Duration::from_secs(60))),
+        );
+
+        assert!(located.unwrap().is_some());
+        assert_eq!(read_entry(&file), None);
     }
 }

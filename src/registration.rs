@@ -13,6 +13,7 @@ use crate::analysis::{CheckoutAnalysis, ProbeScope};
 use crate::checkout::Checkout;
 use crate::checks::env_config::check_forced_port_conflicts;
 use crate::checks::finding::{Finding, Level};
+use crate::deadline::{BudgetExhausted, Deadline};
 use crate::docker::ComposeCli;
 use crate::env_sync::{BlockTarget, stale_block_warning, write_block, write_blockers};
 use crate::error::ToolError;
@@ -22,6 +23,26 @@ use crate::project::env_file::env_source;
 use crate::project_config::ProjectConfig;
 use crate::registry::record::{InstanceRecord, Registry, RegistryChange};
 use crate::registry::store::{LockedRegistry, RegistryStore};
+
+/// The longest a command under a deadline waits for the registry lock.
+pub const DEADLINE_LOCK_CAP: Duration = Duration::from_secs(3);
+/// What a command under a deadline keeps in reserve when it waits for the
+/// registry lock.
+pub const LOCK_MARGIN: Duration = Duration::from_secs(1);
+
+/// How long to wait for the registry lock: `default` without a deadline, with
+/// one at most [`DEADLINE_LOCK_CAP`] and never into the last [`LOCK_MARGIN`].
+pub fn lock_wait(
+    default: Duration,
+    deadline: Option<Deadline>,
+) -> Result<Duration, BudgetExhausted> {
+    let Some(deadline) = deadline else {
+        return Ok(default);
+    };
+    deadline
+        .clamp_leaving(DEADLINE_LOCK_CAP, LOCK_MARGIN)
+        .ok_or(BudgetExhausted)
+}
 
 /// Who asks for the registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,8 +66,11 @@ pub struct RegistrationContext<'a> {
     pub global: &'a GlobalConfig,
     /// Which ports are free on this machine.
     pub probe: &'a dyn PortProbe,
-    /// How long to wait for the registry lock.
+    /// How long to wait for the registry lock without a deadline.
     pub lock_timeout: Duration,
+    /// The deadline of the command, when it has one: it shortens the wait for
+    /// the lock, and nothing is checked once the lock is held.
+    pub deadline: Option<Deadline>,
     /// Who asks.
     pub intent: Intent,
 }
@@ -194,9 +218,10 @@ pub fn register(context: &RegistrationContext<'_>) -> Result<RegistrationOutcome
         analysis,
         is_writing,
     };
-    let allocated = context.store.locked(context.lock_timeout, |locked| {
-        register_locked(&pending, locked)
-    })?;
+    let lock_timeout = lock_wait(context.lock_timeout, context.deadline)?;
+    let allocated = context
+        .store
+        .locked(lock_timeout, |locked| register_locked(&pending, locked))?;
     Ok(match allocated {
         Allocated::Saved(saved) => RegistrationOutcome::Registered(Registration {
             instance: saved.instance,
@@ -409,6 +434,7 @@ mod tests {
             global,
             probe: &AllFree,
             lock_timeout: TIMEOUT,
+            deadline: None,
             intent,
         })
         .unwrap()

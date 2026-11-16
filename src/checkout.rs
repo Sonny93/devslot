@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::deadline::{BudgetExhausted, Deadline, timeout_within};
 use crate::instance_name::repository_name_from_common_dir;
 use crate::process::{CaptureFailure, CapturedOutput, capture_with_timeout};
 
@@ -51,6 +52,9 @@ pub enum CheckoutError {
         /// The first line git printed on stderr, or its exit status.
         reason: String,
     },
+    /// The time budget of the command ran out.
+    #[error(transparent)]
+    Budget(#[from] BudgetExhausted),
 }
 
 /// A folder that holds a working copy of the repo.
@@ -62,25 +66,38 @@ pub struct Checkout {
     pub is_git: bool,
     /// The main worktree, when it is a different folder than `root`.
     pub main_root: Option<PathBuf>,
+    deadline: Option<Deadline>,
 }
 
 impl Checkout {
     /// Finds the checkout that contains `directory`.
     pub fn locate(directory: &Path) -> Result<Self, CheckoutError> {
+        Self::locate_with(directory, None)
+    }
+
+    /// Like [`Checkout::locate`], and every git call of the checkout, now and
+    /// later, stops at `deadline` with [`CheckoutError::Budget`].
+    pub fn locate_within(directory: &Path, deadline: Deadline) -> Result<Self, CheckoutError> {
+        Self::locate_with(directory, Some(deadline))
+    }
+
+    fn locate_with(directory: &Path, deadline: Option<Deadline>) -> Result<Self, CheckoutError> {
         let canonical = canonicalize(directory)?;
-        let Some(top_level) = git_top_level(&canonical)? else {
+        let Some(top_level) = git_top_level(&canonical, deadline)? else {
             return Ok(Self {
                 root: canonical,
                 is_git: false,
                 main_root: None,
+                deadline,
             });
         };
         let root = canonicalize(&top_level)?;
-        let main_root = main_worktree(&root)?.filter(|main| main != &root);
+        let main_root = main_worktree(&root, deadline)?.filter(|main| main != &root);
         Ok(Self {
             root,
             is_git: true,
             main_root,
+            deadline,
         })
     }
 
@@ -93,6 +110,7 @@ impl Checkout {
         let output = run_git(
             &self.root,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            self.deadline,
         )?;
         if !output.status.success() {
             return Err(git_failure("rev-parse", &output));
@@ -106,7 +124,11 @@ impl Checkout {
     /// Whether git tracks `file`, given relative to the root. Only meaningful
     /// inside git.
     pub fn is_tracked(&self, file: &str) -> Result<bool, CheckoutError> {
-        let output = run_git(&self.root, &["ls-files", "--error-unmatch", "--", file])?;
+        let output = run_git(
+            &self.root,
+            &["ls-files", "--error-unmatch", "--", file],
+            self.deadline,
+        )?;
         match output.status.code() {
             Some(TRACKED_EXIT_CODE) => Ok(true),
             Some(NOT_TRACKED_EXIT_CODE) => Ok(false),
@@ -116,7 +138,11 @@ impl Checkout {
 
     /// Whether git ignores `.env` at the root. Only meaningful inside git.
     pub fn is_env_ignored(&self) -> Result<bool, CheckoutError> {
-        let output = run_git(&self.root, &["check-ignore", "-q", "--", ".env"])?;
+        let output = run_git(
+            &self.root,
+            &["check-ignore", "-q", "--", ".env"],
+            self.deadline,
+        )?;
         match output.status.code() {
             Some(IGNORED_EXIT_CODE) => Ok(true),
             Some(NOT_IGNORED_EXIT_CODE) => Ok(false),
@@ -139,8 +165,25 @@ fn canonicalize(path: &Path) -> Result<PathBuf, CheckoutError> {
         })
 }
 
-fn run_git(directory: &Path, arguments: &[&str]) -> Result<CapturedOutput, CheckoutError> {
-    run_git_within(directory, arguments, GIT_TIMEOUT)
+fn run_git(
+    directory: &Path,
+    arguments: &[&str],
+    deadline: Option<Deadline>,
+) -> Result<CapturedOutput, CheckoutError> {
+    let timeout = timeout_within(deadline, GIT_TIMEOUT)?;
+    run_git_within(directory, arguments, timeout)
+        .map_err(|error| timeout_as_budget(error, deadline))
+}
+
+/// Under a deadline, a git that timed out is a budget that ran out: the
+/// command must stop and not pay the same wait again and again.
+fn timeout_as_budget(error: CheckoutError, deadline: Option<Deadline>) -> CheckoutError {
+    match error {
+        CheckoutError::GitTimedOut { .. } if deadline.is_some() => {
+            CheckoutError::Budget(BudgetExhausted)
+        }
+        other => other,
+    }
 }
 
 /// Runs git in `directory` without the file system monitor, killed after
@@ -177,8 +220,11 @@ pub(crate) fn git_failure(command: &'static str, output: &CapturedOutput) -> Che
     CheckoutError::GitFailed { command, reason }
 }
 
-fn git_top_level(directory: &Path) -> Result<Option<PathBuf>, CheckoutError> {
-    let output = match run_git(directory, &["rev-parse", "--show-toplevel"]) {
+fn git_top_level(
+    directory: &Path,
+    deadline: Option<Deadline>,
+) -> Result<Option<PathBuf>, CheckoutError> {
+    let output = match run_git(directory, &["rev-parse", "--show-toplevel"], deadline) {
         Ok(output) => output,
         Err(CheckoutError::GitUnavailable(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(None);
@@ -195,8 +241,11 @@ fn git_top_level(directory: &Path) -> Result<Option<PathBuf>, CheckoutError> {
     Err(git_failure("rev-parse", &output))
 }
 
-fn main_worktree(root: &Path) -> Result<Option<PathBuf>, CheckoutError> {
-    let output = run_git(root, &["worktree", "list", "--porcelain"])?;
+fn main_worktree(
+    root: &Path,
+    deadline: Option<Deadline>,
+) -> Result<Option<PathBuf>, CheckoutError> {
+    let output = run_git(root, &["worktree", "list", "--porcelain"], deadline)?;
     if !output.status.success() {
         return Err(git_failure("worktree", &output));
     }
@@ -275,7 +324,8 @@ mod tests {
             Checkout {
                 root: directory.path().canonicalize().unwrap(),
                 is_git: false,
-                main_root: None
+                main_root: None,
+                deadline: None,
             }
         );
     }
@@ -408,5 +458,46 @@ mod tests {
         let checkout = Checkout::locate(repository.path()).unwrap();
 
         assert!(!checkout.is_tracked("devslot.local.toml").unwrap());
+    }
+
+    #[test]
+    fn should_see_a_git_timeout_as_the_budget_only_under_a_deadline() {
+        let timed_out = || CheckoutError::GitTimedOut { seconds: 10 };
+        let deadline = Some(Deadline::starting_now(Duration::from_secs(60)));
+
+        assert!(matches!(
+            timeout_as_budget(timed_out(), deadline),
+            CheckoutError::Budget(_)
+        ));
+        assert!(matches!(
+            timeout_as_budget(timed_out(), None),
+            CheckoutError::GitTimedOut { .. }
+        ));
+    }
+
+    #[test]
+    fn should_fail_with_the_budget_when_the_deadline_is_exhausted_before_git_runs() {
+        let repository = initialized_repository();
+        let deadline = Deadline::starting_now(Duration::ZERO);
+
+        let error = Checkout::locate_within(repository.path(), deadline).unwrap_err();
+
+        assert!(matches!(error, CheckoutError::Budget(_)));
+    }
+
+    #[test]
+    fn should_fail_with_the_budget_when_the_deadline_runs_out_after_the_checkout_was_located() {
+        let repository = initialized_repository();
+        let deadline = Deadline::starting_now(Duration::from_secs(60));
+        let checkout = Checkout::locate_within(repository.path(), deadline).unwrap();
+        let exhausted = Checkout {
+            deadline: Some(Deadline::starting_now(Duration::ZERO)),
+            ..checkout.clone()
+        };
+
+        let error = exhausted.is_env_ignored().unwrap_err();
+
+        assert!(matches!(error, CheckoutError::Budget(_)));
+        assert_eq!(checkout.main_root, None);
     }
 }

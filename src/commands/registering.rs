@@ -9,6 +9,7 @@ use crate::cli::exit_code;
 use crate::cli::render::render_findings;
 use crate::cli::style::Style;
 use crate::commands::machine::Machine;
+use crate::deadline::Deadline;
 use crate::docker::{DOCKER_TIMEOUT, DockerCompose, docker_program};
 use crate::error::ToolError;
 use crate::global_config::GlobalConfig;
@@ -28,18 +29,20 @@ pub fn register_checkout(
     global: &GlobalConfig,
     intent: Intent,
 ) -> Result<RegistrationOutcome, ToolError> {
-    register_checkout_within(checkout, machine, global, intent, DOCKER_TIMEOUT)
+    register_checkout_within(checkout, machine, global, intent, (DOCKER_TIMEOUT, None))
 }
 
-/// Like [`register_checkout`], with `probe_timeout` for each compose probe.
+/// Like [`register_checkout`], with `probe_timeout` for each compose probe,
+/// both clamped to the `deadline` when there is one.
 pub fn register_checkout_within(
     checkout: &Checkout,
     machine: &Machine,
     global: &GlobalConfig,
     intent: Intent,
-    probe_timeout: Duration,
+    (probe_timeout, deadline): (Duration, Option<Deadline>),
 ) -> Result<RegistrationOutcome, ToolError> {
-    let compose = DockerCompose::new(docker_program(), &checkout.root, probe_timeout);
+    let compose =
+        DockerCompose::new(docker_program(), &checkout.root, probe_timeout).with_deadline(deadline);
     register(&RegistrationContext {
         checkout,
         compose: &compose,
@@ -47,6 +50,7 @@ pub fn register_checkout_within(
         global,
         probe: &SystemPortProbe,
         lock_timeout: LOCK_TIMEOUT,
+        deadline,
         intent,
     })
 }

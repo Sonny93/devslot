@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::checkout::CheckoutError;
 use crate::compose::runner::RunnerError;
+use crate::deadline::BudgetExhausted;
 use crate::docker::DockerError;
 use crate::env_sync::EnvSyncError;
 use crate::environment::EnvironmentError;
@@ -55,7 +56,23 @@ pub enum ToolError {
         /// The underlying error.
         source: io::Error,
     },
+    /// The time budget of the command ran out.
+    #[error(transparent)]
+    Budget(#[from] BudgetExhausted),
     /// The report could not be written.
     #[error("cannot write the report: {0}")]
     WriteReport(io::Error),
+}
+
+impl ToolError {
+    /// Whether the command stopped because its time budget ran out, whichever
+    /// step noticed it.
+    pub const fn is_budget_exhausted(&self) -> bool {
+        matches!(
+            self,
+            Self::Budget(_)
+                | Self::Checkout(CheckoutError::Budget(_))
+                | Self::Docker(DockerError::Budget(_))
+        )
+    }
 }

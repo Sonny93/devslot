@@ -4,21 +4,25 @@
 //! wrong becomes context for the agent, and the exit code is 0.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::command_guard::is_destructive_ds_command;
-use super::input::read_input;
+use super::input::{INPUT_TIMEOUT, read_input_within};
 use crate::cli::exit_code;
 use crate::cli::output::write_stdout;
 use crate::cli::style::Style;
-use crate::commands::ensure::{EnsureResult, ensure_directory};
+use crate::commands::ensure::{EnsureResult, ensure_directory_within};
+use crate::deadline::Deadline;
 use crate::error::ToolError;
 use crate::registry::record::InstanceRecord;
 
 const HOOK_EVENT_NAME: &str = "PreToolUse";
 pub(super) const DENY_REASON: &str = "ds rm, ds prune and ds worktree rm delete data, ds hook is run by Claude Code itself, and other agents work on this machine; ask the user to run it";
+/// Claude Code kills the hook after 20 seconds; the work stops before that.
+const HOOK_BUDGET: Duration = Duration::from_secs(15);
 const PLAIN_STYLE: Style = Style { color: false };
 
 #[derive(Debug, Deserialize)]
@@ -35,12 +39,16 @@ impl PreToolUseInput {
 }
 
 /// Reads the hook input from stdin and answers on stdout. Always returns 0.
+/// The whole run, the read of stdin included, has [`HOOK_BUDGET`]; a run that
+/// runs out of it says nothing and lets the agent's command go.
 pub fn run_pre_tool_use() -> u8 {
-    match read_input::<PreToolUseInput>(std::io::stdin()) {
+    let deadline = Deadline::starting_now(HOOK_BUDGET);
+    let input_timeout = deadline.clamp(INPUT_TIMEOUT).unwrap_or(Duration::ZERO);
+    match read_input_within::<PreToolUseInput>(std::io::stdin(), input_timeout) {
         Ok(input) => {
-            if let Some(answer) =
-                decide(&input, |directory| ensure_directory(directory, PLAIN_STYLE))
-            {
+            if let Some(answer) = decide(&input, |directory| {
+                ensure_directory_within(directory, PLAIN_STYLE, Some(deadline))
+            }) {
                 let _ = write_stdout(&answer);
             }
         }

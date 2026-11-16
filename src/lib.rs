@@ -16,6 +16,7 @@ pub mod checks;
 pub mod cli;
 pub mod commands;
 pub mod compose;
+pub mod deadline;
 pub mod discovery;
 pub mod docker;
 pub mod ensure_cache;
