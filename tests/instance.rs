@@ -561,7 +561,7 @@ fn should_not_warn_in_doctor_when_the_slot_geometry_is_unchanged() {
 }
 
 #[test]
-fn should_register_a_second_project_in_the_next_slot_with_the_same_machine() {
+fn should_register_a_second_project_in_another_slot_with_the_same_machine() {
     let machine = Machine::with_test_slots();
     let first = Project::from_scenario_on(&machine, "template");
     let second = Project::from_scenario_on(&machine, "my_links");
@@ -570,9 +570,9 @@ fn should_register_a_second_project_in_the_next_slot_with_the_same_machine() {
     let run = second.run_with(&["run", "--", "true"], &[]);
 
     assert_eq!(run.status, 0, "{}", run.stderr);
-    let slot_of =
-        |project: &Project| -> u32 { environment_of(project)["DEVSLOT_SLOT"].parse().unwrap() };
-    assert!(slot_of(&second) > slot_of(&first));
+    let (one, two) = (environment_of(&first), environment_of(&second));
+    assert_ne!(one["DEVSLOT_SLOT"], two["DEVSLOT_SLOT"]);
+    assert_ne!(one["PORT"], two["PORT"]);
 }
 
 #[test]
