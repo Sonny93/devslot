@@ -4,7 +4,7 @@ Run several instances of the same dev stack on one machine: each checkout or wor
 
 ## Status
 
-v1 is in development and nothing is released. Available commands: `ds doctor`, `ds up`, `ds down`, `ds run`, `ds env`, `ds info`, `ds ls`, `ds ensure`, `ds reset`, `ds rm`, `ds prune`, `ds worktree rm` and `ds hook` (called by the plugin). The Tunneler integration, shared services and background processes are planned after v1.
+v1 is in development and nothing is released.
 
 ## Why
 
@@ -16,7 +16,7 @@ v1 is in development and nothing is released. Available commands: `ds doctor`, `
 - Data isolation: a mistake lets one instance wipe or read another instance's database.
 - Secrets: devslot reads `.env` files that hold credentials, and its output is read by agents and can end up in transcripts or logs. No `.env` value is ever printed.
 - Untrusted checkouts: `ds doctor` and the automatic registration hook run on repos the user may not have reviewed (fresh clones, agent sessions). Reading a repo must never run code from it.
-- Other work on the machine: devslot never stops or removes containers, volumes or compose projects it did not create for the current checkout.
+- Other work on the machine: devslot never stops or removes containers, volumes or compose projects it did not create for the current checkout. Removing a worktree (`ds worktree rm`, the `WorktreeRemove` hook) acts on that worktree's instance, stops only its processes, and refuses while another session or program uses the worktree.
 
 **Non-goals.**
 - Production or remote deployment: devslot is a dev tool.
@@ -26,7 +26,7 @@ v1 is in development and nothing is released. Available commands: `ds doctor`, `
 
 **Hard constraints.**
 - A repo works the same with or without devslot: after a clone or a `ds rm`, the default ports work.
-- The only write in a project is a delimited block at the end of `.env` (plus creating `.env` when it is missing), announced with the file path. devslot refuses to write into a `.env` that git does not ignore.
+- The only write in a project is a delimited block at the end of `.env` (plus creating `.env` when it is missing), announced with the file path. devslot refuses to write into a `.env` that git does not ignore. The worktree hooks and `ds worktree rm` also create git worktrees (in the worktrees folder) and remove linked worktrees and their branches; a branch is deleted only when it is named like the worktree folder and merged.
 - One change to a project is recommended, never required: writing published ports as `${VAR:-default}`.
 - Integrations (Tunneler, proxies, process managers) are optional.
 
@@ -61,7 +61,7 @@ ds rm        # delete the instance's data, remove the block, opt the checkout ou
 
 ## How it works
 
-**Slots.** The machine has a range of ports (20000 to 29999 by default) cut into slots of 50. A checkout that is registered owns one slot: each port variable ds manages (`PORT`, the ports the compose file publishes, `VITE_HMR_PORT` when Vite is detected) gets a port inside it. The registry in `~/.local/state/devslot/registry.toml` keeps every instance of the machine, so two projects never collide.
+**Slots.** The machine has a range of ports (20000 to 29999 by default) cut into slots of 50. A checkout that is registered owns one slot: each port variable ds manages (`PORT` when `.env` or `.env.example` defines it, the ports the compose file publishes, `VITE_HMR_PORT` when Vite is detected, and the variables of `[ports] extra`) gets a port inside it. The registry in `~/.local/state/devslot/registry.toml` keeps every instance of the machine, so two projects never collide.
 
 **The `.env` block.** ds copies the values of the instance into a delimited block at the end of `.env`, so Compose, your app and your tests all read them, with or without `ds`:
 
@@ -84,7 +84,7 @@ DEVSLOT_SLOT=1
 
 **Opt-out.** `ds rm` records the checkout as opted out: the hooks leave it alone until an explicit `ds up` or `ds run` registers it again.
 
-To configure a project, see [Configuration](docs/configuration.md) and [Make a project work with devslot](docs/project-setup.md). The commands are listed in [Commands](docs/commands.md). Exit codes: 0 success, 1 a refusal or an error in the project, 2 the tool itself failed or invalid usage.
+To configure a project, see [Configuration](docs/configuration.md) and [Make a project work with devslot](docs/project-setup.md). The commands are listed in [Commands](docs/commands.md). Exit codes: 0 success, 1 a refusal or an error in the project, 2 the tool itself failed or invalid usage; `ds run`, and `ds up` with a `run` key, exit with the code of the command they run.
 
 ## Rules for agents
 
