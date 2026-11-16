@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use ignore::WalkBuilder;
 use serde::Deserialize;
 
+use crate::project::bounded_read::{BoundedRead, read_bounded};
+
 const NODE_MODULES: &str = "node_modules";
 const PACKAGE_MANIFEST: &str = "package.json";
 const VITE_PACKAGE: &str = "vite";
@@ -110,8 +112,10 @@ fn classify_manifest(absolute: &Path, relative: &Path, detection: &mut ViteDetec
 }
 
 fn read_manifest(path: &Path) -> Option<Manifest> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    let BoundedRead::Bytes(bytes) = read_bounded(path).ok()? else {
+        return None;
+    };
+    serde_json::from_slice(&bytes).ok()
 }
 
 impl Manifest {
@@ -139,8 +143,10 @@ fn first_number(range: &str) -> Option<u32> {
 
 /// Whether the config file mentions the HMR port variable.
 pub fn config_reads_hmr_port(path: &Path) -> bool {
-    std::fs::read(path)
-        .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(HMR_PORT_VARIABLE))
+    let Ok(BoundedRead::Bytes(bytes)) = read_bounded(path) else {
+        return false;
+    };
+    String::from_utf8_lossy(&bytes).contains(HMR_PORT_VARIABLE)
 }
 
 #[cfg(test)]
@@ -148,6 +154,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use crate::project::bounded_read::MAX_FILE_BYTES;
 
     fn write(root: &Path, relative: &str, content: &str) {
         let path = root.join(relative);
@@ -306,6 +313,33 @@ mod tests {
     fn should_not_detect_the_hmr_variable_when_the_config_ignores_it() {
         let root = tempfile::tempdir().unwrap();
         write(root.path(), "vite.config.ts", "export default {}");
+
+        assert!(!config_reads_hmr_port(&root.path().join("vite.config.ts")));
+    }
+
+    fn oversized_padding() -> String {
+        " ".repeat(usize::try_from(MAX_FILE_BYTES).unwrap() + 1)
+    }
+
+    #[test]
+    fn should_not_count_a_package_json_larger_than_the_limit_as_a_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = format!(
+            r#"{{"devDependencies": {{"vite": "^8"}}}}{}"#,
+            oversized_padding()
+        );
+        write(root.path(), "package.json", &manifest);
+
+        let detection = detect_vite(root.path());
+
+        assert_eq!(detection.manifests, Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn should_not_read_the_hmr_port_when_the_config_is_larger_than_the_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let config = format!("{HMR_PORT_VARIABLE}{}", oversized_padding());
+        write(root.path(), "vite.config.ts", &config);
 
         assert!(!config_reads_hmr_port(&root.path().join("vite.config.ts")));
     }
