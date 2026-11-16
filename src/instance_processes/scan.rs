@@ -82,9 +82,37 @@ pub fn scan(context: &ScanContext) -> Scan {
     found
 }
 
-/// Whether `pid` is a process to signal right now, by the same rules as [`scan`].
+/// Whether `pid` is a process to signal right now, with the answer [`scan`]
+/// gives for it but without listing the whole machine: the process must be a
+/// candidate and either belong to the instance itself or descend (through any
+/// chain of parents, candidates or not) from a candidate that does.
 pub fn is_target(context: &ScanContext, pid: i32) -> bool {
-    scan(context).targets.iter().any(|target| target.pid == pid)
+    let ancestry = Ancestry::of(context.root, context.own_pid);
+    if !is_candidate(context, &ancestry, pid) {
+        return false;
+    }
+    let inodes = listening_inodes(context);
+    belongs_to_instance(context, &inodes, pid)
+        || has_instance_ancestor(context, &ancestry, &inodes, pid)
+}
+
+fn has_instance_ancestor(
+    context: &ScanContext,
+    ancestry: &Ancestry,
+    inodes: &HashSet<u64>,
+    pid: i32,
+) -> bool {
+    let mut visited = HashSet::from([pid]);
+    let mut next = context.root.stat(pid).map(|stat| stat.parent);
+    while let Some(ancestor) = next.filter(|ancestor| *ancestor > 0 && visited.insert(*ancestor)) {
+        if is_candidate(context, ancestry, ancestor)
+            && belongs_to_instance(context, inodes, ancestor)
+        {
+            return true;
+        }
+        next = context.root.stat(ancestor).map(|stat| stat.parent);
+    }
+    false
 }
 
 fn listening_inodes(context: &ScanContext) -> HashSet<u64> {
@@ -402,5 +430,84 @@ mod tests {
 
         assert_eq!(found.targets, Vec::new());
         assert_eq!(found.others.len(), 1);
+    }
+
+    fn add_fake_tree(setup: &Setup) {
+        let inside = setup.fake.directory("work/feat");
+        let web = setup.fake.directory("work/feat/web");
+        let outside = setup.fake.directory("elsewhere");
+        let fake = &setup.fake;
+        fake.add_process(200, 1, 200, "just", &inside);
+        fake.set_environment(200, &[&marker()]);
+        fake.add_process(201, 200, 200, "node", &web);
+        fake.add_process(202, 201, 200, "esbuild", &inside);
+        fake.add_process(203, 200, 200, "ssh", &outside);
+        fake.add_process(204, 203, 200, "node", &inside);
+        fake.add_process(205, 1, 205, "node", &inside);
+        fake.add_listener(PORT, 777, "0A");
+        fake.add_socket(205, 777);
+        fake.add_process(206, 205, 205, "child", &inside);
+        fake.add_process(207, 1, 207, "other", &inside);
+        fake.add_process(208, 207, 207, "other-child", &inside);
+        fake.add_process(209, 1, 209, "root-owned", &inside);
+        fake.set_environment(209, &[&marker()]);
+        fake.set_uid(209, 0);
+        fake.add_process(210, 209, 209, "child-of-root-owned", &inside);
+        fake.add_process(211, 1, 211, "zombie", &inside);
+        fake.set_environment(211, &[&marker()]);
+        fake.set_state(211, 'Z');
+        fake.add_process(212, 211, 211, "child-of-zombie", &inside);
+        fake.add_process(213, 50, 50, "ds-sibling", &inside);
+        fake.set_environment(50, &[&marker()]);
+        fake.add_process(214, 1, 214, "connector", &inside);
+        fake.add_listener(PORT, 778, "01");
+        fake.add_socket(214, 778);
+        fake.add_process(215, 1, 215, "node", &setup.fake.directory("work/feat-2"));
+        fake.set_environment(215, &[&marker()]);
+        fake.add_process(216, 215, 215, "child", &inside);
+    }
+
+    #[test]
+    fn should_give_the_same_answer_per_pid_as_the_full_scan() {
+        let setup = setup();
+        add_fake_tree(&setup);
+        let root = setup.fake.root();
+        let context = ScanContext {
+            root: &root,
+            own_pid: OWN_PID,
+            own_uid: OWN_UID,
+            worktree: &setup.worktree,
+            scope: Some(&setup.scope),
+        };
+        let targets = setup.target_pids();
+
+        for pid in root.process_ids().into_iter().chain([999]) {
+            assert_eq!(
+                is_target(&context, pid),
+                targets.contains(&pid),
+                "pid {pid}"
+            );
+        }
+        assert_eq!(targets, vec![200, 201, 202, 204, 205, 206]);
+    }
+
+    #[test]
+    fn should_not_be_a_target_per_pid_without_a_registered_instance() {
+        let setup = setup();
+        add_fake_tree(&setup);
+        let root = setup.fake.root();
+        let context = ScanContext {
+            root: &root,
+            own_pid: OWN_PID,
+            own_uid: OWN_UID,
+            worktree: &setup.worktree,
+            scope: None,
+        };
+
+        assert!(
+            root.process_ids()
+                .into_iter()
+                .all(|pid| !is_target(&context, pid))
+        );
     }
 }
