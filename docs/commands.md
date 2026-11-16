@@ -26,7 +26,7 @@ Reference of the `ds` commands. `ds <command> --help` lists the options and the 
 - the worktree has uncommitted changes to tracked files (untracked files only give a warning: `ds: warning: <n> untracked file(s) in the worktree are not landed`);
 - the main checkout is not on the target branch, or is in the middle of a merge, rebase, cherry-pick, revert or bisect;
 - the base moved, that is the target is not an ancestor of the worktree's `HEAD`: run `git rebase <target>` in the worktree, resolve the conflicts, commit, then run `ds worktree land` again;
-- the branch adds a path that already exists in the main checkout, untracked or ignored (the message lists up to ten);
+- the branch adds a path that already exists in the main checkout, untracked or ignored, or a path below a file or symbolic link of the main checkout that its index does not hold as a file (the message lists up to ten);
 - git refuses the fast-forward.
 
 Refusals print `ds: error: <reason>` on stderr and exit 1. On success it prints `<target> moved from <old> to <new> (<n> commit(s))`, or `nothing to land: this branch is already at <target>` (exit 0). Exit codes: 0 success or nothing to land, 1 a refusal, 2 the tool itself failed (git unavailable or timed out) or invalid usage. See [Worktrees](worktrees.md#land-the-work-on-the-main-checkout).

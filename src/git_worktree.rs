@@ -26,6 +26,7 @@ const LOCKED_MARKER: &str = "locked";
 const UNTRACKED_PREFIX: &[u8] = b"?? ";
 const CONFIG_KEY_MISSING_EXIT_CODE: i32 = 1;
 const BASE_CONFIG_NAME: &str = "devslotBase";
+const FILE_ENTRY_MODES: [&[u8]; 3] = [b"100644", b"100755", b"120000"];
 const SHORT_COMMIT_LENGTH: &str = "--short=7";
 const OPERATION_MARKERS: [(&str, &str); 7] = [
     ("MERGE_HEAD", "a merge"),
@@ -507,6 +508,48 @@ pub fn added_paths(
         .filter(|name| !name.is_empty())
         .map(|name| PathBuf::from(OsStr::from_bytes(name)))
         .collect())
+}
+
+/// Whether the index of `checkout_root` holds `path` (relative to its root)
+/// as exactly one regular file or symlink entry: git then checks that file
+/// for local changes itself before replacing it. A folder, a missing path, a
+/// gitlink or a conflicted entry is not.
+pub fn is_tracked_file_in_index(checkout_root: &Path, path: &Path) -> Result<bool, CheckoutError> {
+    let output = run_git_within(
+        checkout_root,
+        [
+            OsStr::new("--literal-pathspecs"),
+            OsStr::new("ls-files"),
+            OsStr::new("-z"),
+            OsStr::new("-s"),
+            OsStr::new("--"),
+            path.as_os_str(),
+        ],
+        QUICK_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return Err(git_failure("ls-files", &output));
+    }
+    let mut entries = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty());
+    let (Some(entry), None) = (entries.next(), entries.next()) else {
+        return Ok(false);
+    };
+    Ok(is_file_entry(entry, path))
+}
+
+fn is_file_entry(entry: &[u8], path: &Path) -> bool {
+    let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
+        return false;
+    };
+    let (fields, listed_path) = entry.split_at(tab);
+    let mode = fields
+        .split(|byte| *byte == b' ')
+        .next()
+        .unwrap_or_default();
+    FILE_ENTRY_MODES.contains(&mode) && &listed_path[1..] == path.as_os_str().as_bytes()
 }
 
 /// Whether the commit `ancestor` is reachable from `descendant` (or equal).

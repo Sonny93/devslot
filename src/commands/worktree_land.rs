@@ -3,6 +3,7 @@
 //! only ever fast-forwards: when the base moved, the worktree is rebased by
 //! hand first. It never forces, stashes, resets or pushes.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -15,8 +16,8 @@ use crate::cli::output::write_stdout;
 use crate::error::ToolError;
 use crate::git_worktree::{
     WorktreeGitError, added_paths, base_config_key, commits_between, current_branch,
-    fast_forward_onto, is_ancestor, operation_in_progress, read_config, short_commit,
-    worktree_status,
+    fast_forward_onto, is_ancestor, is_tracked_file_in_index, operation_in_progress, read_config,
+    short_commit, worktree_status,
 };
 
 const HEAD: &str = "HEAD";
@@ -234,11 +235,14 @@ fn ensure_no_untracked_overwrite(
 ) -> Result<(), LandFailure> {
     let branch_reference = format!("refs/heads/{}", worktree.branch);
     let added = added_paths(&worktree.main_root, (target_reference, &branch_reference))?;
-    let mut existing: Vec<PathBuf> = added
-        .iter()
-        .filter_map(|added| first_blocker(&worktree.main_root, added))
-        .collect();
-    existing.dedup();
+    let mut tracked_parents: HashMap<PathBuf, bool> = HashMap::new();
+    let mut existing: Vec<PathBuf> = Vec::new();
+    for path in &added {
+        let blocker = first_blocker(&worktree.main_root, path, &mut tracked_parents)?;
+        if let Some(blocker) = blocker.filter(|blocker| !existing.contains(blocker)) {
+            existing.push(blocker);
+        }
+    }
     if existing.is_empty() {
         return Ok(());
     }
@@ -250,25 +254,49 @@ fn ensure_no_untracked_overwrite(
 }
 
 /// What stops `added` from being written in `checkout_root` without losing
-/// something: a parent folder that exists as a file or a symlink, or the path
-/// itself when anything is there.
-fn first_blocker(checkout_root: &Path, added: &Path) -> Option<PathBuf> {
+/// something: a parent that exists as a file or a symlink and is not a
+/// tracked file of the main checkout's index (git replaces a tracked one, and
+/// refuses when it is modified), or the path itself when anything is there.
+/// `tracked_parents` remembers the answer of git per parent.
+fn first_blocker(
+    checkout_root: &Path,
+    added: &Path,
+    tracked_parents: &mut HashMap<PathBuf, bool>,
+) -> Result<Option<PathBuf>, CheckoutError> {
+    if let Some(parent) = blocking_parent(checkout_root, added) {
+        if is_tracked_file(checkout_root, parent, tracked_parents)? {
+            return Ok(None);
+        }
+        return Ok(Some(parent.to_path_buf()));
+    }
+    let exists = std::fs::symlink_metadata(checkout_root.join(added)).is_ok();
+    Ok(exists.then(|| added.to_path_buf()))
+}
+
+fn blocking_parent<'a>(checkout_root: &Path, added: &'a Path) -> Option<&'a Path> {
     let mut ancestors: Vec<&Path> = added
         .ancestors()
         .skip(1)
         .filter(|ancestor| !ancestor.as_os_str().is_empty())
         .collect();
     ancestors.reverse();
-    let blocking_parent = ancestors.into_iter().find(|ancestor| {
+    ancestors.into_iter().find(|ancestor| {
         std::fs::symlink_metadata(checkout_root.join(ancestor))
             .is_ok_and(|metadata| !metadata.is_dir())
-    });
-    if let Some(parent) = blocking_parent {
-        return Some(parent.to_path_buf());
+    })
+}
+
+fn is_tracked_file(
+    checkout_root: &Path,
+    parent: &Path,
+    tracked_parents: &mut HashMap<PathBuf, bool>,
+) -> Result<bool, CheckoutError> {
+    if let Some(is_tracked) = tracked_parents.get(parent) {
+        return Ok(*is_tracked);
     }
-    std::fs::symlink_metadata(checkout_root.join(added))
-        .is_ok()
-        .then(|| added.to_path_buf())
+    let is_tracked = is_tracked_file_in_index(checkout_root, parent)?;
+    tracked_parents.insert(parent.to_path_buf(), is_tracked);
+    Ok(is_tracked)
 }
 
 fn list_paths(paths: &[PathBuf]) -> String {

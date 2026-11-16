@@ -509,3 +509,130 @@ fn should_refuse_and_keep_the_file_when_the_branch_adds_a_path_under_a_file_of_t
         b"my cached data\n"
     );
 }
+
+fn replace_file_by_folder_in_worktree(worktree: &Path) {
+    git_run(worktree, &["rm", "-q", "foo"]);
+    std::fs::create_dir_all(worktree.join("foo")).unwrap();
+    std::fs::write(worktree.join("foo/x"), "from the branch\n").unwrap();
+    git_run(worktree, &["add", "foo/x"]);
+    git_run(worktree, &["commit", "-q", "--no-verify", "-m", "folder"]);
+}
+
+#[test]
+fn should_land_when_the_branch_replaces_a_tracked_file_by_a_folder() {
+    let sandbox = sandbox();
+    commit_file(&sandbox.main_path(), "foo", "tracked\n");
+    let worktree = sandbox.created("feature-x");
+    replace_file_by_folder_in_worktree(&worktree);
+
+    let run = sandbox.land_in(&worktree, &[]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(
+        read(&sandbox.main_path().join("foo/x")),
+        "from the branch\n"
+    );
+}
+
+#[test]
+fn should_let_git_refuse_and_keep_the_edit_when_the_replaced_tracked_file_is_modified() {
+    let sandbox = sandbox();
+    commit_file(&sandbox.main_path(), "foo", "tracked\n");
+    let worktree = sandbox.created("feature-x");
+    replace_file_by_folder_in_worktree(&worktree);
+    std::fs::write(sandbox.main_path().join("foo"), "my edit\n").unwrap();
+    sandbox.write_local_note();
+    let before = sandbox.heads(&worktree);
+
+    let run = sandbox.land_in(&worktree, &[]);
+
+    assert_refused(&run, "would be overwritten by merge");
+    sandbox.assert_untouched(&worktree, &before);
+    assert_eq!(read(&sandbox.main_path().join("foo")), "my edit\n");
+}
+
+fn commit_added_file(worktree: &Path, relative: &str) {
+    let file = worktree.join(relative);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "from the branch\n").unwrap();
+    git_run(worktree, &["--literal-pathspecs", "add", relative]);
+    git_run(worktree, &["commit", "-q", "--no-verify", "-m", "added"]);
+}
+
+fn ignore_in_main(sandbox: &Sandbox, pattern: &str) {
+    let exclude = sandbox.main_path().join(".git/info/exclude");
+    std::fs::write(exclude, format!("{pattern}\n")).unwrap();
+}
+
+fn assert_would_overwrite_and_untouched(
+    sandbox: &Sandbox,
+    worktree: &Path,
+    before: &Heads,
+    (file, content): (&str, &[u8]),
+) {
+    let run = sandbox.land_in(worktree, &[]);
+
+    assert_refused(
+        &run,
+        &format!("the landing would overwrite {file} in the main checkout"),
+    );
+    sandbox.assert_untouched(worktree, before);
+    assert_eq!(
+        std::fs::read(sandbox.main_path().join(file)).unwrap(),
+        content
+    );
+}
+
+#[test]
+fn should_refuse_when_the_replaced_file_was_untracked_in_the_main_checkout_and_holds_ignored_data()
+{
+    let sandbox = sandbox();
+    commit_file(&sandbox.main_path(), "foo", "tracked\n");
+    let worktree = sandbox.created("feature-x");
+    replace_file_by_folder_in_worktree(&worktree);
+    git_run(&sandbox.main_path(), &["rm", "-q", "--cached", "foo"]);
+    ignore_in_main(&sandbox, "foo");
+    std::fs::write(sandbox.main_path().join("foo"), "my ignored data\n").unwrap();
+    sandbox.write_local_note();
+    let before = sandbox.heads(&worktree);
+
+    assert_would_overwrite_and_untouched(
+        &sandbox,
+        &worktree,
+        &before,
+        ("foo", b"my ignored data\n"),
+    );
+}
+
+#[test]
+fn should_refuse_when_an_ignored_file_stands_where_the_target_tracks_a_folder() {
+    let sandbox = sandbox();
+    commit_added_file(&sandbox.main_path(), "dir/y");
+    let worktree = sandbox.created("feature-x");
+    commit_added_file(&worktree, "dir/x");
+    std::fs::remove_dir_all(sandbox.main_path().join("dir")).unwrap();
+    ignore_in_main(&sandbox, "dir");
+    std::fs::write(sandbox.main_path().join("dir"), "my ignored data\n").unwrap();
+    sandbox.write_local_note();
+    let before = sandbox.heads(&worktree);
+
+    assert_would_overwrite_and_untouched(
+        &sandbox,
+        &worktree,
+        &before,
+        ("dir", b"my ignored data\n"),
+    );
+}
+
+#[test]
+fn should_refuse_when_a_file_named_like_a_pathspec_magic_is_ignored_in_the_main_checkout() {
+    let sandbox = sandbox();
+    let worktree = sandbox.created("feature-x");
+    commit_added_file(&worktree, ":/x");
+    ignore_in_main(&sandbox, ":");
+    std::fs::write(sandbox.main_path().join(":"), "my ignored data\n").unwrap();
+    sandbox.write_local_note();
+    let before = sandbox.heads(&worktree);
+
+    assert_would_overwrite_and_untouched(&sandbox, &worktree, &before, (":", b"my ignored data\n"));
+}
