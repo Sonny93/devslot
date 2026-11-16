@@ -290,8 +290,6 @@ fn join_reader(reader: thread::JoinHandle<String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -300,8 +298,7 @@ mod tests {
 
     fn script(directory: &Path, body: &str) -> PathBuf {
         let path = directory.join("fake-docker");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_executable::install_executable(&path, &format!("#!/bin/sh\n{body}\n"));
         path
     }
 

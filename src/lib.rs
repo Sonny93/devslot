@@ -46,6 +46,8 @@ pub mod reset_plan;
 pub mod services_state;
 pub mod session_leases;
 pub mod shell_quote;
+#[cfg(test)]
+pub(crate) mod test_executable;
 pub mod worktree_guard;
 pub mod worktree_identity;
 pub mod worktree_lock;

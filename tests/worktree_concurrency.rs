@@ -5,7 +5,6 @@
 
 mod support;
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -13,7 +12,7 @@ use std::time::{Duration, Instant};
 use devslot::kept_worktrees;
 use devslot::worktree_lock::{LockPurpose, WorktreeKey, WorktreeLock};
 use serde_json::{Value, json};
-use support::{Project, Run, TEST_SLOTS};
+use support::{Project, Run, TEST_SLOTS, install_executable};
 
 const BLOCK_START: &str = "# >>> devslot";
 const POST_CHECKOUT_SLEEP_SECONDS: u32 = 2;
@@ -109,15 +108,13 @@ impl Sandbox {
 
     fn install_slow_post_checkout(&self, marker: &Path) {
         let hook = self.main_path().join(".git/hooks/post-checkout");
-        std::fs::write(
+        install_executable(
             &hook,
-            format!(
+            &format!(
                 "#!/bin/sh\necho ran >> '{}'\nsleep {POST_CHECKOUT_SLEEP_SECONDS}\n",
                 marker.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
     }
 }
 

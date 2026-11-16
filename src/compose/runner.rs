@@ -643,7 +643,6 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     use pretty_assertions::assert_eq;
@@ -652,8 +651,7 @@ mod tests {
 
     fn script(directory: &Path, body: &str) -> PathBuf {
         let path = directory.join("fake-docker");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_executable::install_executable(&path, &format!("#!/bin/sh\n{body}\n"));
         path
     }
 

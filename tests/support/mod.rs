@@ -13,6 +13,24 @@ const FAKE_DOCKER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/fa
 pub const FAKE_ENV: &str =
     "PORT=3333\nDB_HOST=localhost\nDB_PORT=5432\nDB_USER=root\nDB_PASSWORD=FAKE\nDB_DATABASE=app\n";
 
+/// Installs `script` as an executable at `path` without the test process ever
+/// holding a write descriptor on it: the text goes to a plain temp file and
+/// `install` copies it in its own process. A descriptor open for writing in
+/// this process can leak into a child forked by another test thread, and
+/// executing the file while any process holds one fails with ETXTBSY.
+pub fn install_executable(path: &Path, script: &str) {
+    let mut source = tempfile::NamedTempFile::new().unwrap();
+    source.write_all(script.as_bytes()).unwrap();
+    source.flush().unwrap();
+    let status = Command::new("install")
+        .args(["-m", "755"])
+        .arg(source.path())
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
 pub const TEST_SLOTS: &str = "[slots]\nfirst_port = 14000\nlast_port = 14999\nsize = 10\n";
 
 /// The config and state folders of one pretend machine: every run of `ds`
@@ -268,8 +286,8 @@ impl Project {
         Run::from(command.output().unwrap())
     }
 
-    /// Runs `ds` with `arguments` as the child of `session_program` (a copy of
-    /// a shell named `claude`), the way a Claude Code session runs it.
+    /// Runs `ds` with `arguments` as the child of `session_program` (a symlink
+    /// to a shell, named `claude`), the way a Claude Code session runs it.
     pub fn run_under_session(
         &self,
         session_program: &Path,

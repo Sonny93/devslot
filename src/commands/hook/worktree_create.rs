@@ -732,12 +732,10 @@ mod tests {
 
     #[test]
     fn should_keep_the_worktree_when_the_add_is_cut_short_in_the_post_checkout_hook() {
-        use std::os::unix::fs::PermissionsExt;
         let repository = repository_with_commit();
         let main_root = repository.path().canonicalize().unwrap();
         let hook = main_root.join(".git/hooks/post-checkout");
-        std::fs::write(&hook, "#!/bin/sh\nexec sleep 3\n").unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_executable::install_executable(&hook, "#!/bin/sh\nexec sleep 3\n");
         let worktrees = tempfile::tempdir().unwrap();
         let target = worktrees.path().join("feature");
         let deadline = Deadline::starting_now(MIN_REGISTRATION_BUDGET + Duration::from_secs(1));

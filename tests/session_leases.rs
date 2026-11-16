@@ -72,7 +72,7 @@ impl Sandbox {
         let folder = self.programs.path().join(source.replace('/', "_"));
         std::fs::create_dir_all(&folder).unwrap();
         let program = folder.join("claude");
-        std::fs::copy(source, &program).unwrap();
+        std::os::unix::fs::symlink(source, &program).unwrap();
         program
     }
 
