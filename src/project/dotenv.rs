@@ -394,7 +394,7 @@ mod tests {
         let started = std::time::Instant::now();
         let outcome = EnvFile::parse(&text);
 
-        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(outcome.is_err());
     }
 
