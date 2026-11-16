@@ -99,6 +99,7 @@ This repository runs several instances of its dev stack on one machine, one per 
 - Read ports and URLs with `ds info --json`. Never guess or hardcode them: 3333, 5432 and 24678 are the defaults of other instances.
 - Reset the data with `ds reset` (everything) or `ds reset <service>`.
 - Never run `ds rm`, `ds prune`, `ds worktree rm`, `docker compose down -v`, `docker volume rm` or remove containers by hand: it can delete another agent's data. Ask the user.
+- When the devslot worktree guard is on (the session start says so), the main checkout is for reading and searching only: before editing files or running `ds up`, `ds run` or `ds reset`, enter a worktree with the EnterWorktree tool, with a short name taken from the task, and never work around a refusal through Bash. Run `ds worktree land` only after the user's explicit go-ahead on the committed work: it is fast-forward only, so when the base moved, run `git rebase <base>` in the worktree, resolve the conflicts, commit, and run `ds worktree land` again. Never push.
 - If `ds info` says this checkout is opted out, do not run `ds up` without asking the user.
 - `DEVSLOT_INSTANCE` names this instance; show it in logs or on a health endpoint when useful.
 - `ds doctor` explains why a checkout cannot be isolated.

@@ -1,6 +1,7 @@
-//! A guard rail against agent commands that delete devslot data. It reads the
-//! text of a shell command, so it is not a sandbox: a command built at run time
-//! gets through, and a quoted string such as `echo "ds rm"` is denied too.
+//! A guard rail against agent commands that delete devslot data or start an
+//! environment from a checkout that must not run one. It reads the text of a
+//! shell command, so it is not a sandbox: a command built at run time gets
+//! through, and a quoted string such as `echo "ds rm"` is denied too.
 
 const SEPARATORS: [char; 9] = [';', '&', '|', '(', ')', '{', '}', '\n', '`'];
 const LINE_CONTINUATION: &str = "\\\n";
@@ -11,6 +12,7 @@ const WRAPPERS: [&str; 22] = [
     "builtin",
 ];
 const DESTRUCTIVE_SUBCOMMANDS: [&str; 2] = ["rm", "prune"];
+const ENVIRONMENT_SUBCOMMANDS: [&str; 3] = ["up", "run", "reset"];
 const PROGRAM_NAME: &str = "ds";
 const PROGRAM_PATH_SUFFIX: &str = "/ds";
 const RUN_SUBCOMMAND: &str = "run";
@@ -31,20 +33,84 @@ const COLOR_OPTION_PREFIX: &str = "--color=";
 /// checked too. A quoted text is also read as a command of its own, so
 /// `bash -c 'ds rm'` is denied.
 pub fn is_destructive_ds_command(command: &str) -> bool {
+    command_segments(command)
+        .iter()
+        .any(|segment| is_destructive_segment(segment))
+}
+
+/// Whether `command` runs `ds up`, `ds run` or `ds reset`, found the way
+/// [`is_destructive_ds_command`] finds its commands.
+pub fn is_environment_ds_command(command: &str) -> bool {
+    ds_subcommands(command)
+        .iter()
+        .any(|subcommand| ENVIRONMENT_SUBCOMMANDS.contains(&subcommand.as_str()))
+}
+
+/// The distinct `ds` subcommands that `command` runs, in order of first
+/// appearance, found the way [`is_destructive_ds_command`] finds its
+/// commands: `ds up && ds info` gives `up` and `info`, and `ds run -- ds
+/// reset` gives `run` and `reset`.
+pub fn ds_subcommands(command: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for subcommand in command_segments(command)
+        .iter()
+        .flat_map(|segment| subcommands_of_segment(segment))
+    {
+        if !found.contains(&subcommand) {
+            found.push(subcommand);
+        }
+    }
+    found
+}
+
+fn command_segments(command: &str) -> Vec<String> {
     let command = command.replace(LINE_CONTINUATION, " ");
-    command.split(is_separator).any(is_destructive_segment)
-        || command
-            .split(|character| is_separator(character) || QUOTES.contains(&character))
-            .any(is_destructive_segment)
+    let by_separator = command.split(is_separator).map(str::to_owned);
+    let by_quote = command
+        .split(|character| is_separator(character) || QUOTES.contains(&character))
+        .map(str::to_owned);
+    by_separator.chain(by_quote).collect()
 }
 
 fn is_separator(character: char) -> bool {
     SEPARATORS.contains(&character)
 }
 
+fn words_of(segment: &str) -> Vec<String> {
+    segment.split_whitespace().map(plain_word).collect()
+}
+
 fn is_destructive_segment(segment: &str) -> bool {
-    let words: Vec<String> = segment.split_whitespace().map(plain_word).collect();
-    is_destructive_words(&words)
+    is_destructive_words(&words_of(segment))
+}
+
+fn subcommands_of_segment(segment: &str) -> Vec<String> {
+    subcommands_of_words(&words_of(segment))
+}
+
+fn subcommands_of_words(words: &[String]) -> Vec<String> {
+    let Some(start) = program_index(words) else {
+        return Vec::new();
+    };
+    if !is_ds_program(&words[start]) {
+        return Vec::new();
+    }
+    let mut rest = words[start + 1..].iter().map(String::as_str);
+    let Some(subcommand) = subcommand_of(&mut rest) else {
+        return Vec::new();
+    };
+    let mut found = vec![subcommand.to_owned()];
+    if subcommand == RUN_SUBCOMMAND {
+        found.extend(subcommands_of_words(&nested_command(rest)));
+    }
+    found
+}
+
+fn nested_command<'a>(rest: impl Iterator<Item = &'a str>) -> Vec<String> {
+    rest.skip_while(|word| *word != COMMAND_SEPARATOR)
+        .skip(1)
+        .map(str::to_owned)
+        .collect()
 }
 
 fn plain_word(word: &str) -> String {
@@ -67,14 +133,7 @@ fn is_destructive_words(words: &[String]) -> bool {
         Some(subcommand) if DESTRUCTIVE_SUBCOMMANDS.contains(&subcommand) => true,
         Some(HOOK_SUBCOMMAND) => true,
         Some(WORKTREE_SUBCOMMAND) => subcommand_of(&mut rest) == Some(WORKTREE_REMOVE_ACTION),
-        Some(RUN_SUBCOMMAND) => {
-            let nested: Vec<String> = rest
-                .skip_while(|word| *word != COMMAND_SEPARATOR)
-                .skip(1)
-                .map(str::to_owned)
-                .collect();
-            is_destructive_words(&nested)
-        }
+        Some(RUN_SUBCOMMAND) => is_destructive_words(&nested_command(rest)),
         _ => false,
     }
 }
@@ -249,6 +308,63 @@ mod tests {
             "grep ds rm file",
         ] {
             assert!(!is_destructive_ds_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn should_name_the_subcommand_of_every_ds_command() {
+        assert_eq!(ds_subcommands("ds up --no-run"), ["up"]);
+        assert_eq!(
+            ds_subcommands("cd x && ds info --json; ds reset"),
+            ["info", "reset"]
+        );
+        assert_eq!(ds_subcommands("ds run -- ds reset"), ["run", "reset"]);
+        assert_eq!(
+            ds_subcommands("sudo /usr/local/bin/ds --color never up"),
+            ["up"]
+        );
+        assert_eq!(
+            ds_subcommands("bash -c 'ds up'")
+                .first()
+                .map(String::as_str),
+            Some("up")
+        );
+    }
+
+    #[test]
+    fn should_name_nothing_when_no_ds_command_runs() {
+        for command in ["ls", "echo ds up", "dsup", "xds up", "grep ds file", "ds"] {
+            assert_eq!(ds_subcommands(command), Vec::<String>::new(), "{command}");
+        }
+    }
+
+    #[test]
+    fn should_see_ds_up_ds_run_and_ds_reset_as_environment_commands() {
+        for command in [
+            "ds up",
+            "ds up --no-run",
+            "ds run -- pnpm dev",
+            "ds reset postgres",
+            "cd x && ds up",
+            "timeout 5 ds up",
+            "\\ds 'up'",
+        ] {
+            assert!(is_environment_ds_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn should_not_see_the_other_commands_as_environment_commands() {
+        for command in [
+            "ds info --json",
+            "ds ensure",
+            "ds doctor",
+            "ds ls",
+            "ds down",
+            "upload",
+            "echo ds",
+        ] {
+            assert!(!is_environment_ds_command(command), "{command}");
         }
     }
 }

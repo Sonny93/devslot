@@ -14,7 +14,9 @@ use crate::global_config::GlobalConfigError;
 use crate::paths::PathsError;
 use crate::project_config::ConfigError;
 use crate::registry::RegistryError;
+use crate::worktree_guard::GuardError;
 use crate::worktree_lock::WorktreeLockError;
+use crate::worktree_require_override::OverrideError;
 
 /// Something that stops `ds` from answering. Maps to exit code 2.
 #[derive(Debug, Error)]
@@ -40,6 +42,12 @@ pub enum ToolError {
     /// The lock file of a worktree cannot be used.
     #[error(transparent)]
     WorktreeLock(#[from] WorktreeLockError),
+    /// The worktree guard switch of a checkout cannot be read.
+    #[error(transparent)]
+    WorktreeOverride(#[from] OverrideError),
+    /// The worktree guard cannot examine the checkout.
+    #[error(transparent)]
+    WorktreeGuard(#[from] GuardError),
     /// The `[env]` values cannot be built.
     #[error(transparent)]
     Environment(#[from] EnvironmentError),

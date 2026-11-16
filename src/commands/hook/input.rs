@@ -22,7 +22,7 @@ pub enum InputError {
     #[error("cannot read the hook input: {0}")]
     Read(io::Error),
     /// Stdin holds more than [`MAX_INPUT_BYTES`].
-    #[error("the hook input is larger than 1 MiB")]
+    #[error("the hook input is larger than its size limit")]
     TooLarge,
     /// Stdin did not end in time.
     #[error("the hook input did not end within 2 seconds")]
@@ -46,9 +46,18 @@ pub fn read_input_within<T: DeserializeOwned>(
     reader: impl Read + Send + 'static,
     timeout: Duration,
 ) -> Result<T, InputError> {
+    read_input_limited(reader, timeout, MAX_INPUT_BYTES)
+}
+
+/// Like [`read_input_within`], accepting at most `max_bytes`.
+pub fn read_input_limited<T: DeserializeOwned>(
+    reader: impl Read + Send + 'static,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<T, InputError> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let _ = sender.send(read_bounded_bytes(reader));
+        let _ = sender.send(read_bounded_bytes(reader, max_bytes));
     });
     let bytes = receiver
         .recv_timeout(timeout)
@@ -56,13 +65,13 @@ pub fn read_input_within<T: DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(InputError::Invalid)
 }
 
-fn read_bounded_bytes(reader: impl Read) -> Result<Vec<u8>, InputError> {
+fn read_bounded_bytes(reader: impl Read, max_bytes: u64) -> Result<Vec<u8>, InputError> {
     let mut bytes = Vec::new();
     reader
-        .take(MAX_INPUT_BYTES + 1)
+        .take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .map_err(InputError::Read)?;
-    if u64::try_from(bytes.len()).is_ok_and(|length| length > MAX_INPUT_BYTES) {
+    if u64::try_from(bytes.len()).is_ok_and(|length| length > max_bytes) {
         return Err(InputError::TooLarge);
     }
     Ok(bytes)

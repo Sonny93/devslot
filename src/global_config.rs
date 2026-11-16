@@ -13,6 +13,7 @@ use crate::auto_scope::AutoScope;
 use crate::port_range::PortRange;
 use crate::project::bounded_read::{BoundedRead, Unreadable, read_bounded};
 use crate::project_config::ProjectConfig;
+use crate::require_scope::RequireScope;
 
 /// The largest slot size a configuration may ask for.
 pub const MAX_SLOT_SIZE: u16 = 100;
@@ -93,6 +94,8 @@ struct RawWrite {
 #[derive(Debug, Default, Deserialize)]
 struct RawWorktrees {
     root: Option<String>,
+    require: Option<Vec<String>>,
+    require_exclude: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -156,6 +159,9 @@ pub struct GlobalConfig {
     pub write_enabled: bool,
     /// `[worktrees] root`, absolute, when the file sets it.
     pub worktrees_root: Option<PathBuf>,
+    /// `[worktrees] require` and `require_exclude`: where agents must work in
+    /// a linked worktree. Empty covers nothing.
+    pub require: RequireScope,
 }
 
 impl Default for GlobalConfig {
@@ -165,6 +171,7 @@ impl Default for GlobalConfig {
             auto: AutoScope::default(),
             write_enabled: true,
             worktrees_root: None,
+            require: RequireScope::default(),
         }
     }
 }
@@ -219,11 +226,17 @@ impl GlobalConfig {
             key,
             reason,
         };
+        let require = require_scope_from(
+            raw.worktrees.require.unwrap_or_default(),
+            raw.worktrees.require_exclude.unwrap_or_default(),
+        )
+        .map_err(invalid)?;
         Ok(Self {
             slots: geometry_from(&raw.slots).map_err(invalid)?,
             auto: scope_from(raw.auto).map_err(invalid)?,
             write_enabled: raw.write.enabled.unwrap_or(true),
             worktrees_root: worktrees_root_from(raw.worktrees.root, home).map_err(invalid)?,
+            require,
         })
     }
 
@@ -265,6 +278,15 @@ fn scope_from(raw: RawAuto) -> Result<AutoScope, Violation> {
     check_patterns("[auto] include", &include)?;
     check_patterns("[auto] exclude", &exclude)?;
     Ok(AutoScope::new(include, exclude))
+}
+
+fn require_scope_from(
+    require: Vec<String>,
+    exclude: Vec<String>,
+) -> Result<RequireScope, Violation> {
+    check_patterns("[worktrees] require", &require)?;
+    check_patterns("[worktrees] require_exclude", &exclude)?;
+    Ok(RequireScope::new(require, exclude))
 }
 
 fn check_patterns(key: &'static str, patterns: &[String]) -> Result<(), Violation> {
@@ -532,6 +554,38 @@ mod tests {
         assert_eq!(
             config.worktrees_root(Some(Path::new("/home/me"))),
             Some(PathBuf::from("/srv/trees"))
+        );
+    }
+
+    #[test]
+    fn should_read_the_require_lists() {
+        let config =
+            parse("[worktrees]\nrequire = [\"/work/*\"]\nrequire_exclude = [\"/work/scratch\"]\n")
+                .unwrap();
+
+        assert_eq!(
+            (
+                config.require.covers(Path::new("/work/app"), None),
+                config.require.covers(Path::new("/work/scratch"), None),
+                config.require.covers(Path::new("/other"), None)
+            ),
+            (true, false, false)
+        );
+    }
+
+    #[test]
+    fn should_refuse_an_invalid_glob_in_require_naming_the_key() {
+        assert_eq!(
+            invalid_key("[worktrees]\nrequire = [\"/a/[b\"]\n"),
+            "[worktrees] require"
+        );
+    }
+
+    #[test]
+    fn should_refuse_an_invalid_glob_in_require_exclude_naming_the_key() {
+        assert_eq!(
+            invalid_key("[worktrees]\nrequire_exclude = [\"{a\"]\n"),
+            "[worktrees] require_exclude"
         );
     }
 

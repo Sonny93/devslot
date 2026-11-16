@@ -30,6 +30,7 @@ use crate::registration::{Intent, Refusal, RegistrationOutcome, lock_wait};
 use crate::registry::RegistryError;
 use crate::registry::record::InstanceRecord;
 use crate::registry::store::RegistryStore;
+use crate::worktree_guard::is_local_switch_effective;
 
 const STALE_TEMP_AGE: Duration = Duration::from_secs(60);
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -190,6 +191,9 @@ fn ensure_checkout(
     if !checkout.is_git || !global.auto.covers(&checkout.root, home.as_deref()) {
         return Ok(EnsureResult::Silent);
     }
+    if is_required_main_checkout(&checkout, &global, home.as_deref())? {
+        return Ok(EnsureResult::Silent);
+    }
     let registry = machine.store.read()?;
     if registry.is_opted_out(&checkout.root) {
         return Ok(EnsureResult::Silent);
@@ -207,6 +211,21 @@ fn ensure_checkout(
         ),
         None => ensure_unregistered((&checkout, &machine, &global), dev_file, (style, deadline)),
     }
+}
+
+/// Whether the worktree guard covers the checkout as a main checkout: agents
+/// work in a linked worktree there, so the checkout is left as it is, whether
+/// or not it was registered before the guard was turned on.
+fn is_required_main_checkout(
+    checkout: &Checkout,
+    global: &GlobalConfig,
+    home: Option<&Path>,
+) -> Result<bool, ToolError> {
+    let is_main_checkout = checkout.main_root.is_none();
+    if !is_main_checkout || !global.require.covers(&checkout.root, home) {
+        return Ok(false);
+    }
+    Ok(!is_local_switch_effective(&checkout.root, None)?)
 }
 
 fn ensure_registered(

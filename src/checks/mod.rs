@@ -9,3 +9,4 @@ pub mod local_host;
 pub mod session;
 pub mod slot;
 pub mod vite;
+pub mod worktree_guard;

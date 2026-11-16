@@ -8,6 +8,7 @@ pub mod pre_tool_use;
 pub mod session_start;
 pub mod worktree_create;
 pub mod worktree_remove;
+pub mod write_guard;
 
 use failure::HookFailure;
 
@@ -45,6 +46,7 @@ mod agent_rules_tests {
     const NEXT_SECTION_HEADING: &str = "\n```\n\n## ";
     const DELETING_COMMANDS: [&str; 3] = ["ds rm", "ds prune", "ds worktree rm"];
     const STARTING_COMMAND: &str = "ds up --no-run";
+    const LANDING_COMMAND: &str = "ds worktree land";
 
     fn readme_rules() -> &'static str {
         let from_heading = README
@@ -69,7 +71,7 @@ mod agent_rules_tests {
 
     #[test]
     fn should_name_the_same_commands_in_the_four_copies_of_the_agent_rules() {
-        let all_commands = [STARTING_COMMAND]
+        let all_commands = [STARTING_COMMAND, LANDING_COMMAND]
             .into_iter()
             .chain(DELETING_COMMANDS)
             .collect::<Vec<_>>();
@@ -84,5 +86,10 @@ mod agent_rules_tests {
         problems.extend(missing(&[("DENY_REASON", DENY_REASON)], &DELETING_COMMANDS));
 
         assert_eq!(problems, Vec::<String>::new());
+    }
+
+    #[test]
+    fn should_not_name_the_landing_command_in_the_deny_reason() {
+        assert!(!DENY_REASON.contains(LANDING_COMMAND));
     }
 }

@@ -1,16 +1,19 @@
-//! `ds hook pre-tool-use`: runs before every Bash command of an agent. It
-//! denies the commands that delete devslot data, then makes sure the checkout
-//! is registered and tells the agent what it got. It never fails: whatever goes
-//! wrong becomes context for the agent, and the exit code is 0.
+//! `ds hook pre-tool-use`: runs before every Bash command and every file write
+//! of an agent. A write tool is only checked by the worktree guard (see
+//! `write_guard`). A Bash command is denied when it deletes devslot data, or
+//! starts an environment in a main checkout that requires a worktree; then the
+//! checkout is registered and the agent is told what it got. It never fails:
+//! whatever goes wrong becomes context for the agent, and the exit code is 0.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::command_guard::is_destructive_ds_command;
-use super::input::{INPUT_TIMEOUT, read_input_within};
+use super::command_guard::{is_destructive_ds_command, is_environment_ds_command};
+use super::input::{INPUT_TIMEOUT, read_input_limited};
+use super::write_guard::{GuardOutcome, WRITE_BUDGET, guard_environment, guard_write};
 use crate::cli::exit_code;
 use crate::cli::output::write_stdout;
 use crate::cli::style::Style;
@@ -23,13 +26,19 @@ const HOOK_EVENT_NAME: &str = "PreToolUse";
 pub(super) const DENY_REASON: &str = "ds rm, ds prune and ds worktree rm delete data, ds hook is run by Claude Code itself, and other agents work on this machine; ask the user to run it";
 /// Claude Code kills the hook after 20 seconds; the work stops before that.
 const HOOK_BUDGET: Duration = Duration::from_secs(15);
+/// A `Write` or `MultiEdit` carries the whole file in its input.
+const MAX_PRE_TOOL_USE_INPUT_BYTES: u64 = 32 * 1024 * 1024;
 const PLAIN_STYLE: Style = Style { color: false };
 
 #[derive(Debug, Deserialize)]
-struct PreToolUseInput {
-    cwd: PathBuf,
+pub(super) struct PreToolUseInput {
+    pub(super) cwd: PathBuf,
     #[serde(default)]
-    tool_input: Option<Value>,
+    pub(super) tool_name: Option<String>,
+    #[serde(default)]
+    pub(super) agent_id: Option<String>,
+    #[serde(default)]
+    pub(super) tool_input: Option<Value>,
 }
 
 impl PreToolUseInput {
@@ -39,32 +48,69 @@ impl PreToolUseInput {
 }
 
 /// Reads the hook input from stdin and answers on stdout. Always returns 0.
-/// The whole run, the read of stdin included, has [`HOOK_BUDGET`]; a run that
-/// runs out of it says nothing and lets the agent's command go.
+/// The whole run, the read of stdin included, has [`HOOK_BUDGET`] for a Bash
+/// command and [`WRITE_BUDGET`] for a write tool; a run that runs out of it
+/// says nothing and lets the agent's call go.
 pub fn run_pre_tool_use() -> u8 {
-    let deadline = Deadline::starting_now(HOOK_BUDGET);
+    let started = Instant::now();
+    let deadline = Deadline::starting_at(started, HOOK_BUDGET);
     let input_timeout = deadline.clamp(INPUT_TIMEOUT).unwrap_or(Duration::ZERO);
-    match read_input_within::<PreToolUseInput>(std::io::stdin(), input_timeout) {
-        Ok(input) => {
-            if let Some(answer) = decide(&input, |directory| {
-                ensure_directory_within(directory, PLAIN_STYLE, Some(deadline))
-            }) {
-                let _ = write_stdout(&answer);
-            }
-        }
-        Err(error) => eprintln!("ds: {error}"),
+    let answer = match read_input_limited::<PreToolUseInput>(
+        std::io::stdin(),
+        input_timeout,
+        MAX_PRE_TOOL_USE_INPUT_BYTES,
+    ) {
+        Ok(input) => answer_for(&input, started),
+        Err(error) => Some(context_answer(&format!(
+            "the devslot hook could not read its input ({error}); tell the user"
+        ))),
+    };
+    if let Some(answer) = answer {
+        let _ = write_stdout(&answer);
     }
     exit_code::SUCCESS
 }
 
+fn answer_for(input: &PreToolUseInput, started: Instant) -> Option<String> {
+    if input.is_write_tool() {
+        let deadline = Deadline::starting_at(started, WRITE_BUDGET);
+        return decide_write(|| guard_write(input, deadline));
+    }
+    let deadline = Deadline::starting_at(started, HOOK_BUDGET);
+    decide(
+        input,
+        || guard_environment(input, deadline),
+        |directory| ensure_directory_within(directory, PLAIN_STYLE, Some(deadline)),
+    )
+}
+
+fn decide_write(guard: impl FnOnce() -> GuardOutcome) -> Option<String> {
+    outcome_answer(guard())
+}
+
 fn decide(
     input: &PreToolUseInput,
+    guard: impl FnOnce() -> GuardOutcome,
     ensure: impl FnOnce(&Path) -> Result<EnsureResult, ToolError>,
 ) -> Option<String> {
-    if input.command().is_some_and(is_destructive_ds_command) {
-        return Some(deny_answer());
+    let command = input.command();
+    if command.is_some_and(is_destructive_ds_command) {
+        return Some(deny_answer(DENY_REASON));
+    }
+    if command.is_some_and(is_environment_ds_command)
+        && let Some(answer) = outcome_answer(guard())
+    {
+        return Some(answer);
     }
     context_for(&ensure(&input.cwd)).map(|context| context_answer(&context))
+}
+
+fn outcome_answer(outcome: GuardOutcome) -> Option<String> {
+    match outcome {
+        GuardOutcome::Clear => None,
+        GuardOutcome::Deny(reason) => Some(deny_answer(&reason)),
+        GuardOutcome::Undecided(message) => Some(context_answer(&message)),
+    }
 }
 
 fn context_for(result: &Result<EnsureResult, ToolError>) -> Option<String> {
@@ -104,11 +150,11 @@ fn summary_of(instance: &InstanceRecord) -> String {
     )
 }
 
-fn deny_answer() -> String {
+fn deny_answer(reason: &str) -> String {
     answer_of(&json!({
         "hookEventName": HOOK_EVENT_NAME,
         "permissionDecision": "deny",
-        "permissionDecisionReason": DENY_REASON,
+        "permissionDecisionReason": reason,
     }))
 }
 
@@ -139,8 +185,14 @@ mod tests {
     fn input(command: Option<&str>) -> PreToolUseInput {
         PreToolUseInput {
             cwd: PathBuf::from("/work/app"),
+            tool_name: Some("Bash".to_owned()),
+            agent_id: None,
             tool_input: command.map(|command| json!({ "command": command })),
         }
+    }
+
+    fn clear() -> GuardOutcome {
+        GuardOutcome::Clear
     }
 
     fn instance() -> InstanceRecord {
@@ -174,7 +226,12 @@ mod tests {
 
     #[test]
     fn should_deny_the_command_without_running_ensure_when_it_is_ds_rm() {
-        let answer = decide(&input(Some("ds rm --yes")), |_| panic!("ensure ran")).unwrap();
+        let answer = decide(
+            &input(Some("ds rm --yes")),
+            || panic!("guard ran"),
+            |_| panic!("ensure ran"),
+        )
+        .unwrap();
 
         let output = &parsed(&answer)["hookSpecificOutput"];
         assert_eq!(output["permissionDecision"], "deny");
@@ -184,14 +241,22 @@ mod tests {
 
     #[test]
     fn should_answer_nothing_when_ensure_has_nothing_to_report() {
-        let answer = decide(&input(Some("ls")), |_| Ok(EnsureResult::Silent));
+        let answer = decide(
+            &input(Some("ls")),
+            || panic!("guard ran"),
+            |_| Ok(EnsureResult::Silent),
+        );
 
         assert_eq!(answer, None);
     }
 
     #[test]
     fn should_run_ensure_when_the_tool_has_no_command() {
-        let answer = decide(&input(None), |_| Ok(EnsureResult::Silent));
+        let answer = decide(
+            &input(None),
+            || panic!("guard ran"),
+            |_| Ok(EnsureResult::Silent),
+        );
 
         assert_eq!(answer, None);
     }
@@ -250,5 +315,90 @@ mod tests {
         empty.ports.clear();
 
         assert!(summary_of(&empty).contains("ports: none;"));
+    }
+
+    #[test]
+    fn should_deny_without_running_ensure_when_the_guard_denies_ds_up() {
+        let answer = decide(
+            &input(Some("ds up --no-run")),
+            || GuardOutcome::Deny("enter a worktree".to_owned()),
+            |_| panic!("ensure ran"),
+        )
+        .unwrap();
+
+        let output = &parsed(&answer)["hookSpecificOutput"];
+        assert_eq!(output["permissionDecision"], "deny");
+        assert_eq!(output["permissionDecisionReason"], "enter a worktree");
+    }
+
+    #[test]
+    fn should_run_ensure_when_the_guard_is_clear_for_ds_up() {
+        let answer = decide(&input(Some("ds up")), clear, |_| Ok(EnsureResult::Silent));
+
+        assert_eq!(answer, None);
+    }
+
+    #[test]
+    fn should_give_context_and_run_nothing_else_when_the_guard_cannot_decide_for_ds_run() {
+        let answer = decide(
+            &input(Some("ds run -- pnpm dev")),
+            || GuardOutcome::Undecided("could not decide".to_owned()),
+            |_| panic!("ensure ran"),
+        )
+        .unwrap();
+
+        let output = &parsed(&answer)["hookSpecificOutput"];
+        assert_eq!(output["additionalContext"], "could not decide");
+        assert_eq!(output.get("permissionDecision"), None);
+    }
+
+    #[test]
+    fn should_not_ask_the_guard_when_the_command_starts_no_environment() {
+        let answer = decide(
+            &input(Some("ds info --json")),
+            || panic!("guard ran"),
+            |_| Ok(EnsureResult::Silent),
+        );
+
+        assert_eq!(answer, None);
+    }
+
+    #[test]
+    fn should_answer_nothing_when_the_write_guard_is_clear() {
+        assert_eq!(decide_write(clear), None);
+    }
+
+    #[test]
+    fn should_deny_a_write_with_the_reason_of_the_guard() {
+        let answer = decide_write(|| GuardOutcome::Deny("enter a worktree".to_owned())).unwrap();
+
+        let output = &parsed(&answer)["hookSpecificOutput"];
+        assert_eq!(output["permissionDecision"], "deny");
+        assert_eq!(output["permissionDecisionReason"], "enter a worktree");
+    }
+
+    #[test]
+    fn should_give_context_and_no_decision_when_the_write_guard_cannot_decide() {
+        let answer = decide_write(|| GuardOutcome::Undecided("boom".to_owned())).unwrap();
+
+        assert_eq!(
+            parsed(&answer),
+            json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "boom"}})
+        );
+    }
+
+    #[test]
+    fn should_know_the_write_tools_by_name() {
+        let named = |name: &str| PreToolUseInput {
+            tool_name: Some(name.to_owned()),
+            ..input(None)
+        };
+
+        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+            assert!(named(tool).is_write_tool(), "{tool}");
+        }
+        for tool in ["Bash", "Read", "Glob"] {
+            assert!(!named(tool).is_write_tool(), "{tool}");
+        }
     }
 }

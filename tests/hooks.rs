@@ -550,7 +550,11 @@ fn should_exit_0_when_the_pre_tool_use_input_never_ends() {
     let run = project.run_hook_with_open_stdin("pre-tool-use");
 
     assert_eq!(run.status, 0, "{}", run.stderr);
-    assert_eq!(run.stdout, "");
+    assert!(
+        run.stdout
+            .contains("the devslot hook could not read its input")
+    );
+    assert!(!run.stdout.contains("permissionDecision"));
 }
 
 #[test]
@@ -740,14 +744,19 @@ fn should_turn_a_tool_failure_into_context_and_exit_0() {
 }
 
 #[test]
-fn should_exit_0_with_nothing_on_stdout_when_the_input_is_not_json() {
+fn should_exit_0_with_the_context_and_no_decision_when_the_input_is_not_json() {
     let project = git_project();
 
     for input in ["not json", "", "{}", "[1]"] {
         let run = project.run_hook("pre-tool-use", input, &[]);
 
         assert_eq!(run.status, 0, "{input:?}: {}", run.stderr);
-        assert_eq!(run.stdout, "", "{input:?}");
+        assert!(
+            run.stdout
+                .contains("the devslot hook could not read its input ("),
+            "{input:?}"
+        );
+        assert!(!run.stdout.contains("permissionDecision"), "{input:?}");
     }
 }
 
@@ -770,7 +779,7 @@ fn should_print_the_info_and_the_guidance_when_the_checkout_is_registered() {
     assert!(run.stdout.contains("Services:      run ds info to check\n"));
     assert!(run.stdout.contains("DB_PORT"));
     assert!(run.stdout.ends_with(
-        "Use ds info --json for ports and URLs; ds up --no-run starts the services (plain ds up then runs the app in the foreground and does not return); ds reset resets the data; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand.\n"
+        "Use ds info --json for ports and URLs; ds up --no-run starts the services (plain ds up then runs the app in the foreground and does not return); ds reset resets the data; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand. When the devslot worktree guard is on, enter a worktree with the EnterWorktree tool before writing code or starting an environment, and run ds worktree land only after the user's explicit go-ahead (fast-forward only: when the base moved, git rebase it in the worktree, resolve, commit, run ds worktree land again; never push).\n"
     ));
     assert_eq!(project.machine().docker_log(), Vec::<String>::new());
 }
@@ -939,6 +948,27 @@ fn should_list_the_unsaved_work_reason_in_ds_ls_when_the_hook_refuses() {
 
     let listing = ls_output(&sandbox);
     assert!(listing.contains(&format!("{}: it holds unsaved work", path.display())));
+}
+
+#[test]
+fn should_count_the_kept_worktrees_of_the_repository_in_the_session_start_line() {
+    let sandbox = sandbox();
+    let path = sandbox.created("feature-x");
+    std::fs::write(path.join("notes.txt"), "unsaved").unwrap();
+    sandbox.remove(&path, &[]);
+    sandbox.machine().write_global_config(&format!(
+        "{TEST_SLOTS}[worktrees]\nroot = \"{}\"\nrequire = [\"{}\"]\n",
+        sandbox.root.path().display(),
+        sandbox.main_path().display()
+    ));
+
+    let run = session_start(&sandbox.main);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(
+        run.stdout
+            .contains("Kept worktrees of this repository: 1 (ds ls lists them).")
+    );
 }
 
 #[test]

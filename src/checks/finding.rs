@@ -83,6 +83,12 @@ pub enum Check {
     SlotGeometryChanged,
     /// The session runs under a process not named `claude`, or none is found: no lease is written.
     SessionProcessName,
+    /// Whether the worktree guard is on for the checkout.
+    WorktreeGuard,
+    /// `devslot.toml` sets `[worktrees] require`, which only `devslot.local.toml` may.
+    WorktreeRequireIgnored,
+    /// A main checkout registered before the worktree guard covered it.
+    WorktreeGuardRegistered,
 }
 
 /// One problem found in the project.

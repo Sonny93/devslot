@@ -304,12 +304,10 @@ impl Project {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = command.spawn().unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
+        let written = child.stdin.take().unwrap().write_all(input.as_bytes());
+        if let Err(error) = written {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
         Run::from(child.wait_with_output().unwrap())
     }
 

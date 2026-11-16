@@ -24,6 +24,7 @@ pub mod env_sync;
 pub mod environment;
 pub mod error;
 pub mod git_worktree;
+pub mod glob_match;
 pub mod global_config;
 pub mod instance_name;
 pub mod instance_processes;
@@ -39,13 +40,16 @@ pub mod references;
 pub mod registration;
 pub mod registry;
 pub mod report;
+pub mod require_scope;
 pub mod reserved_names;
 pub mod reset_plan;
 pub mod services_state;
 pub mod session_leases;
 pub mod shell_quote;
+pub mod worktree_guard;
 pub mod worktree_identity;
 pub mod worktree_lock;
+pub mod worktree_require_override;
 
 use std::process::ExitCode;
 

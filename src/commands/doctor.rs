@@ -8,6 +8,7 @@ use crate::checks::finding::{Finding, Summary};
 use crate::checks::session::{SessionRoot, check_session_root};
 use crate::checks::slot::{SlotCheckInput, check_slot_geometry};
 use crate::checks::vite::check_vite;
+use crate::checks::worktree_guard::{GuardCheckInput, check_worktree_guard};
 use crate::cli::exit_code;
 use crate::cli::output::write_stdout;
 use crate::cli::render::render_text;
@@ -16,28 +17,44 @@ use crate::commands::machine::{Machine, locate_checkout};
 use crate::docker::{ComposeCli, DockerCompose};
 use crate::env_sync::has_creation_source;
 use crate::error::ToolError;
-use crate::global_config::GlobalConfig;
+use crate::global_config::{GlobalConfig, home_from_environment};
 use crate::instance_processes::{CLAUDE_COMM, claude_pid_from_environment, session_root_process};
+use crate::project_config::{CONFIG_FILE, LOCAL_CONFIG_FILE};
 use crate::registry::record::Registry;
 use crate::report::{DoctorReport, REPORT_VERSION};
+use crate::worktree_guard::guard_status;
+use crate::worktree_require_override::read_require_key;
 
 /// Runs `ds doctor` on the current folder and prints the report.
 pub fn run_doctor_command(color: ColorChoice, as_json: bool) -> Result<u8, ToolError> {
     let checkout = locate_checkout()?;
     let machine = Machine::from_process()?;
-    let geometry = GlobalConfig::load(&machine.paths.config_file)?.slots;
+    let global = GlobalConfig::load(&machine.paths.config_file)?;
+    let geometry = global.slots;
     let registry = machine.store.read()?;
     let slot_check = registry
         .find(&checkout.root)
         .map(|instance| SlotCheckInput { instance, geometry });
     let compose = DockerCompose::from_environment(&checkout.root);
-    let report = run_doctor(
+    let mut report = run_doctor(
         &checkout,
         &compose,
         slot_check,
         Some(&registry),
         &observe_session_root(),
     )?;
+    let guard_input = GuardCheckInput {
+        status: guard_status(
+            &global.require,
+            home_from_environment().as_deref(),
+            &checkout,
+        )?,
+        is_registered: registry.find(&checkout.root).is_some(),
+        committed_key: read_require_key(&checkout.root, CONFIG_FILE).ok().flatten(),
+        tracked_local_key: tracked_local_key(&checkout),
+    };
+    report.findings.extend(check_worktree_guard(guard_input));
+    report.summary = Summary::of(&report.findings);
     let text = if as_json {
         let mut json = serde_json::to_string_pretty(&report)
             .map_err(|error| ToolError::WriteReport(std::io::Error::other(error)))?;
@@ -52,6 +69,13 @@ pub fn run_doctor_command(color: ColorChoice, as_json: bool) -> Result<u8, ToolE
     } else {
         exit_code::SUCCESS
     })
+}
+
+fn tracked_local_key(checkout: &Checkout) -> Option<bool> {
+    if !checkout.is_git || !checkout.is_tracked(LOCAL_CONFIG_FILE).ok()? {
+        return None;
+    }
+    read_require_key(&checkout.root, LOCAL_CONFIG_FILE).ok()?
 }
 
 /// What `/proc` says about the session that runs `ds doctor`; nothing outside

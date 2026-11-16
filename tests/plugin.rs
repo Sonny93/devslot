@@ -72,10 +72,21 @@ fn should_hook_the_four_events_with_their_timeouts() {
 }
 
 #[test]
+fn should_run_the_pre_tool_use_hook_on_the_write_tools_with_a_shorter_timeout() {
+    let hooks = read_json("plugin/hooks/hooks.json");
+
+    let write_group = &hooks["hooks"]["PreToolUse"][1];
+
+    assert_eq!(write_group["matcher"], "Edit|Write|MultiEdit|NotebookEdit");
+    assert_eq!(write_group["hooks"][0]["command"], "ds hook pre-tool-use");
+    assert_eq!(write_group["hooks"][0]["timeout"], 10);
+}
+
+#[test]
 fn should_run_a_ds_hook_command_the_cli_accepts_for_every_hook() {
     let commands = hook_commands();
 
-    assert_eq!(commands.len(), 4);
+    assert_eq!(commands.len(), 5);
     for (event, command) in commands {
         assert!(command.starts_with(HOOK_COMMAND_PREFIX), "{event}");
         let words = command.split_whitespace();
@@ -89,6 +100,7 @@ fn should_match_each_event_to_its_hook_subcommand() {
     let expected = [
         ("WorktreeCreate", "ds hook worktree-create"),
         ("WorktreeRemove", "ds hook worktree-remove"),
+        ("PreToolUse", "ds hook pre-tool-use"),
         ("PreToolUse", "ds hook pre-tool-use"),
         ("SessionStart", "ds hook session-start"),
     ];
