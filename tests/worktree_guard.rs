@@ -271,7 +271,8 @@ fn should_give_the_subagent_reason_when_the_call_comes_from_a_subagent() {
 
     let reason = denial_reason(&run);
     assert!(reason.contains("Do not call EnterWorktree from a subagent"));
-    assert!(reason.contains("the main session must enter a worktree"));
+    assert!(reason.contains("the main session must either enter a worktree with EnterWorktree"));
+    assert!(reason.contains("spawn this agent with its cwd set to a linked worktree"));
 }
 
 #[test]
@@ -400,7 +401,9 @@ fn should_give_the_subagent_reason_for_ds_up_when_the_call_comes_from_a_subagent
         }),
     );
 
-    assert!(denial_reason(&run).contains("Do not call EnterWorktree from a subagent"));
+    let reason = denial_reason(&run);
+    assert!(reason.contains("Do not call EnterWorktree from a subagent"));
+    assert!(reason.contains("spawn this agent with its cwd set to a linked worktree"));
 }
 
 #[test]
