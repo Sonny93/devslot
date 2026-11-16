@@ -4,13 +4,20 @@
 use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use rustix::process::{WaitId, WaitIdOptions};
 
 const SPAWN_ATTEMPTS: u32 = 5;
 const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(20);
 const FIRST_POLL_DELAY: Duration = Duration::from_micros(500);
 const LONGEST_POLL_DELAY: Duration = Duration::from_millis(10);
+const READER_GRACE_AFTER_EXIT: Duration = Duration::from_secs(2);
+const READ_CHUNK_BYTES: usize = 8192;
+const READER_GRACE_AFTER_KILL: Duration = Duration::from_secs(1);
 
 /// Spawns `command`, trying again a few times when the executable is busy
 /// (a script that was just written is still open for writing in another thread).
@@ -66,7 +73,8 @@ pub enum CaptureFailure {
 }
 
 /// Runs `command` in its own process group with stdin closed, and captures
-/// stdout and stderr. Kills the group after `timeout`.
+/// stdout and stderr. Kills the group after `timeout`. When the program exits but a descendant
+/// keeps the pipes open, the output read so far is returned after a short grace.
 pub fn capture_with_timeout(
     mut command: Command,
     timeout: Duration,
@@ -81,37 +89,91 @@ pub fn capture_with_timeout(
     let stderr_reader = read_in_thread(child.stderr.take());
     let started = Instant::now();
     let mut delay = None;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < timeout => {
+    loop {
+        match has_exited(&child) {
+            Ok(true) => break,
+            Ok(false) if started.elapsed() < timeout => {
                 let next = next_poll_delay(delay);
                 thread::sleep(next);
                 delay = Some(next);
             }
-            Ok(None) => {
+            Ok(false) => {
                 kill_process_group(&child);
                 let _ = child.wait();
                 return Err(CaptureFailure::TimedOut);
             }
             Err(error) => return Err(CaptureFailure::Io(error)),
         }
-    };
+    }
+    let deadline = started + timeout;
+    let readers = [stdout_reader, stderr_reader];
+    let grace = READER_GRACE_AFTER_EXIT.min(deadline.saturating_duration_since(Instant::now()));
+    if !wait_for_readers(&readers, grace) {
+        kill_process_group(&child);
+        wait_for_readers(&readers, READER_GRACE_AFTER_KILL);
+    }
+    let status = child.wait().map_err(CaptureFailure::Io)?;
+    let [stdout_reader, stderr_reader] = readers;
     Ok(CapturedOutput {
         status,
-        stdout: stdout_reader.join().unwrap_or_default(),
-        stderr: stderr_reader.join().unwrap_or_default(),
+        stdout: stdout_reader.snapshot(),
+        stderr: stderr_reader.snapshot(),
     })
 }
 
-fn read_in_thread<R: Read + Send + 'static>(stream: Option<R>) -> thread::JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut bytes = Vec::new();
-        if let Some(mut stream) = stream {
-            let _ = stream.read_to_end(&mut bytes);
-        }
-        bytes
+/// Whether `child` has exited, without reaping it: the zombie keeps its pid,
+/// and so its process group id, from being reused until the group is killed.
+fn has_exited(child: &Child) -> io::Result<bool> {
+    let pid = rustix::process::Pid::from_child(child);
+    let options = WaitIdOptions::NOHANG | WaitIdOptions::EXITED | WaitIdOptions::NOWAIT;
+    Ok(rustix::process::waitid(WaitId::Pid(pid), options)?.is_some())
+}
+
+/// A thread that appends what a pipe delivers to a shared buffer, so the
+/// bytes read so far stay available when the pipe never reaches its end.
+struct PipeReader {
+    buffer: Arc<Mutex<Vec<u8>>>,
+    finished: Receiver<()>,
+}
+
+impl PipeReader {
+    fn snapshot(&self) -> Vec<u8> {
+        self.buffer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Waits until both readers reached the end of their pipe, or `wait` passed.
+fn wait_for_readers(readers: &[PipeReader; 2], wait: Duration) -> bool {
+    let deadline = Instant::now() + wait;
+    readers.iter().all(|reader| {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        reader.finished.recv_timeout(remaining) != Err(RecvTimeoutError::Timeout)
     })
+}
+
+fn read_in_thread<R: Read + Send + 'static>(stream: Option<R>) -> PipeReader {
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let (sender, finished) = mpsc::channel();
+    let shared = Arc::clone(&buffer);
+    thread::spawn(move || {
+        if let Some(mut stream) = stream {
+            let mut chunk = [0_u8; READ_CHUNK_BYTES];
+            while let Ok(count) = stream.read(&mut chunk) {
+                if count == 0 {
+                    break;
+                }
+                shared
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend_from_slice(&chunk[..count]);
+            }
+        }
+        let _ = sender.send(());
+    });
+    PipeReader { buffer, finished }
 }
 
 #[cfg(test)]
@@ -157,6 +219,19 @@ mod tests {
 
         assert!(matches!(outcome, Err(CaptureFailure::TimedOut)));
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn should_return_the_output_when_a_background_process_keeps_the_pipes_open() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo done; sleep 30 &"]);
+        let started = Instant::now();
+
+        let output = capture_with_timeout(command, Duration::from_secs(10)).unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"done\n");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
