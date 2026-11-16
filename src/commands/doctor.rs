@@ -5,6 +5,7 @@ use crate::checkout::Checkout;
 use crate::checks::env::{EnvCheckInput, check_env};
 use crate::checks::env_config::check_forced_port_conflicts;
 use crate::checks::finding::{Finding, Summary};
+use crate::checks::session::{SessionRoot, check_session_root};
 use crate::checks::slot::{SlotCheckInput, check_slot_geometry};
 use crate::checks::vite::check_vite;
 use crate::cli::exit_code;
@@ -16,6 +17,7 @@ use crate::docker::{ComposeCli, DockerCompose};
 use crate::env_sync::has_creation_source;
 use crate::error::ToolError;
 use crate::global_config::GlobalConfig;
+use crate::instance_processes::{CLAUDE_COMM, claude_pid_from_environment, session_root_process};
 use crate::registry::record::Registry;
 use crate::report::{DoctorReport, REPORT_VERSION};
 
@@ -29,7 +31,13 @@ pub fn run_doctor_command(color: ColorChoice, as_json: bool) -> Result<u8, ToolE
         .find(&checkout.root)
         .map(|instance| SlotCheckInput { instance, geometry });
     let compose = DockerCompose::from_environment(&checkout.root);
-    let report = run_doctor(&checkout, &compose, slot_check, Some(&registry))?;
+    let report = run_doctor(
+        &checkout,
+        &compose,
+        slot_check,
+        Some(&registry),
+        &observe_session_root(),
+    )?;
     let text = if as_json {
         let mut json = serde_json::to_string_pretty(&report)
             .map_err(|error| ToolError::WriteReport(std::io::Error::other(error)))?;
@@ -46,12 +54,27 @@ pub fn run_doctor_command(color: ColorChoice, as_json: bool) -> Result<u8, ToolE
     })
 }
 
-/// Reviews `checkout`. `slot_check` is given when the checkout is registered.
+/// What `/proc` says about the session that runs `ds doctor`; nothing outside
+/// Linux or without `CLAUDE_PID`.
+fn observe_session_root() -> SessionRoot {
+    if !cfg!(target_os = "linux") || std::env::var_os("CLAUDE_PID").is_none() {
+        return SessionRoot::NotInSession;
+    }
+    match session_root_process(claude_pid_from_environment()) {
+        None => SessionRoot::Missing,
+        Some(process) if process.comm == CLAUDE_COMM => SessionRoot::Claude,
+        Some(process) => SessionRoot::Other(process),
+    }
+}
+
+/// Reviews `checkout`. `slot_check` is given when the checkout is registered;
+/// `session_root` is what was found about the session that runs `ds`.
 pub fn run_doctor(
     checkout: &Checkout,
     compose: &dyn ComposeCli,
     slot_check: Option<SlotCheckInput<'_>>,
     registry: Option<&Registry>,
+    session_root: &SessionRoot,
 ) -> Result<DoctorReport, ToolError> {
     let analysis = CheckoutAnalysis::analyze(checkout, compose, ProbeScope::AllScannedFiles)?;
     let mut findings = Vec::new();
@@ -64,6 +87,7 @@ pub fn run_doctor(
     findings.extend(forced_port_findings(checkout, &analysis, registry));
     findings.extend(check_vite(&checkout.root, &analysis.vite));
     findings.extend(slot_check.and_then(check_slot_geometry));
+    findings.extend(check_session_root(session_root));
     Ok(DoctorReport {
         version: REPORT_VERSION,
         checkout: checkout.root.display().to_string(),
@@ -117,7 +141,13 @@ mod tests {
     use crate::docker::DockerError;
 
     fn run_in(root: &Path, compose: &dyn ComposeCli) -> Result<DoctorReport, ToolError> {
-        run_doctor(&Checkout::locate(root)?, compose, None, None)
+        run_doctor(
+            &Checkout::locate(root)?,
+            compose,
+            None,
+            None,
+            &SessionRoot::NotInSession,
+        )
     }
 
     struct ScriptedCompose {
@@ -366,10 +396,37 @@ mod tests {
             &ScriptedCompose::answering("{}"),
             Some(slot_check),
             None,
+            &SessionRoot::NotInSession,
         )
         .unwrap();
 
         assert!(checks_of(&report).contains(&Check::SlotGeometryChanged));
+    }
+
+    #[test]
+    fn should_report_the_session_warning_when_the_session_root_is_not_named_claude() {
+        let root = project(&[(".env", "A=1\n")]);
+        let session_root = SessionRoot::Other(crate::instance_processes::ProcessSummary {
+            pid: 42,
+            comm: "node".to_owned(),
+        });
+
+        let report = run_doctor(
+            &Checkout::locate(root.path()).unwrap(),
+            &ScriptedCompose::answering("{}"),
+            None,
+            None,
+            &session_root,
+        )
+        .unwrap();
+
+        assert_eq!(
+            (
+                checks_of(&report).contains(&Check::SessionProcessName),
+                report.summary.warnings
+            ),
+            (true, 1)
+        );
     }
 
     #[test]

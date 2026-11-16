@@ -81,6 +81,8 @@ pub enum Check {
     ForcedPortConflict,
     /// The registered range no longer matches the slot of the current settings.
     SlotGeometryChanged,
+    /// The session runs under a process not named `claude`, or none is found: no lease is written.
+    SessionProcessName,
 }
 
 /// One problem found in the project.

@@ -6,5 +6,6 @@ pub mod env_config;
 pub mod finding;
 pub mod isolation;
 pub mod local_host;
+pub mod session;
 pub mod slot;
 pub mod vite;

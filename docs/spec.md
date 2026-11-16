@@ -105,6 +105,7 @@ The same checks serve `ds up`, `ds run`, `ds ensure` and `ds doctor`. An error b
 | `env_local_host_port`: a value holds a local host (`localhost`, `127.0.0.1`, `0.0.0.0`, `[::1]`) followed by the default port of a managed variable | warning | It does not follow the assigned port, unless `[env]` rebuilds it. External hosts are ignored. |
 | `compose_skipped`: a scanned compose file that Compose rejects on its own | warning | Override files and fragments fail alone; they are merged into the dev compose instead. |
 | `slot_geometry_changed`: the registered range no longer matches the slot settings | warning | The instance keeps its ports; a change of slot settings does not move it. |
+| `session_process_name`: `CLAUDE_PID` is set (a Claude Code session) and the session process is not named `claude`, or none is found (Linux only) | warning | No session lease is written, so a worktree removal by another session will not see this session's worktrees in use. |
 | `compose_missing`: no compose file at the root | info | There is nothing to isolate; the other checks still run. |
 
 **Rule for `env_file`**: block values are host-side ports, so a container that loads `.env` pins its internal ports in `environment:`, which takes precedence over `env_file`:

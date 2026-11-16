@@ -4,20 +4,39 @@
 
 use super::foreign::session_root;
 use super::proc_root::ProcRoot;
-use super::{CLAUDE_COMM, SessionProcess};
+use super::{CLAUDE_COMM, ProcessSummary, SessionProcess};
 
 /// The session that runs `ds` (see [`session_root`] for how it is found) with
-/// its start time; `None` when there is none or it cannot be read.
+/// its start time; `None` when there is none, when its root is not named
+/// `claude` (the liveness check would never find such a lease alive), or when
+/// it cannot be read.
 pub fn current_session(
     root: &ProcRoot,
     own_pid: i32,
     claude_pid: Option<i32>,
 ) -> Option<SessionProcess> {
     let pid = session_root(root, own_pid, claude_pid)?;
+    if root.comm(pid) != CLAUDE_COMM {
+        return None;
+    }
     let stat = root.stat(pid)?;
     Some(SessionProcess {
         pid,
         start_time: stat.start_time,
+    })
+}
+
+/// The process `ds doctor` reports on when the session runs under `CLAUDE_PID`:
+/// the session root with its kernel name; `None` when there is no root.
+pub fn session_root_process(
+    root: &ProcRoot,
+    own_pid: i32,
+    claude_pid: Option<i32>,
+) -> Option<ProcessSummary> {
+    let pid = session_root(root, own_pid, claude_pid)?;
+    Some(ProcessSummary {
+        pid,
+        comm: root.comm(pid),
     })
 }
 
@@ -87,6 +106,60 @@ mod tests {
         );
 
         assert_eq!(current_session(&fake.root(), OWN_PID, None), None);
+    }
+
+    #[test]
+    fn should_find_no_session_when_the_hinted_claude_pid_is_an_ancestor_not_named_claude() {
+        let fake = fake_with_session();
+        fake.remove_process(CLAUDE_PID);
+        fake.add_process(
+            CLAUDE_PID,
+            SHELL_PID,
+            CLAUDE_PID,
+            "node",
+            &fake.directory("/"),
+        );
+
+        assert_eq!(
+            current_session(&fake.root(), OWN_PID, Some(CLAUDE_PID)),
+            None
+        );
+    }
+
+    #[test]
+    fn should_name_the_session_root_when_the_hinted_claude_pid_is_not_named_claude() {
+        let fake = fake_with_session();
+        fake.remove_process(CLAUDE_PID);
+        fake.add_process(
+            CLAUDE_PID,
+            SHELL_PID,
+            CLAUDE_PID,
+            "node",
+            &fake.directory("/"),
+        );
+
+        assert_eq!(
+            session_root_process(&fake.root(), OWN_PID, Some(CLAUDE_PID)),
+            Some(ProcessSummary {
+                pid: CLAUDE_PID,
+                comm: "node".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn should_find_no_session_root_process_when_there_is_no_root() {
+        let fake = fake_with_session();
+        fake.remove_process(CLAUDE_PID);
+        fake.add_process(
+            CLAUDE_PID,
+            SHELL_PID,
+            CLAUDE_PID,
+            "bash",
+            &fake.directory("/"),
+        );
+
+        assert_eq!(session_root_process(&fake.root(), OWN_PID, None), None);
     }
 
     #[test]

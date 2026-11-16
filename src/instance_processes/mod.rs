@@ -237,11 +237,21 @@ pub fn find_foreign_processes(
 
 /// The Claude Code session that runs `ds`: `claude_pid` when it is an
 /// ancestor of `ds`, otherwise the nearest ancestor named `claude`; `None`
-/// when there is none.
+/// when there is none, or when that process is not named `claude` (a lease
+/// for it would be seen dead at every check).
 #[cfg(target_os = "linux")]
 pub fn current_session(claude_pid: Option<i32>) -> Option<SessionProcess> {
     let root = proc_root::ProcRoot::system();
     session::current_session(&root, rustix::process::getpid().as_raw_pid(), claude_pid)
+}
+
+/// The root of the session that runs `ds` (same rule as [`current_session`],
+/// without requiring the name `claude`) with its kernel name; `None` when
+/// there is no root.
+#[cfg(target_os = "linux")]
+pub fn session_root_process(claude_pid: Option<i32>) -> Option<ProcessSummary> {
+    let root = proc_root::ProcRoot::system();
+    session::session_root_process(&root, rustix::process::getpid().as_raw_pid(), claude_pid)
 }
 
 /// Whether `session` still runs: its pid exists, is not a zombie, is named
@@ -285,6 +295,12 @@ pub fn find_foreign_processes(
 /// No session is found outside Linux.
 #[cfg(not(target_os = "linux"))]
 pub fn current_session(_claude_pid: Option<i32>) -> Option<SessionProcess> {
+    None
+}
+
+/// No session root is found outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn session_root_process(_claude_pid: Option<i32>) -> Option<ProcessSummary> {
     None
 }
 
