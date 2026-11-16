@@ -3,8 +3,11 @@
 //!
 //! 1. checks with no side effect: the path is the root of a linked worktree
 //!    that git lists at exactly that path, the registry entry is read, the
-//!    worktree is not locked;
-//! 2. the instance's processes are stopped (only the ones that belong to it);
+//!    worktree is not locked, and no process of somebody else (another
+//!    session, an editor) runs in it;
+//! 2. the instance's processes are stopped (only the ones that belong to it),
+//!    then the check for somebody else's processes runs again, because
+//!    stopping can take seconds and a person can wait at a prompt;
 //! 3. `git worktree remove --force`; when git fails after it forgot the
 //!    worktree, the removal goes on and the leftover folder is reported;
 //! 4. the instance's Docker data is deleted by label and its entry forgotten;
@@ -24,7 +27,10 @@ use crate::git_worktree::{
     WorktreeGitError, current_branch, delete_branch, is_branch_merged, list_worktrees,
     remove_worktree,
 };
-use crate::instance_processes::{InstanceScope, find_instance_processes, stop_instance_processes};
+use crate::instance_processes::{
+    CLAUDE_COMM, InstanceScope, ProcessControl, ProcessSummary, Requester, SystemProcesses,
+    join_summaries,
+};
 use crate::registry::record::{InstanceRecord, RegistryChange};
 
 const DETACHED_HEAD_NAME: &str = "HEAD";
@@ -39,6 +45,15 @@ pub enum RemovalFailure {
     /// The worktree is locked: nothing was stopped, deleted or forgotten.
     #[error("{} is locked (git worktree unlock first)", .0.display())]
     Locked(PathBuf),
+    /// Another session or program runs in the worktree: nothing was deleted
+    /// or forgotten (instance processes may already be stopped).
+    #[error("{}", describe_in_use(.path, .processes))]
+    InUse {
+        /// The worktree.
+        path: PathBuf,
+        /// The processes of somebody else that run in it.
+        processes: Vec<ProcessSummary>,
+    },
     /// Git refused, or could not run.
     #[error(transparent)]
     Git(#[from] WorktreeGitError),
@@ -54,19 +69,39 @@ impl RemovalFailure {
         match self {
             Self::NotLinkedWorktree(_)
             | Self::Locked(_)
+            | Self::InUse { .. }
             | Self::Git(WorktreeGitError::Rejected { .. }) => exit_code::ERROR,
             Self::Git(WorktreeGitError::Tool(_)) | Self::Checkout(_) => exit_code::TOOL_FAILURE,
         }
     }
 
-    /// Prints the failure on stderr. A lock says what to do about it, so it
-    /// is not prefixed with `error:`.
+    /// Prints the failure on stderr. A lock or a process in use says what to
+    /// do about it, so they are not prefixed with `error:`.
     pub fn announce(&self) {
         match self {
-            Self::Locked(_) => eprintln!("ds: {self}"),
+            Self::Locked(_) | Self::InUse { .. } => eprintln!("ds: {self}"),
             _ => eprintln!("ds: error: {self}"),
         }
     }
+}
+
+fn describe_in_use(path: &Path, processes: &[ProcessSummary]) -> String {
+    format!(
+        "{path} is in use by {}; nothing was deleted (the worktree, its data and its slot are kept). Close {}, or run ds worktree rm --force {path} from a terminal.",
+        describe_users(processes),
+        if processes.len() == 1 { "it" } else { "them" },
+        path = path.display(),
+    )
+}
+
+/// The processes that use a worktree, for a message: names the other Claude
+/// Code session when one of them is its `claude` process.
+pub fn describe_users(processes: &[ProcessSummary]) -> String {
+    let list = join_summaries(processes);
+    if processes.iter().any(|process| process.comm == CLAUDE_COMM) {
+        return format!("another Claude Code session ({list})");
+    }
+    list
 }
 
 /// What removing a worktree needs to know before the folder is gone.
@@ -143,26 +178,87 @@ pub fn ensure_listed_and_unlocked(removal: &Removal) -> Result<(), RemovalFailur
     Ok(())
 }
 
-/// Removes the worktree at `path` (canonical): the whole sequence.
-pub fn remove_linked_worktree(path: PathBuf) -> Result<(), RemovalFailure> {
-    remove_prepared(&prepare_removal(path)?)
+/// What a removal acts through: Docker, the processes of the machine, who
+/// asks, and whether the check for somebody else's processes is skipped.
+pub struct RemovalContext<'a> {
+    /// Deletes the instance's containers, volumes and networks.
+    pub runner: &'a dyn ComposeRunner,
+    /// Finds and stops processes.
+    pub processes: &'a dyn ProcessControl,
+    /// Whoever asked for the removal.
+    pub requester: Requester,
+    /// Skips both checks for somebody else's processes (`ds worktree rm --force`).
+    pub is_forced: bool,
 }
 
-/// Runs the steps 1 (lock check) to 5 on a prepared worktree.
-pub fn remove_prepared(prepared: &PreparedRemoval) -> Result<(), RemovalFailure> {
+/// Removes the worktree at `path` (canonical) for the `WorktreeRemove` hook:
+/// the whole sequence. `claude_pid` is `CLAUDE_PID` from the hook environment.
+pub fn remove_linked_worktree(
+    path: PathBuf,
+    claude_pid: Option<i32>,
+) -> Result<(), RemovalFailure> {
+    let prepared = prepare_removal(path)?;
+    let runner = DockerRunner::from_environment();
+    let context = RemovalContext {
+        runner: &runner,
+        processes: &SystemProcesses,
+        requester: Requester::Session { claude_pid },
+        is_forced: false,
+    };
+    remove_prepared(&prepared, &context)
+}
+
+/// Removes a prepared worktree for `ds worktree rm`.
+pub fn remove_from_terminal(
+    prepared: &PreparedRemoval,
+    is_forced: bool,
+) -> Result<(), RemovalFailure> {
+    let runner = DockerRunner::from_environment();
+    let context = RemovalContext {
+        runner: &runner,
+        processes: &SystemProcesses,
+        requester: Requester::Terminal,
+        is_forced,
+    };
+    remove_prepared(prepared, &context)
+}
+
+/// Runs the steps 1 (lock and use checks) to 5 on a prepared worktree.
+pub fn remove_prepared(
+    prepared: &PreparedRemoval,
+    context: &RemovalContext,
+) -> Result<(), RemovalFailure> {
     let removal = &prepared.removal;
     ensure_listed_and_unlocked(removal)?;
-    stop_processes(prepared);
+    ensure_not_in_use(prepared, context)?;
+    stop_processes(prepared, context.processes);
+    ensure_not_in_use(prepared, context)?;
     remove_git_worktree(removal)?;
     if let Some(instance) = &prepared.instance {
-        forget_instance(
-            &instance.machine,
-            &instance.record,
-            &DockerRunner::from_environment(),
-        );
+        forget_instance(&instance.machine, &instance.record, context.runner);
     }
     delete_branch_when_merged(removal);
     Ok(())
+}
+
+fn ensure_not_in_use(
+    prepared: &PreparedRemoval,
+    context: &RemovalContext,
+) -> Result<(), RemovalFailure> {
+    if context.is_forced {
+        return Ok(());
+    }
+    let path = &prepared.removal.path;
+    let processes = context
+        .processes
+        .foreign(path, prepared.scope().as_ref(), context.requester);
+    if processes.is_empty() {
+        return Ok(());
+    }
+    Err(RemovalFailure::InUse {
+        path: path.clone(),
+        processes,
+    })
 }
 
 fn locate_removal(path: PathBuf) -> Result<Removal, RemovalFailure> {
@@ -200,14 +296,14 @@ fn find_instance(path: &Path) -> Result<Option<RegisteredInstance>, ToolError> {
     Ok(record.map(|record| RegisteredInstance { machine, record }))
 }
 
-fn stop_processes(prepared: &PreparedRemoval) {
+fn stop_processes(prepared: &PreparedRemoval, processes: &dyn ProcessControl) {
     let path = &prepared.removal.path;
     let scope = prepared.scope();
     if scope.is_none() {
-        print_still_running(find_instance_processes(path, None).still_running_line(path));
+        print_still_running(processes.find(path, None).still_running_line(path));
         return;
     }
-    let stopped = stop_instance_processes(path, scope.as_ref());
+    let stopped = processes.stop(path, scope.as_ref());
     for line in stopped.report.stopped_lines() {
         eprintln!("{line}");
     }
@@ -309,7 +405,341 @@ fn delete_merged(removal: &Removal, branch: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::process::Command;
+
+    use pretty_assertions::assert_eq;
+
     use super::*;
+    use crate::compose::runner::testing::FakeComposeRunner;
+    use crate::discovery::PortKind;
+    use crate::instance_processes::{ProcessReport, StopReport};
+    use crate::paths::{DevslotPaths, PathVariables};
+    use crate::port_range::PortRange;
+    use crate::registry::record::{AssignedPort, PortDetail};
+    use crate::registry::store::RegistryStore;
+
+    const INSTANCE_NAME: &str = "app-feat-3f2a";
+    const NEIGHBOUR_NAME: &str = "app-other-9c1d";
+
+    struct FakeProcesses {
+        foreign_answers: RefCell<VecDeque<Vec<ProcessSummary>>>,
+        stop_calls: Cell<u32>,
+    }
+
+    impl FakeProcesses {
+        fn answering(answers: Vec<Vec<ProcessSummary>>) -> Self {
+            Self {
+                foreign_answers: RefCell::new(answers.into()),
+                stop_calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl ProcessControl for FakeProcesses {
+        fn find(&self, _worktree: &Path, _scope: Option<&InstanceScope>) -> ProcessReport {
+            ProcessReport::default()
+        }
+
+        fn stop(&self, _worktree: &Path, _scope: Option<&InstanceScope>) -> StopReport {
+            self.stop_calls.set(self.stop_calls.get() + 1);
+            StopReport::default()
+        }
+
+        fn foreign(
+            &self,
+            _worktree: &Path,
+            _scope: Option<&InstanceScope>,
+            _requester: Requester,
+        ) -> Vec<ProcessSummary> {
+            self.foreign_answers
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_default()
+        }
+    }
+
+    fn other_session() -> Vec<ProcessSummary> {
+        vec![ProcessSummary {
+            pid: 1234,
+            comm: "claude".to_owned(),
+        }]
+    }
+
+    fn git(directory: &Path, arguments: &[&str]) {
+        let status = Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(arguments)
+            .current_dir(directory)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {arguments:?} failed");
+    }
+
+    fn record(path: &Path, name: &str, slot: u32, port: u16) -> InstanceRecord {
+        InstanceRecord {
+            path: path.to_path_buf(),
+            name: name.to_owned(),
+            slot,
+            range: PortRange {
+                first: port,
+                last: port + 9,
+            },
+            ports: vec![AssignedPort {
+                variable: "PORT".to_owned(),
+                port,
+                detail: PortDetail {
+                    kind: PortKind::Web,
+                    service: None,
+                    target: None,
+                },
+            }],
+        }
+    }
+
+    struct Fixture {
+        _folder: tempfile::TempDir,
+        main: PathBuf,
+        prepared: PreparedRemoval,
+    }
+
+    fn fixture() -> Fixture {
+        let folder = tempfile::tempdir().unwrap();
+        let base = folder.path().canonicalize().unwrap();
+        let main = base.join("main");
+        let worktree = base.join("worktrees/feat");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        let home = base.join("home");
+        let paths = DevslotPaths::from_variables(&PathVariables {
+            config_home: Some(home.join("config").into()),
+            state_home: Some(home.join("state").into()),
+            home: Some(home.into()),
+        })
+        .unwrap();
+        let machine = Machine {
+            store: RegistryStore::new(paths.clone()),
+            paths,
+        };
+        let instance = record(&worktree, INSTANCE_NAME, 1, 20_050);
+        let neighbour = record(&base.join("other"), NEIGHBOUR_NAME, 2, 20_060);
+        machine
+            .store
+            .locked(LOCK_TIMEOUT, |locked| {
+                locked.apply(&[
+                    RegistryChange::SaveInstance(instance.clone()),
+                    RegistryChange::SaveInstance(neighbour),
+                ])
+            })
+            .unwrap();
+        let prepared = PreparedRemoval {
+            removal: Removal {
+                path: worktree,
+                main_root: main.clone(),
+                branch: Some("feat".to_owned()),
+            },
+            instance: Some(RegisteredInstance {
+                machine,
+                record: instance,
+            }),
+        };
+        Fixture {
+            _folder: folder,
+            main,
+            prepared,
+        }
+    }
+
+    impl Fixture {
+        fn is_listed(&self) -> bool {
+            list_worktrees(&self.main)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.is_at(&self.prepared.removal.path))
+        }
+
+        fn registered_names(&self) -> Vec<String> {
+            let machine = &self.prepared.instance.as_ref().unwrap().machine;
+            machine
+                .store
+                .read()
+                .unwrap()
+                .instances
+                .iter()
+                .map(|instance| instance.name.clone())
+                .collect()
+        }
+    }
+
+    fn runner() -> FakeComposeRunner {
+        FakeComposeRunner::default()
+            .with_project_containers(vec!["container-1".to_owned()])
+            .with_volumes(vec!["volume-1".to_owned()])
+    }
+
+    fn deletion_commands(runner: &FakeComposeRunner) -> Vec<&'static str> {
+        runner
+            .calls()
+            .iter()
+            .map(|call| call.command)
+            .filter(|command| matches!(*command, "docker rm" | "volume rm" | "network rm"))
+            .collect()
+    }
+
+    fn removal_context<'a>(
+        runner: &'a FakeComposeRunner,
+        processes: &'a FakeProcesses,
+        requester: Requester,
+        is_forced: bool,
+    ) -> RemovalContext<'a> {
+        RemovalContext {
+            runner,
+            processes,
+            requester,
+            is_forced,
+        }
+    }
+
+    const HOOK: Requester = Requester::Session { claude_pid: None };
+
+    #[test]
+    fn should_refuse_and_change_nothing_when_another_session_uses_the_worktree() {
+        let fixture = fixture();
+        let runner = runner();
+        let processes = FakeProcesses::answering(vec![other_session()]);
+
+        let failure = remove_prepared(
+            &fixture.prepared,
+            &removal_context(&runner, &processes, HOOK, false),
+        )
+        .unwrap_err();
+
+        assert!(matches!(failure, RemovalFailure::InUse { .. }));
+        assert_eq!(failure.exit_code(), exit_code::ERROR);
+        assert_eq!(processes.stop_calls.get(), 0);
+        assert_eq!(deletion_commands(&runner), Vec::<&str>::new());
+        assert_eq!(
+            fixture.registered_names(),
+            vec![INSTANCE_NAME, NEIGHBOUR_NAME]
+        );
+        assert!(fixture.is_listed());
+    }
+
+    #[test]
+    fn should_refuse_and_change_nothing_when_a_process_appears_while_the_targets_stop() {
+        let fixture = fixture();
+        let runner = runner();
+        let processes = FakeProcesses::answering(vec![Vec::new(), other_session()]);
+
+        let failure = remove_prepared(
+            &fixture.prepared,
+            &removal_context(&runner, &processes, HOOK, false),
+        )
+        .unwrap_err();
+
+        assert!(matches!(failure, RemovalFailure::InUse { .. }));
+        assert_eq!(processes.stop_calls.get(), 1);
+        assert_eq!(deletion_commands(&runner), Vec::<&str>::new());
+        assert_eq!(
+            fixture.registered_names(),
+            vec![INSTANCE_NAME, NEIGHBOUR_NAME]
+        );
+        assert!(fixture.is_listed());
+    }
+
+    #[test]
+    fn should_remove_the_worktree_and_keep_the_neighbour_instance_when_nobody_else_uses_it() {
+        let fixture = fixture();
+        let runner = runner();
+        let processes = FakeProcesses::answering(Vec::new());
+
+        remove_prepared(
+            &fixture.prepared,
+            &removal_context(&runner, &processes, HOOK, false),
+        )
+        .unwrap();
+
+        assert_eq!(deletion_commands(&runner), vec!["docker rm", "volume rm"]);
+        assert!(
+            runner
+                .calls()
+                .iter()
+                .all(|call| call.project != NEIGHBOUR_NAME)
+        );
+        assert_eq!(fixture.registered_names(), vec![NEIGHBOUR_NAME]);
+        assert!(!fixture.is_listed());
+    }
+
+    #[test]
+    fn should_remove_the_worktree_despite_another_session_when_forced() {
+        let fixture = fixture();
+        let runner = runner();
+        let processes = FakeProcesses::answering(vec![other_session(), other_session()]);
+
+        remove_prepared(
+            &fixture.prepared,
+            &removal_context(&runner, &processes, Requester::Terminal, true),
+        )
+        .unwrap();
+
+        assert_eq!(fixture.registered_names(), vec![NEIGHBOUR_NAME]);
+        assert!(!fixture.is_listed());
+    }
+
+    #[test]
+    fn should_list_the_users_and_say_how_to_force_when_the_worktree_is_in_use() {
+        let failure = RemovalFailure::InUse {
+            path: PathBuf::from("/x/feat"),
+            processes: vec![
+                ProcessSummary {
+                    pid: 1234,
+                    comm: "claude".to_owned(),
+                },
+                ProcessSummary {
+                    pid: 5678,
+                    comm: "nvim".to_owned(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            failure.to_string(),
+            "/x/feat is in use by another Claude Code session (1234 (claude), 5678 (nvim)); nothing was deleted (the worktree, its data and its slot are kept). Close them, or run ds worktree rm --force /x/feat from a terminal."
+        );
+    }
+
+    #[test]
+    fn should_not_name_a_claude_session_when_only_other_programs_use_the_worktree() {
+        let failure = RemovalFailure::InUse {
+            path: PathBuf::from("/x/feat"),
+            processes: vec![ProcessSummary {
+                pid: 5678,
+                comm: "nvim".to_owned(),
+            }],
+        };
+
+        assert!(
+            failure
+                .to_string()
+                .starts_with("/x/feat is in use by 5678 (nvim); nothing")
+        );
+    }
 
     #[test]
     fn should_exit_1_when_the_worktree_is_locked_or_not_a_linked_worktree() {

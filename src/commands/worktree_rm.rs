@@ -1,7 +1,7 @@
 //! `ds worktree rm <name|path>`: removes a linked worktree and everything its
 //! instance owns. It shows what would be lost first (processes, uncommitted
-//! changes, commits found nowhere else) and refuses a worktree with something
-//! to lose unless `--force` is given.
+//! changes, commits found nowhere else, programs of other sessions in use) and
+//! refuses a worktree with something to lose unless `--force` is given.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use super::hook::worktree_create::{target_path, validate_name};
 use super::machine::{Machine, locate_checkout};
 use super::worktree_removal::{
-    PreparedRemoval, RemovalFailure, ensure_listed_and_unlocked, is_branch_deletable,
-    prepare_removal, remove_prepared,
+    PreparedRemoval, RemovalFailure, describe_users, ensure_listed_and_unlocked,
+    is_branch_deletable, prepare_removal, remove_from_terminal,
 };
 use crate::checkout::CheckoutError;
 use crate::cli::args::WorktreeRmArguments;
@@ -20,7 +20,10 @@ use crate::cli::output::write_stdout;
 use crate::error::ToolError;
 use crate::git_worktree::{uncommitted_change_count, unreachable_commit_count};
 use crate::global_config::GlobalConfig;
-use crate::instance_processes::{ProcessReport, find_instance_processes, join_summaries};
+use crate::instance_processes::{
+    ProcessReport, ProcessSummary, Requester, find_foreign_processes, find_instance_processes,
+    join_summaries,
+};
 
 const COMMAND_NAME: &str = "ds worktree rm";
 const NOTHING: &str = "none";
@@ -47,6 +50,7 @@ struct Preview {
     branch: Option<String>,
     instance_name: Option<String>,
     processes: ProcessReport,
+    in_use: Vec<ProcessSummary>,
     uncommitted_changes: usize,
     unreachable_commits: usize,
 }
@@ -71,7 +75,7 @@ pub fn run_worktree_rm(arguments: &WorktreeRmArguments) -> Result<u8, ToolError>
     if let Some(code) = exit_code_unless_confirmed(COMMAND_NAME, policy, &prompt) {
         return Ok(code);
     }
-    match remove_prepared(&prepared) {
+    match remove_from_terminal(&prepared, arguments.force) {
         Ok(()) => {
             eprintln!("ds: removed {}", preview.path.display());
             Ok(exit_code::SUCCESS)
@@ -182,6 +186,7 @@ fn build_preview(prepared: &PreparedRemoval) -> Result<Preview, ToolError> {
         branch: removal.branch.clone(),
         instance_name: scope.as_ref().map(|scope| scope.name.clone()),
         processes: find_instance_processes(&removal.path, scope.as_ref()),
+        in_use: find_foreign_processes(&removal.path, scope.as_ref(), Requester::Terminal),
         uncommitted_changes: uncommitted_change_count(&removal.path)?,
         unreachable_commits: unreachable_commit_count(&removal.path, branch_to_delete)?,
     })
@@ -191,16 +196,27 @@ fn render_preview(preview: &Preview) -> String {
     let branch = preview.branch.as_deref().unwrap_or(DETACHED_HEAD_LABEL);
     let instance = preview.instance_name.as_deref().unwrap_or(NOT_REGISTERED);
     format!(
-        "worktree:             {}\nbranch:               {branch}\ninstance:             {instance}\nprocesses to stop:    {}\nother processes here: {} (left running)\nuncommitted changes:  {}\ncommits found nowhere else: {}\n{IGNORED_FILES_WARNING}\n",
+        "worktree:             {}\nbranch:               {branch}\ninstance:             {instance}\nprocesses to stop:    {}\nother processes here: {} (left running)\n{}uncommitted changes:  {}\ncommits found nowhere else: {}\n{IGNORED_FILES_WARNING}\n",
         preview.path.display(),
         listed_or_none(&preview.processes.targets),
         listed_or_none(&preview.processes.others),
+        in_use_line(&preview.in_use),
         preview.uncommitted_changes,
         preview.unreachable_commits,
     )
 }
 
-fn listed_or_none(summaries: &[crate::instance_processes::ProcessSummary]) -> String {
+fn in_use_line(in_use: &[ProcessSummary]) -> String {
+    if in_use.is_empty() {
+        return String::new();
+    }
+    format!(
+        "In use (blocks removal without --force): {}\n",
+        join_summaries(in_use)
+    )
+}
+
+fn listed_or_none(summaries: &[ProcessSummary]) -> String {
     if summaries.is_empty() {
         return NOTHING.to_owned();
     }
@@ -208,17 +224,43 @@ fn listed_or_none(summaries: &[crate::instance_processes::ProcessSummary]) -> St
 }
 
 fn refusal_without_force(preview: &Preview, is_forced: bool) -> Option<u8> {
-    let has_something_to_lose = preview.uncommitted_changes > 0 || preview.unreachable_commits > 0;
-    if is_forced || !has_something_to_lose {
+    if is_forced {
         return None;
     }
-    eprintln!(
-        "ds: error: {} has {} uncommitted change(s) and {} commit(s) found nowhere else; nothing was removed, pass --force to remove it anyway",
+    let reasons: Vec<String> = [in_use_reason(preview), unsaved_work_reason(preview)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if reasons.is_empty() {
+        return None;
+    }
+    for reason in reasons {
+        eprintln!("ds: error: {reason}");
+    }
+    Some(exit_code::ERROR)
+}
+
+fn in_use_reason(preview: &Preview) -> Option<String> {
+    if preview.in_use.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} is in use by {}; nothing was removed, close them or pass --force to remove it anyway",
+        preview.path.display(),
+        describe_users(&preview.in_use)
+    ))
+}
+
+fn unsaved_work_reason(preview: &Preview) -> Option<String> {
+    if preview.uncommitted_changes == 0 && preview.unreachable_commits == 0 {
+        return None;
+    }
+    Some(format!(
+        "{} has {} uncommitted change(s) and {} commit(s) found nowhere else; nothing was removed, pass --force to remove it anyway",
         preview.path.display(),
         preview.uncommitted_changes,
         preview.unreachable_commits
-    );
-    Some(exit_code::ERROR)
+    ))
 }
 
 fn confirmation_prompt(preview: &Preview) -> String {
@@ -236,8 +278,6 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::instance_processes::ProcessSummary;
-
     fn preview() -> Preview {
         Preview {
             path: PathBuf::from("/wt/app/feat"),
@@ -253,9 +293,19 @@ mod tests {
                     comm: "tmux".to_owned(),
                 }],
             },
+            in_use: Vec::new(),
             uncommitted_changes: 0,
             unreachable_commits: 0,
         }
+    }
+
+    fn in_use_by_claude() -> Preview {
+        let mut busy = preview();
+        busy.in_use = vec![ProcessSummary {
+            pid: 1234,
+            comm: "claude".to_owned(),
+        }];
+        busy
     }
 
     #[test]
@@ -311,5 +361,30 @@ mod tests {
     #[test]
     fn should_name_the_instance_in_the_question_when_one_is_registered() {
         assert!(confirmation_prompt(&preview()).contains("app-feat-3f2a"));
+    }
+
+    #[test]
+    fn should_show_what_is_in_use_and_that_it_blocks_without_force() {
+        let text = render_preview(&in_use_by_claude());
+
+        assert!(text.contains("In use (blocks removal without --force): 1234 (claude)\n"));
+        assert!(!render_preview(&preview()).contains("In use"));
+    }
+
+    #[test]
+    fn should_require_force_when_a_process_is_in_use() {
+        assert_eq!(
+            refusal_without_force(&in_use_by_claude(), false),
+            Some(exit_code::ERROR)
+        );
+        assert_eq!(refusal_without_force(&in_use_by_claude(), true), None);
+    }
+
+    #[test]
+    fn should_name_the_other_claude_session_when_it_is_what_blocks() {
+        let reason = in_use_reason(&in_use_by_claude()).unwrap();
+
+        assert!(reason.contains("another Claude Code session (1234 (claude))"));
+        assert!(reason.contains("--force"));
     }
 }

@@ -148,7 +148,7 @@ pub fn describe_hook_exit_codes() -> String {
         ),
         (
             ERROR,
-            "worktree-create: git refused to create the worktree; worktree-remove: git refused to remove it, or the path is not the root of a linked worktree",
+            "worktree-create: git refused to create the worktree; worktree-remove: git refused to remove it, the path is not the root of a linked worktree, or another session or program still runs in it",
         ),
         (
             TOOL_FAILURE,
@@ -211,7 +211,7 @@ pub fn describe_worktree_rm_exit_codes() -> String {
         (SUCCESS, "the worktree is removed"),
         (
             ERROR,
-            "nothing was removed: not a linked worktree, locked, uncommitted changes or unpushed commits without --force, no terminal to ask in and no --yes, the answer was no, or git refused",
+            "nothing was removed: not a linked worktree, locked, uncommitted changes, unpushed commits or processes in use by another session or program without --force, no terminal to ask in and no --yes, the answer was no, or git refused",
         ),
         (
             TOOL_FAILURE,

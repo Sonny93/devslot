@@ -395,6 +395,34 @@ fn should_exit_2_when_the_name_is_not_valid() {
 }
 
 #[test]
+fn should_refuse_a_worktree_that_another_program_uses_without_force_and_change_nothing() {
+    let sandbox = sandbox();
+    let path = sandbox.created("feature-x");
+    let mut bystander = spawn_sleeper(&path, None);
+
+    let run = sandbox.remove(&["feature-x", "--yes"]);
+
+    let bystander_alive = bystander.try_wait().unwrap().is_none();
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    assert_eq!(run.status, 1, "{}", run.stderr);
+    assert!(bystander_alive);
+    assert!(path.exists());
+    assert!(run.stdout.contains(&format!(
+        "In use (blocks removal without --force): {} (sleep)",
+        bystander.id()
+    )));
+    assert!(run.stderr.contains("pass --force"));
+    assert!(
+        sandbox
+            .main
+            .machine()
+            .read_registry()
+            .contains(path.to_str().unwrap())
+    );
+}
+
+#[test]
 fn should_stop_the_processes_of_the_instance_and_leave_the_other_ones_running() {
     let sandbox = sandbox();
     let path = sandbox.created("feature-x");
@@ -403,7 +431,7 @@ fn should_stop_the_processes_of_the_instance_and_leave_the_other_ones_running() 
     let mut bystander = spawn_sleeper(&path, None);
     let mut foreign = spawn_sleeper(&path, Some("other-instance-1234"));
 
-    let run = sandbox.remove(&["feature-x", "--yes"]);
+    let run = sandbox.remove(&["feature-x", "--yes", "--force"]);
 
     let owned_status = wait_for_exit(&mut owned);
     let bystander_alive = bystander.try_wait().unwrap().is_none();

@@ -115,7 +115,7 @@ fn has_own_uid(context: &ScanContext, pid: i32) -> bool {
     context.root.real_uid(pid) == Some(context.own_uid)
 }
 
-fn runs_in_worktree(context: &ScanContext, pid: i32) -> bool {
+pub fn runs_in_worktree(context: &ScanContext, pid: i32) -> bool {
     context
         .root
         .working_directory(pid)
@@ -132,7 +132,7 @@ fn belongs_to_instance(context: &ScanContext, inodes: &HashSet<u64>, pid: i32) -
 
 /// The `roots` and every descendant of theirs, found through the parent
 /// links of `/proc/*/stat`. Candidates are filtered by the caller.
-fn with_descendants(context: &ScanContext, roots: &[i32]) -> HashSet<i32> {
+pub fn with_descendants(context: &ScanContext, roots: &[i32]) -> HashSet<i32> {
     let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
     for pid in context.root.process_ids() {
         if let Some(stat) = context.root.stat(pid) {

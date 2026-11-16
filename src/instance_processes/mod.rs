@@ -2,12 +2,15 @@
 //! the ones that belong to the instance (they listen on one of its ports, or
 //! carry its `DEVSLOT_INSTANCE` marker) and lists the others without touching
 //! them: a tmux server, an ssh master, an editor or another session can have
-//! its working directory in a worktree. Linux only: elsewhere nothing is found
-//! and nothing is stopped.
+//! its working directory in a worktree. It also tells which processes belong
+//! to somebody else than whoever asks for the removal, so the removal can be
+//! refused. Linux only: elsewhere nothing is found and nothing is stopped.
 
 use std::fmt;
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+mod foreign;
 #[cfg(target_os = "linux")]
 mod proc_root;
 #[cfg(target_os = "linux")]
@@ -74,6 +77,64 @@ impl ProcessReport {
     }
 }
 
+/// The kernel name of a Claude Code session's process.
+pub const CLAUDE_COMM: &str = "claude";
+
+/// Who asks for the removal of a worktree, which decides what counts as
+/// somebody else's process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Requester {
+    /// A Claude Code session closing: its own process tree is not foreign.
+    Session {
+        /// `CLAUDE_PID` from the hook environment: the session's `claude`
+        /// process, used only when it is an ancestor of `ds`.
+        claude_pid: Option<i32>,
+    },
+    /// A person at a terminal: the instance's processes are shown in the
+    /// preview and stopped after confirmation, so they are not foreign.
+    Terminal,
+}
+
+/// What the removal of a worktree asks of the processes of the machine.
+pub trait ProcessControl {
+    /// See [`find_instance_processes`].
+    fn find(&self, worktree: &Path, scope: Option<&InstanceScope>) -> ProcessReport;
+
+    /// See [`stop_instance_processes`].
+    fn stop(&self, worktree: &Path, scope: Option<&InstanceScope>) -> StopReport;
+
+    /// See [`find_foreign_processes`].
+    fn foreign(
+        &self,
+        worktree: &Path,
+        scope: Option<&InstanceScope>,
+        requester: Requester,
+    ) -> Vec<ProcessSummary>;
+}
+
+/// The processes of this machine, read from `/proc`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemProcesses;
+
+impl ProcessControl for SystemProcesses {
+    fn find(&self, worktree: &Path, scope: Option<&InstanceScope>) -> ProcessReport {
+        find_instance_processes(worktree, scope)
+    }
+
+    fn stop(&self, worktree: &Path, scope: Option<&InstanceScope>) -> StopReport {
+        stop_instance_processes(worktree, scope)
+    }
+
+    fn foreign(
+        &self,
+        worktree: &Path,
+        scope: Option<&InstanceScope>,
+        requester: Requester,
+    ) -> Vec<ProcessSummary> {
+        find_foreign_processes(worktree, scope, requester)
+    }
+}
+
 /// `1 (a), 2 (b)`.
 pub fn join_summaries(summaries: &[ProcessSummary]) -> String {
     summaries
@@ -124,6 +185,19 @@ pub fn stop_instance_processes(worktree: &Path, scope: Option<&InstanceScope>) -
     }
 }
 
+/// The processes in `worktree` that belong to somebody else than `requester`
+/// and are still running, sorted by pid. Orphaned daemons (parent pid 1 or
+/// `systemd`) are never counted. Nothing is signalled.
+#[cfg(target_os = "linux")]
+pub fn find_foreign_processes(
+    worktree: &Path,
+    scope: Option<&InstanceScope>,
+    requester: Requester,
+) -> Vec<ProcessSummary> {
+    let root = proc_root::ProcRoot::system();
+    foreign::foreign_processes(&system_context(&root, worktree, scope), requester)
+}
+
 #[cfg(target_os = "linux")]
 fn system_context<'a>(
     root: &'a proc_root::ProcRoot,
@@ -143,6 +217,16 @@ fn system_context<'a>(
 #[cfg(not(target_os = "linux"))]
 pub fn find_instance_processes(_worktree: &Path, _scope: Option<&InstanceScope>) -> ProcessReport {
     ProcessReport::default()
+}
+
+/// Nothing is found outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn find_foreign_processes(
+    _worktree: &Path,
+    _scope: Option<&InstanceScope>,
+    _requester: Requester,
+) -> Vec<ProcessSummary> {
+    Vec::new()
 }
 
 /// Nothing is stopped outside Linux.

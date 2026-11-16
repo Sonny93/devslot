@@ -181,7 +181,7 @@ pub struct WorktreeRmArguments {
     /// Do not ask for confirmation
     #[arg(long)]
     pub yes: bool,
-    /// Remove the worktree even with uncommitted changes or commits found nowhere else
+    /// Remove the worktree even with uncommitted changes, commits found nowhere else, or processes of another session or program running in it
     #[arg(long)]
     pub force: bool,
 }
