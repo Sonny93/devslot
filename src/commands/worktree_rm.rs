@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use super::hook::worktree_create::{target_path, validate_name};
 use super::machine::{Machine, locate_checkout};
 use super::worktree_removal::{
-    PreparedRemoval, RemovalFailure, describe_users, ensure_listed_and_unlocked,
-    is_branch_deletable, prepare_removal, remove_from_terminal,
+    PreparedRemoval, RemovalFailure, UnsavedWork, count_unsaved_work, describe_unsaved_work,
+    describe_users, ensure_listed_and_unlocked, prepare_removal, remove_from_terminal,
 };
 use crate::checkout::CheckoutError;
 use crate::cli::args::WorktreeRmArguments;
@@ -18,7 +18,6 @@ use crate::cli::confirm::{ConfirmationPolicy, exit_code_unless_confirmed};
 use crate::cli::exit_code;
 use crate::cli::output::write_stdout;
 use crate::error::ToolError;
-use crate::git_worktree::{uncommitted_change_count, unreachable_commit_count};
 use crate::global_config::GlobalConfig;
 use crate::instance_processes::{
     ProcessReport, ProcessSummary, Requester, find_foreign_processes, find_instance_processes,
@@ -75,7 +74,7 @@ pub fn run_worktree_rm(arguments: &WorktreeRmArguments) -> Result<u8, ToolError>
     if let Some(code) = exit_code_unless_confirmed(COMMAND_NAME, policy, &prompt) {
         return Ok(code);
     }
-    match remove_from_terminal(&prepared, arguments.force) {
+    match remove_from_terminal(&prepared, arguments.force, shown_work(&preview)) {
         Ok(()) => {
             eprintln!("ds: removed {}", preview.path.display());
             Ok(exit_code::SUCCESS)
@@ -176,20 +175,23 @@ fn resolve_path(
 fn build_preview(prepared: &PreparedRemoval) -> Result<Preview, ToolError> {
     let removal = &prepared.removal;
     let scope = prepared.scope();
-    let branch_to_delete = if is_branch_deletable(removal) {
-        removal.branch.as_deref()
-    } else {
-        None
-    };
+    let work = count_unsaved_work(removal)?;
     Ok(Preview {
         path: removal.path.clone(),
         branch: removal.branch.clone(),
         instance_name: scope.as_ref().map(|scope| scope.name.clone()),
         processes: find_instance_processes(&removal.path, scope.as_ref()),
         in_use: find_foreign_processes(&removal.path, scope.as_ref(), Requester::Terminal),
-        uncommitted_changes: uncommitted_change_count(&removal.path)?,
-        unreachable_commits: unreachable_commit_count(&removal.path, branch_to_delete)?,
+        uncommitted_changes: work.uncommitted_changes,
+        unreachable_commits: work.unreachable_commits,
     })
+}
+
+fn shown_work(preview: &Preview) -> UnsavedWork {
+    UnsavedWork {
+        uncommitted_changes: preview.uncommitted_changes,
+        unreachable_commits: preview.unreachable_commits,
+    }
 }
 
 fn render_preview(preview: &Preview) -> String {
@@ -252,15 +254,11 @@ fn in_use_reason(preview: &Preview) -> Option<String> {
 }
 
 fn unsaved_work_reason(preview: &Preview) -> Option<String> {
-    if preview.uncommitted_changes == 0 && preview.unreachable_commits == 0 {
+    let work = shown_work(preview);
+    if work.is_empty() {
         return None;
     }
-    Some(format!(
-        "{} has {} uncommitted change(s) and {} commit(s) found nowhere else; nothing was removed, pass --force to remove it anyway",
-        preview.path.display(),
-        preview.uncommitted_changes,
-        preview.unreachable_commits
-    ))
+    Some(describe_unsaved_work(&preview.path, &work))
 }
 
 fn confirmation_prompt(preview: &Preview) -> String {

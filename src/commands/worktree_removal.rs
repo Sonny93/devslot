@@ -25,7 +25,7 @@ use crate::compose::runner::{ComposeRunner, DockerRunner, delete_project_data};
 use crate::error::ToolError;
 use crate::git_worktree::{
     WorktreeGitError, current_branch, delete_branch, is_branch_merged, list_worktrees,
-    remove_worktree,
+    remove_worktree, uncommitted_change_count, unreachable_commit_count,
 };
 use crate::instance_processes::{
     CLAUDE_COMM, InstanceScope, ProcessControl, ProcessSummary, Requester, SystemProcesses,
@@ -57,6 +57,15 @@ pub enum RemovalFailure {
     /// Git refused, or could not run.
     #[error(transparent)]
     Git(#[from] WorktreeGitError),
+    /// Work appeared in the worktree after it was shown: nothing was deleted
+    /// or forgotten (instance processes are stopped).
+    #[error("{}", describe_unsaved_work(.path, .work))]
+    UnsavedWork {
+        /// The worktree.
+        path: PathBuf,
+        /// What it holds now.
+        work: UnsavedWork,
+    },
     /// The checkout cannot be examined.
     #[error(transparent)]
     Checkout(#[from] CheckoutError),
@@ -70,6 +79,7 @@ impl RemovalFailure {
             Self::NotLinkedWorktree(_)
             | Self::Locked(_)
             | Self::InUse { .. }
+            | Self::UnsavedWork { .. }
             | Self::Git(WorktreeGitError::Rejected { .. }) => exit_code::ERROR,
             Self::Git(WorktreeGitError::Tool(_)) | Self::Checkout(_) => exit_code::TOOL_FAILURE,
         }
@@ -92,6 +102,51 @@ fn describe_in_use(path: &Path, processes: &[ProcessSummary]) -> String {
         if processes.len() == 1 { "it" } else { "them" },
         path = path.display(),
     )
+}
+
+/// What a worktree holds that removing it would lose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsavedWork {
+    /// Lines of `git status --porcelain`.
+    pub uncommitted_changes: usize,
+    /// Commits found nowhere else.
+    pub unreachable_commits: usize,
+}
+
+impl UnsavedWork {
+    /// Whether there is anything to lose.
+    pub const fn is_empty(&self) -> bool {
+        self.uncommitted_changes == 0 && self.unreachable_commits == 0
+    }
+
+    /// Whether `self` holds more of either kind than `before`.
+    pub const fn has_grown_since(&self, before: &Self) -> bool {
+        self.uncommitted_changes > before.uncommitted_changes
+            || self.unreachable_commits > before.unreachable_commits
+    }
+}
+
+/// The refusal message for a worktree that holds `work`.
+pub fn describe_unsaved_work(path: &Path, work: &UnsavedWork) -> String {
+    format!(
+        "{} has {} uncommitted change(s) and {} commit(s) found nowhere else; nothing was removed, pass --force to remove it anyway",
+        path.display(),
+        work.uncommitted_changes,
+        work.unreachable_commits
+    )
+}
+
+/// Counts what removing the worktree would lose.
+pub fn count_unsaved_work(removal: &Removal) -> Result<UnsavedWork, CheckoutError> {
+    let branch_to_delete = if is_branch_deletable(removal) {
+        removal.branch.as_deref()
+    } else {
+        None
+    };
+    Ok(UnsavedWork {
+        uncommitted_changes: uncommitted_change_count(&removal.path)?,
+        unreachable_commits: unreachable_commit_count(&removal.path, branch_to_delete)?,
+    })
 }
 
 /// The processes that use a worktree, for a message: names the other Claude
@@ -189,6 +244,9 @@ pub struct RemovalContext<'a> {
     pub requester: Requester,
     /// Skips both checks for somebody else's processes (`ds worktree rm --force`).
     pub is_forced: bool,
+    /// What the worktree held when it was shown, for a removal that must not
+    /// delete work saved since; `None` when nothing was shown (the hook).
+    pub shown_work: Option<UnsavedWork>,
 }
 
 /// Removes the worktree at `path` (canonical) for the `WorktreeRemove` hook:
@@ -204,6 +262,7 @@ pub fn remove_linked_worktree(
         processes: &SystemProcesses,
         requester: Requester::Session { claude_pid },
         is_forced: false,
+        shown_work: None,
     };
     remove_prepared(&prepared, &context)
 }
@@ -212,6 +271,7 @@ pub fn remove_linked_worktree(
 pub fn remove_from_terminal(
     prepared: &PreparedRemoval,
     is_forced: bool,
+    shown_work: UnsavedWork,
 ) -> Result<(), RemovalFailure> {
     let runner = DockerRunner::from_environment();
     let context = RemovalContext {
@@ -219,6 +279,7 @@ pub fn remove_from_terminal(
         processes: &SystemProcesses,
         requester: Requester::Terminal,
         is_forced,
+        shown_work: Some(shown_work),
     };
     remove_prepared(prepared, &context)
 }
@@ -233,12 +294,29 @@ pub fn remove_prepared(
     ensure_not_in_use(prepared, context)?;
     stop_processes(prepared, context.processes);
     ensure_not_in_use(prepared, context)?;
+    ensure_no_new_work(removal, context)?;
     remove_git_worktree(removal)?;
     if let Some(instance) = &prepared.instance {
         forget_instance(&instance.machine, &instance.record, context.runner);
     }
     delete_branch_when_merged(removal);
     Ok(())
+}
+
+/// Counts again right before the deletion: stopping the processes takes
+/// seconds, and work saved meanwhile must not be deleted unseen.
+fn ensure_no_new_work(removal: &Removal, context: &RemovalContext) -> Result<(), RemovalFailure> {
+    let Some(shown) = context.shown_work.filter(|_| !context.is_forced) else {
+        return Ok(());
+    };
+    let work = count_unsaved_work(removal)?;
+    if !work.has_grown_since(&shown) {
+        return Ok(());
+    }
+    Err(RemovalFailure::UnsavedWork {
+        path: removal.path.clone(),
+        work,
+    })
 }
 
 fn ensure_not_in_use(
@@ -426,6 +504,7 @@ mod tests {
     struct FakeProcesses {
         foreign_answers: RefCell<VecDeque<Vec<ProcessSummary>>>,
         stop_calls: Cell<u32>,
+        file_created_on_stop: Option<PathBuf>,
     }
 
     impl FakeProcesses {
@@ -433,7 +512,13 @@ mod tests {
             Self {
                 foreign_answers: RefCell::new(answers.into()),
                 stop_calls: Cell::new(0),
+                file_created_on_stop: None,
             }
+        }
+
+        fn creating_on_stop(mut self, file: PathBuf) -> Self {
+            self.file_created_on_stop = Some(file);
+            self
         }
     }
 
@@ -444,6 +529,9 @@ mod tests {
 
         fn stop(&self, _worktree: &Path, _scope: Option<&InstanceScope>) -> StopReport {
             self.stop_calls.set(self.stop_calls.get() + 1);
+            if let Some(file) = &self.file_created_on_stop {
+                std::fs::write(file, "saved while stopping").unwrap();
+            }
             StopReport::default()
         }
 
@@ -613,6 +701,7 @@ mod tests {
             processes,
             requester,
             is_forced,
+            shown_work: None,
         }
     }
 
@@ -684,6 +773,70 @@ mod tests {
         );
         assert_eq!(fixture.registered_names(), vec![NEIGHBOUR_NAME]);
         assert!(!fixture.is_listed());
+    }
+
+    #[test]
+    fn should_refuse_and_delete_nothing_when_work_is_saved_while_the_processes_stop() {
+        let fixture = fixture();
+        let runner = runner();
+        let file = fixture.prepared.removal.path.join("notes.txt");
+        let processes = FakeProcesses::answering(Vec::new()).creating_on_stop(file.clone());
+        let context = RemovalContext {
+            shown_work: Some(UnsavedWork {
+                uncommitted_changes: 0,
+                unreachable_commits: 0,
+            }),
+            ..removal_context(&runner, &processes, Requester::Terminal, false)
+        };
+
+        let failure = remove_prepared(&fixture.prepared, &context).unwrap_err();
+
+        assert!(matches!(failure, RemovalFailure::UnsavedWork { .. }));
+        assert_eq!(failure.exit_code(), exit_code::ERROR);
+        assert!(failure.to_string().contains("1 uncommitted change(s)"));
+        assert!(file.exists());
+        assert!(fixture.is_listed());
+        assert_eq!(deletion_commands(&runner), Vec::<&str>::new());
+        assert_eq!(
+            fixture.registered_names(),
+            vec![INSTANCE_NAME, NEIGHBOUR_NAME]
+        );
+    }
+
+    #[test]
+    fn should_remove_the_worktree_when_work_is_saved_while_the_processes_stop_and_forced() {
+        let fixture = fixture();
+        let runner = runner();
+        let file = fixture.prepared.removal.path.join("notes.txt");
+        let processes = FakeProcesses::answering(Vec::new()).creating_on_stop(file);
+        let context = RemovalContext {
+            shown_work: Some(UnsavedWork {
+                uncommitted_changes: 0,
+                unreachable_commits: 0,
+            }),
+            ..removal_context(&runner, &processes, Requester::Terminal, true)
+        };
+
+        remove_prepared(&fixture.prepared, &context).unwrap();
+
+        assert!(!fixture.is_listed());
+    }
+
+    #[test]
+    fn should_see_work_that_grew_in_either_count() {
+        let shown = UnsavedWork {
+            uncommitted_changes: 2,
+            unreachable_commits: 1,
+        };
+        let with = |uncommitted_changes, unreachable_commits| UnsavedWork {
+            uncommitted_changes,
+            unreachable_commits,
+        };
+
+        assert!(with(3, 1).has_grown_since(&shown));
+        assert!(with(2, 2).has_grown_since(&shown));
+        assert!(!with(2, 1).has_grown_since(&shown));
+        assert!(!with(0, 0).has_grown_since(&shown));
     }
 
     #[test]
