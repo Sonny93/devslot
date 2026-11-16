@@ -9,6 +9,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::checkout::{CheckoutError, git_failure, run_git_within};
+use crate::deadline::{Deadline, timeout_within};
 use crate::process::CapturedOutput;
 
 const WORKTREE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -35,12 +36,30 @@ pub enum WorktreeGitError {
     },
 }
 
+impl WorktreeGitError {
+    /// Whether git was cut short, by its timeout or by the budget, rather than
+    /// refusing: what it was doing may be half done.
+    pub const fn is_interruption(&self) -> bool {
+        matches!(
+            self,
+            Self::Tool(CheckoutError::GitTimedOut { .. } | CheckoutError::Budget(_))
+        )
+    }
+}
+
 /// The branch checked out in `directory`; `None` when `HEAD` is detached.
 pub fn current_branch(directory: &Path) -> Result<Option<String>, CheckoutError> {
+    current_branch_within(directory, None)
+}
+
+fn current_branch_within(
+    directory: &Path,
+    deadline: Option<Deadline>,
+) -> Result<Option<String>, CheckoutError> {
     let output = run_git_within(
         directory,
         ["symbolic-ref", "--short", "HEAD"],
-        QUICK_TIMEOUT,
+        quick_timeout(deadline)?,
     )?;
     if !output.status.success() {
         return Ok(None);
@@ -49,12 +68,16 @@ pub fn current_branch(directory: &Path) -> Result<Option<String>, CheckoutError>
 }
 
 /// What a new branch starts from: the branch checked out in the main
-/// worktree, or its `HEAD` commit when that is detached.
-pub fn base_reference(main_root: &Path) -> Result<String, WorktreeGitError> {
-    if let Some(branch) = current_branch(main_root)? {
+/// worktree, or its `HEAD` commit when that is detached. Every git call stops
+/// at `deadline` when there is one.
+pub fn base_reference(
+    main_root: &Path,
+    deadline: Option<Deadline>,
+) -> Result<String, WorktreeGitError> {
+    if let Some(branch) = current_branch_within(main_root, deadline)? {
         return Ok(branch);
     }
-    let output = run_git_within(main_root, ["rev-parse", "HEAD"], QUICK_TIMEOUT)?;
+    let output = run_git_within(main_root, ["rev-parse", "HEAD"], quick_timeout(deadline)?)?;
     if !output.status.success() {
         forward_output(&output);
         return Err(WorktreeGitError::Rejected {
@@ -64,13 +87,18 @@ pub fn base_reference(main_root: &Path) -> Result<String, WorktreeGitError> {
     Ok(trimmed_stdout(&output))
 }
 
-/// Whether the local branch `name` exists.
-pub fn branch_exists(main_root: &Path, name: &str) -> Result<bool, CheckoutError> {
+/// Whether the local branch `name` exists. The git call stops at `deadline`
+/// when there is one.
+pub fn branch_exists(
+    main_root: &Path,
+    name: &str,
+    deadline: Option<Deadline>,
+) -> Result<bool, CheckoutError> {
     let reference = format!("refs/heads/{name}");
     let output = run_git_within(
         main_root,
         ["show-ref", "--verify", "--quiet", reference.as_str()],
-        QUICK_TIMEOUT,
+        quick_timeout(deadline)?,
     )?;
     match output.status.code() {
         Some(BRANCH_FOUND_EXIT_CODE) => Ok(true),
@@ -79,14 +107,17 @@ pub fn branch_exists(main_root: &Path, name: &str) -> Result<bool, CheckoutError
     }
 }
 
-/// `git worktree add <path> <branch>`: checks out the existing `branch`.
+/// `git worktree add <path> <branch>`: checks out the existing `branch`. The
+/// git call is killed after `timeout`.
 pub fn add_on_existing_branch(
     main_root: &Path,
     path: &Path,
     branch: &str,
+    timeout: Duration,
 ) -> Result<(), WorktreeGitError> {
     run_forwarded(
         main_root,
+        timeout,
         [
             OsStr::new("worktree"),
             OsStr::new("add"),
@@ -98,14 +129,17 @@ pub fn add_on_existing_branch(
 }
 
 /// `git worktree add -b <branch> <path> <base>`: creates `branch` from `base`.
+/// The git call is killed after `timeout`.
 pub fn add_on_new_branch(
     main_root: &Path,
     path: &Path,
     branch: &str,
     base: &str,
+    timeout: Duration,
 ) -> Result<(), WorktreeGitError> {
     run_forwarded(
         main_root,
+        timeout,
         [
             OsStr::new("worktree"),
             OsStr::new("add"),
@@ -123,9 +157,32 @@ pub fn add_on_new_branch(
 pub fn remove_worktree(main_root: &Path, path: &Path) -> Result<(), WorktreeGitError> {
     run_forwarded(
         main_root,
+        WORKTREE_TIMEOUT,
         [
             OsStr::new("worktree"),
             OsStr::new("remove"),
+            OsStr::new("--force"),
+            path.as_os_str(),
+        ],
+        "worktree remove",
+    )
+}
+
+/// `git worktree remove --force --force <path>`: like [`remove_worktree`],
+/// and it removes a locked worktree too, such as one whose creation was
+/// interrupted. The git call is killed after `timeout`.
+pub fn remove_interrupted_worktree(
+    main_root: &Path,
+    path: &Path,
+    timeout: Duration,
+) -> Result<(), WorktreeGitError> {
+    run_forwarded(
+        main_root,
+        timeout,
+        [
+            OsStr::new("worktree"),
+            OsStr::new("remove"),
+            OsStr::new("--force"),
             OsStr::new("--force"),
             path.as_os_str(),
         ],
@@ -140,6 +197,9 @@ pub struct ListedWorktree {
     pub path: PathBuf,
     /// Whether the worktree is locked.
     pub is_locked: bool,
+    /// Why it is locked, when the lock has a reason. Git runs here with
+    /// `LC_ALL=C`, so the reason git writes itself is not translated.
+    pub lock_reason: Option<String>,
 }
 
 impl ListedWorktree {
@@ -155,11 +215,15 @@ impl ListedWorktree {
 
 /// The worktrees of the repository of `main_root`, as git lists them now.
 pub fn list_worktrees(main_root: &Path) -> Result<Vec<ListedWorktree>, CheckoutError> {
-    let output = run_git_within(
-        main_root,
-        ["worktree", "list", "--porcelain"],
-        QUICK_TIMEOUT,
-    )?;
+    list_worktrees_within(main_root, QUICK_TIMEOUT)
+}
+
+/// Like [`list_worktrees`], with the git call killed after `timeout`.
+pub fn list_worktrees_within(
+    main_root: &Path,
+    timeout: Duration,
+) -> Result<Vec<ListedWorktree>, CheckoutError> {
+    let output = run_git_within(main_root, ["worktree", "list", "--porcelain"], timeout)?;
     if !output.status.success() {
         return Err(git_failure("worktree", &output));
     }
@@ -175,12 +239,16 @@ fn parse_worktree_listing(listing: &str) -> Vec<ListedWorktree> {
             let path = entry
                 .lines()
                 .find_map(|line| line.strip_prefix(WORKTREE_LINE_PREFIX))?;
-            let is_locked = entry
+            let lock_line = entry
                 .lines()
-                .any(|line| line == LOCKED_MARKER || line.starts_with("locked "));
+                .find(|line| *line == LOCKED_MARKER || line.starts_with("locked "));
+            let lock_reason = lock_line
+                .and_then(|line| line.strip_prefix("locked "))
+                .map(str::to_owned);
             Some(ListedWorktree {
                 path: PathBuf::from(path),
-                is_locked,
+                is_locked: lock_line.is_some(),
+                lock_reason,
             })
         })
         .collect()
@@ -243,10 +311,19 @@ pub fn is_branch_merged(main_root: &Path, branch: &str) -> Result<bool, Checkout
 /// `git branch -D --end-of-options <branch>`. The caller has checked that the
 /// branch is merged, which `-d` would check against the upstream too.
 pub fn delete_branch(main_root: &Path, branch: &str) -> Result<(), CheckoutError> {
+    delete_branch_within(main_root, branch, QUICK_TIMEOUT)
+}
+
+/// Like [`delete_branch`], with the git call killed after `timeout`.
+pub fn delete_branch_within(
+    main_root: &Path,
+    branch: &str,
+    timeout: Duration,
+) -> Result<(), CheckoutError> {
     let output = run_git_within(
         main_root,
         ["branch", "-D", "--end-of-options", branch],
-        QUICK_TIMEOUT,
+        timeout,
     )?;
     if output.status.success() {
         return Ok(());
@@ -254,12 +331,17 @@ pub fn delete_branch(main_root: &Path, branch: &str) -> Result<(), CheckoutError
     Err(git_failure("branch", &output))
 }
 
+fn quick_timeout(deadline: Option<Deadline>) -> Result<Duration, CheckoutError> {
+    Ok(timeout_within(deadline, QUICK_TIMEOUT)?)
+}
+
 fn run_forwarded<const COUNT: usize>(
     main_root: &Path,
+    timeout: Duration,
     arguments: [&OsStr; COUNT],
     command: &'static str,
 ) -> Result<(), WorktreeGitError> {
-    let output = run_git_within(main_root, arguments, WORKTREE_TIMEOUT)?;
+    let output = run_git_within(main_root, arguments, timeout)?;
     forward_output(&output);
     if output.status.success() {
         return Ok(());
@@ -305,6 +387,17 @@ mod tests {
     }
 
     #[test]
+    fn should_read_the_reason_of_a_lock_when_there_is_one() {
+        let listed = parse_worktree_listing(LISTING);
+
+        let reasons: Vec<Option<&str>> = listed
+            .iter()
+            .map(|entry| entry.lock_reason.as_deref())
+            .collect();
+        assert_eq!(reasons, [None, None, Some("in use by a session"), None]);
+    }
+
+    #[test]
     fn should_not_read_a_lock_into_a_word_that_only_starts_like_it() {
         let listed =
             parse_worktree_listing("worktree /wt/a\nHEAD d\nbranch refs/heads/lockedness\n");
@@ -319,6 +412,7 @@ mod tests {
         let entry = ListedWorktree {
             path: folder.path().join("."),
             is_locked: false,
+            lock_reason: None,
         };
 
         assert!(entry.is_at(&canonical));

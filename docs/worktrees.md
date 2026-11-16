@@ -6,7 +6,9 @@ How devslot creates, uses and removes the worktrees of Claude Code sessions. It 
 
 The `WorktreeCreate` hook replaces Claude Code's own worktree creation: `ds hook worktree-create` runs `git worktree add` itself and puts the worktree in `~/dev/.worktrees/<repo>/<name>`, on a branch called `<name>` (the existing one when there is one, else a new one from the branch checked out in the main worktree). Change the folder with `[worktrees] root` in the global config (see [Configuration](configuration.md)). Without the plugin, Claude Code creates its worktrees where it always did.
 
-Creating a worktree with a name that already exists reopens it: `ds hook worktree-create` prints its path and registers it if needed, like `claude --worktree <name>` does natively.
+Creating a worktree with a name that already exists reopens it: `ds hook worktree-create` prints its path and registers it if needed, like `claude --worktree <name>` does natively. A locked worktree is not reopened: one left half-created by an interrupted creation (git's `initializing` lock) is refused with the commands to remove it, any other lock asks for `git worktree unlock` first.
+
+The hook stops its own work before Claude Code kills it (180 s). `git worktree add`, including the repository's `post-checkout` hook, gets what is left of the budget minus 20 s kept for registration. When the add runs out of time during the checkout itself, the half-created worktree is removed, and the branch too when this creation made it. When it runs out during `post-checkout`, the worktree is complete: it is kept, ds warns that the hook did not finish, and the path is printed. When registration has no time left, the first agent command registers the worktree.
 
 ### Sessions started with `claude --worktree <name> --tmux`
 

@@ -32,7 +32,7 @@ use crate::registry::record::InstanceRecord;
 use crate::registry::store::RegistryStore;
 
 const STALE_TEMP_AGE: Duration = Duration::from_secs(60);
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const UNREGISTERED_CLOSING_LINE: &str =
     "ds ensure did not register this checkout until the errors are fixed";
 const REGISTERED_CLOSING_LINE: &str =

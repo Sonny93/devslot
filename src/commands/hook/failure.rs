@@ -37,6 +37,12 @@ pub enum HookFailure {
     /// The target folder is taken.
     #[error("{} already exists", .0.display())]
     TargetExists(PathBuf),
+    /// An earlier creation of the worktree was interrupted and left it locked.
+    #[error("{} was left half-created by an interrupted creation; remove it with git worktree remove --force --force {} or ds worktree rm --force {}", .0.display(), .0.display(), .0.display())]
+    HalfCreated(PathBuf),
+    /// The worktree exists and someone locked it.
+    #[error("{} is locked; run git worktree unlock {} first", .0.display(), .0.display())]
+    Locked(PathBuf),
     /// A parent folder cannot be created.
     #[error("cannot create {}: {source}", path.display())]
     CreateDirectory {
