@@ -43,11 +43,8 @@ fn should_exit_0_and_list_the_template_ports_and_warnings_when_the_project_has_n
     assert!(run.stdout.contains(
         "compose.yml (app): service loads .env with env_file but does not pin PORT, VITE_HMR_PORT, DB_PORT"
     ));
-    assert!(
-        run.stdout
-            .contains("vite.config.ts: the Vite config does not read VITE_HMR_PORT")
-    );
-    assert!(run.stdout.ends_with("0 errors, 2 warnings\n"));
+    assert!(!run.stdout.contains("does not read VITE_HMR_PORT"));
+    assert!(run.stdout.ends_with("0 errors, 1 warning\n"));
 }
 
 #[test]
@@ -61,12 +58,12 @@ fn should_print_the_report_as_json_when_json_is_asked() {
     assert_eq!(report["version"], 1);
     assert_eq!(report["compose_file"], "dev.compose.yml");
     assert_eq!(report["summary"]["errors"], 0);
-    assert_eq!(report["summary"]["warnings"], 2);
+    assert_eq!(report["summary"]["warnings"], 1);
     assert_eq!(report["ports"][2]["var"], "DB_PORT");
     assert_eq!(report["ports"][2]["kind"], "service");
     assert_eq!(report["ports"][2]["service"], "postgres");
     assert_eq!(report["ports"][2]["target"], 5432);
-    assert_eq!(finding_checks(&report), ["env_file_ports", "vite_hmr_port"]);
+    assert_eq!(finding_checks(&report), ["env_file_ports"]);
 }
 
 #[test]
@@ -85,10 +82,6 @@ fn should_exit_1_and_name_the_container_names_when_the_compose_files_set_them() 
             .contains("error   compose.image.yml (my-links): service sets container_name")
     );
     assert!(run.stdout.contains("apps/webapp/package.json"));
-    assert!(
-        run.stdout
-            .contains("apps/webapp/vite.config.ts: the Vite config does not read")
-    );
 }
 
 #[test]

@@ -160,6 +160,7 @@ pub fn write_blockers(
         is_env_ignored,
         managed: &[],
         env_config_keys: &[],
+        ignored_ports: &[],
     });
     Ok(findings.into_iter().filter(is_blocker).collect())
 }
