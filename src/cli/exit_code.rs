@@ -160,8 +160,11 @@ pub fn describe_hook_exit_codes() -> String {
 /// The exit codes in the form `ds down --help` shows them.
 pub fn describe_down_exit_codes() -> String {
     format_codes(&[
-        (SUCCESS, "the services are stopped"),
-        (ERROR, "this checkout is not registered, or Compose failed"),
+        (SUCCESS, "the processes and the services are stopped"),
+        (
+            ERROR,
+            "this checkout is not registered, a process is still running, or Compose failed",
+        ),
         (
             TOOL_FAILURE,
             "the tool itself failed (Docker unavailable, unreadable config or registry), or invalid usage",

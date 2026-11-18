@@ -123,7 +123,7 @@ pub enum Command {
     /// Review the project without starting or writing anything
     #[command(after_help = doctor_help())]
     Doctor(DoctorArguments),
-    /// Stop the services of this checkout's instance, keeping its data
+    /// Stop the processes and the services of this checkout's instance, keeping its data
     #[command(after_help = down_help())]
     Down,
     /// Register this checkout and write its .env block if needed, without starting anything
