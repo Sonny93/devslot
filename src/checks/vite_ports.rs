@@ -15,6 +15,7 @@ const JUSTFILE_NAMES: [&str; 2] = ["justfile", "Justfile"];
 const VITE_WORD: &str = "vite";
 const PORT_FLAG: &str = "--port";
 const PORT_WORD: &str = "port";
+const MAX_SCRIPT_NAME_CHARS: usize = 64;
 
 const LOAD_ENV_HINT: &str = "Vite only loads the .env of its own folder: to read a root .env, call loadEnv(mode, <repo root>, '') and take only the keys you need";
 
@@ -96,13 +97,18 @@ fn check_manifest_scripts(root: &Path, manifest: &Path, managed: &[ManagedPort])
                 Level::Warning,
                 Check::ViteLiteralPort,
                 format!(
-                    "script \"{name}\" passes {PORT_FLAG} {port}: {}",
+                    "script {:?} passes {PORT_FLAG} {port}: {}",
+                    shortened_name(name),
                     script_advice(port, managed)
                 ),
             )
             .in_file(manifest.display().to_string())
         })
         .collect()
+}
+
+fn shortened_name(name: &str) -> String {
+    name.chars().take(MAX_SCRIPT_NAME_CHARS).collect()
 }
 
 fn check_justfile(root: &Path, managed: &[ManagedPort]) -> Vec<Finding> {
@@ -478,7 +484,7 @@ mod tests {
                 .iter()
                 .map(|finding| (
                     finding.file.as_deref(),
-                    finding.message.contains("script \"alt\""),
+                    finding.message.contains("script \"alt\" passes"),
                     finding.message.contains("5174")
                 ))
                 .collect::<Vec<_>>(),
@@ -543,5 +549,28 @@ mod tests {
             check_literal_ports(root.path(), &ViteDetection::default(), &[]),
             vec![]
         );
+    }
+
+    #[test]
+    fn should_quote_and_truncate_the_script_name_when_it_holds_control_characters() {
+        let name = format!("\u{1b}[2K{}", "x".repeat(100));
+        let manifest = format!(
+            r#"{{"scripts": {{"{}": "vite --port 5173"}}}}"#,
+            name.replace('\u{1b}', "\\u001b")
+        );
+        let root = root_with(&[("package.json", &manifest)]);
+        let detection = ViteDetection {
+            manifests: vec![PathBuf::from("package.json")],
+            ..ViteDetection::default()
+        };
+
+        let findings = check_literal_ports(root.path(), &detection, &[]);
+
+        let expected_start = format!(
+            "script {:?} passes",
+            name.chars().take(64).collect::<String>()
+        );
+        assert!(findings[0].message.starts_with(&expected_start));
+        assert!(!findings[0].message.contains('\u{1b}'));
     }
 }

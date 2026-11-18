@@ -21,8 +21,12 @@ const NO_INSTANCE_LINE: &str = "No instance is registered on this machine.\n";
 pub fn render_text(report: &DoctorReport, style: Style) -> String {
     let mut output = String::new();
     let compose_file = report.compose_file.as_deref().unwrap_or("none");
-    let _ = writeln!(output, "Checkout:      {}", report.checkout);
-    let _ = writeln!(output, "Compose file:  {compose_file}");
+    let _ = writeln!(
+        output,
+        "Checkout:      {}",
+        escape_control(&report.checkout)
+    );
+    let _ = writeln!(output, "Compose file:  {}", escape_control(compose_file));
     output.push_str("\nPorts\n");
     output.push_str(&render_ports(&report.ports));
     output.push_str("\nProblems\n");
@@ -50,7 +54,12 @@ fn port_row(port: &ManagedPort) -> [String; 4] {
         (Some(service), None) => service.clone(),
         (None, _) => NO_VALUE.to_owned(),
     };
-    [port.variable.clone(), port.file.clone(), default, target]
+    [
+        escape_control(&port.variable),
+        escape_control(&port.file),
+        default,
+        escape_control(&target),
+    ]
 }
 
 fn render_ports(ports: &[ManagedPort]) -> String {
@@ -96,6 +105,21 @@ pub fn render_findings(findings: &[Finding], style: Style) -> String {
     output
 }
 
+/// The text with every control character (ESC, CR, BEL, C1) replaced by its
+/// visible escape, so a repository cannot move the cursor, hide a line or
+/// write to the clipboard through a report.
+fn escape_control(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() {
+                character.escape_debug().to_string()
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
+}
+
 fn render_finding(finding: &Finding, style: Style) -> String {
     let word = format!("{:<LEVEL_WORD_WIDTH$}", finding.level.word());
     let tone = match finding.level {
@@ -108,7 +132,12 @@ fn render_finding(finding: &Finding, style: Style) -> String {
         (Some(file), None) => format!("{file}: "),
         (None, _) => String::new(),
     };
-    format!("{} {location}{}", style.paint(tone, &word), finding.message)
+    format!(
+        "{} {}{}",
+        style.paint(tone, &word),
+        escape_control(&location),
+        escape_control(&finding.message)
+    )
 }
 
 /// Renders the answer of `ds ls` as text: one row per instance, the ports of
@@ -285,6 +314,27 @@ mod tests {
             ports,
             findings,
         }
+    }
+
+    #[test]
+    fn should_render_no_control_character_when_a_finding_holds_escape_and_carriage_return() {
+        let findings = vec![
+            Finding::new(
+                Level::Warning,
+                Check::EnvLocalHostPort,
+                "a\u{1b}[2K\rb\u{7}",
+            )
+            .in_file(".env\u{1b}]52;c;x")
+            .for_key("K\u{1b}[8m"),
+        ];
+
+        let text = render_text(&report(vec![], findings), plain());
+
+        assert!(
+            text.chars()
+                .all(|character| !character.is_control() || character == '\n')
+        );
+        assert!(text.contains("a\\u{1b}[2K\\rb\\u{7}"));
     }
 
     fn service_port() -> ManagedPort {
