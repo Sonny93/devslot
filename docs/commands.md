@@ -6,7 +6,7 @@ Reference of the `ds` commands. `ds <command> --help` lists the options and the 
 | --- | --- |
 | `ds doctor [--json]` | Reviews the project without starting or writing anything. Also reports the state of the worktree guard (see below). |
 | `ds up` | Registers the checkout, writes the block, starts the services, then runs the `run` key (`--no-run`: services only). |
-| `ds down` | Stops the processes of the instance (the app, workers: a listener on a registered port, or started by `ds run` or `ds up`; never an editor or a shell of yours), then the Compose services, and keeps the data. Exits 1 when a process survives or Compose fails. Processes that detach (pm2 daemon, `nohup &`) escape it: see [Several processes](project-setup.md#several-processes). |
+| `ds down` | Stops the processes of the instance (the app, workers: a listener on a registered port, or started by `ds run` or `ds up`; never an editor or a shell of yours, unless you started it through `ds run`: do not start a shell, tmux or an editor that way, use the `.env` block or `eval "$(ds env)"`), then the Compose services, and keeps the data. Exits 1 when a process survives or Compose fails. Processes that detach (pm2 daemon, `nohup &`) escape it: see [Several processes](project-setup.md#several-processes). |
 | `ds run -- <command>` | Registers the checkout if needed and runs a command with the instance environment. |
 | `ds env [--format sh\|json]` | Prints the environment of the instance. |
 | `ds info [--json]` | Shows the name, slot, host, ports, URLs and services state of this checkout's instance. With `--json`, `host` is the instance's `DEVSLOT_HOST`, and `app_url` is present when `[web] port` names a managed port. |

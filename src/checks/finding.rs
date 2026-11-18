@@ -95,6 +95,8 @@ pub enum Check {
     WorktreeGuardRegistered,
     /// `[web] port` names a variable that is not a managed web port.
     WebPortUnmanaged,
+    /// A `DEVSLOT_*` key in `.env` or `.env.example` outside the devslot block.
+    EnvDevslotKeyOutsideBlock,
 }
 
 /// One problem found in the project.

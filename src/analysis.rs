@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use crate::checkout::Checkout;
 use crate::checks::compose::{ComposeCheckContext, check_compose};
 use crate::checks::env_config::{
-    check_env_forces_port, check_env_keys_declared, check_local_config_tracked,
+    check_devslot_keys_outside_block, check_env_forces_port, check_env_keys_declared,
+    check_local_config_tracked,
 };
 use crate::checks::finding::{Check, Finding, Level};
 use crate::compose::probe::{ProbedCompose, probe};
@@ -218,6 +219,10 @@ impl CheckoutAnalysis {
             self.env_files.effective_env_file(),
             self.env_files.example_file(),
             &self.ports,
+        ));
+        findings.extend(check_devslot_keys_outside_block(
+            self.env_files.env_file(),
+            self.env_files.example_file(),
         ));
         findings.extend(check_local_config_tracked(self.is_local_config_tracked));
         findings

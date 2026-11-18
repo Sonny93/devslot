@@ -241,7 +241,46 @@ pub fn create_env(root: &Path, source: &EnvSource) -> Result<(), EnvFileError> {
         path: source_path.to_path_buf(),
         source: error,
     })?;
-    replace_env(root, &stripped, file.mode)
+    replace_env(root, &drop_devslot_keys(&stripped), file.mode)
+}
+
+const DEVSLOT_KEY_PREFIX: &str = "DEVSLOT_";
+const EXPORT_PREFIX: &str = "export ";
+
+/// The text without the lines that define a `DEVSLOT_*` key (with the extra
+/// lines of a multi-line quoted value): only the block may set them, because
+/// one carried into the user's shell would make an editor look like a process
+/// devslot launched.
+fn drop_devslot_keys(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut lines = text.split_inclusive('\n');
+    while let Some(line) = lines.next() {
+        let Some(value) = devslot_key_value(line) else {
+            kept.push_str(line);
+            continue;
+        };
+        let Some(quote) = value.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+            continue;
+        };
+        if !value[1..].contains(quote) {
+            for following in lines.by_ref() {
+                if following.contains(quote) {
+                    break;
+                }
+            }
+        }
+    }
+    kept
+}
+
+/// The text after the `=` of a line that defines a `DEVSLOT_*` key.
+fn devslot_key_value(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let declaration = trimmed.strip_prefix(EXPORT_PREFIX).unwrap_or(trimmed);
+    let (key, value) = declaration.split_once('=')?;
+    key.trim()
+        .starts_with(DEVSLOT_KEY_PREFIX)
+        .then(|| value.trim_start())
 }
 
 /// The file `.env` is created from: the main checkout's `.env`, else the
@@ -592,6 +631,24 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.path().join(".env")).unwrap(),
             "A=1\nB=2\n"
+        );
+    }
+
+    #[test]
+    fn should_drop_the_devslot_keys_outside_the_block_when_creating_the_env() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.env");
+        std::fs::write(
+            &source,
+            "A=1\nDEVSLOT_RUN=app-3f2a\nexport DEVSLOT_INSTANCE=app\nDEVSLOT_NOTE=\"two\nlines\"\nB=2\nMY_DEVSLOT_KEY=3\n",
+        )
+        .unwrap();
+
+        create_env(root.path(), &refusing_links(&source)).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".env")).unwrap(),
+            "A=1\nB=2\nMY_DEVSLOT_KEY=3\n"
         );
     }
 

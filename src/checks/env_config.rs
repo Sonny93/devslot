@@ -61,6 +61,36 @@ pub fn check_env_keys_declared(
         .collect()
 }
 
+const DEVSLOT_KEY_PREFIX: &str = "DEVSLOT_";
+
+/// A `DEVSLOT_*` key outside the block of `.env` or `.env.example`: only the
+/// block may set them. One that reaches the shell (direnv, `export`) makes
+/// every process started there look like one devslot launched. The values are
+/// never shown.
+pub fn check_devslot_keys_outside_block(
+    env: Option<&EnvFile>,
+    example: Option<&EnvFile>,
+) -> Vec<Finding> {
+    [(".env", env), (".env.example", example)]
+        .into_iter()
+        .filter_map(|(name, file)| file.map(|file| (name, file)))
+        .flat_map(|(name, file)| {
+            file.entries()
+                .iter()
+                .filter(|entry| entry.key.starts_with(DEVSLOT_KEY_PREFIX))
+                .map(move |entry| {
+                    Finding::new(
+                        Level::Warning,
+                        Check::EnvDevslotKeyOutsideBlock,
+                        "only the devslot block may set a DEVSLOT_ variable: remove it from this file, or ds down could stop a process of yours",
+                    )
+                    .in_file(name)
+                    .for_key(&entry.key)
+                })
+        })
+        .collect()
+}
+
 /// A `devslot.local.toml` that git tracks is shared like the committed file,
 /// so it is not the user's own.
 pub fn check_local_config_tracked(is_tracked: bool) -> Option<Finding> {
@@ -160,6 +190,49 @@ mod tests {
                 .map(|finding| (finding.level, finding.check, finding.key.as_deref()))
                 .collect::<Vec<_>>(),
             [(Level::Error, Check::EnvForcesPort, Some("PORT"))]
+        );
+    }
+
+    #[test]
+    fn should_warn_naming_the_file_and_key_when_a_devslot_key_is_outside_the_block() {
+        let env = EnvFile::parse("A=1\nDEVSLOT_RUN=app-3f2a\n").unwrap();
+        let example = EnvFile::parse("export DEVSLOT_HOST=x\nB=2\n").unwrap();
+
+        let findings = check_devslot_keys_outside_block(Some(&env), Some(&example));
+
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| (
+                    finding.level,
+                    finding.file.as_deref(),
+                    finding.key.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (Level::Warning, Some(".env"), Some("DEVSLOT_RUN")),
+                (Level::Warning, Some(".env.example"), Some("DEVSLOT_HOST")),
+            ]
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| !finding.message.contains("app-3f2a"))
+        );
+    }
+
+    #[test]
+    fn should_not_warn_when_the_devslot_keys_are_only_in_the_block() {
+        let env = EnvFile::parse(&format!(
+            "A=1\n{}\nDEVSLOT_INSTANCE=app\n{}\n",
+            crate::project::dotenv_block::BLOCK_START,
+            crate::project::dotenv_block::BLOCK_END
+        ))
+        .unwrap();
+
+        assert_eq!(
+            check_devslot_keys_outside_block(Some(&env), None),
+            Vec::new()
         );
     }
 
