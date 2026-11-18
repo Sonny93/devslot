@@ -214,8 +214,14 @@ impl UnsavedWork {
 
 /// The refusal message for a worktree that holds `work`.
 pub fn describe_unsaved_work(path: &Path, work: &UnsavedWork) -> String {
+    describe_unsaved_work_needing(path, work, "--force")
+}
+
+/// Like [`describe_unsaved_work`], naming `options` as what to pass to remove
+/// the worktree anyway.
+pub fn describe_unsaved_work_needing(path: &Path, work: &UnsavedWork, options: &str) -> String {
     format!(
-        "{} has {} uncommitted change(s) and {} commit(s) found nowhere else; nothing was removed, pass --force to remove it anyway",
+        "{} has {} uncommitted change(s) and {} commit(s) found nowhere else; nothing was removed, pass {options} to remove it anyway",
         path.display(),
         work.uncommitted_changes,
         work.unreachable_commits

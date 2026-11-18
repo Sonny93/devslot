@@ -66,13 +66,17 @@ pub fn is_affirmative(answer: &str) -> bool {
     answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
 }
 
+/// Whether stdin and stderr are both terminals, so [`confirm`] can ask.
+pub fn can_ask() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
 /// Asks `prompt` on stderr and reads the answer from stdin, when both are
 /// terminals. Never opens `/dev/tty`.
 pub fn confirm(prompt: &str) -> Confirmation {
-    let is_interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     ask(
         prompt,
-        is_interactive,
+        can_ask(),
         &mut std::io::stdin().lock(),
         &mut std::io::stderr().lock(),
     )

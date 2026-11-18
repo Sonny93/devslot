@@ -11,12 +11,12 @@ use super::hook::worktree_create::{target_path, validate_name};
 use super::machine::{Machine, locate_checkout};
 use super::worktree_removal::{
     PreparedRemoval, RemovalFailure, UnsavedWork, count_unsaved_work, describe_sessions,
-    describe_unsaved_work, describe_users, ensure_listed_and_unlocked, live_other_sessions,
+    describe_unsaved_work_needing, describe_users, ensure_listed_and_unlocked, live_other_sessions,
     prepare_removal, remove_from_terminal,
 };
 use crate::checkout::CheckoutError;
 use crate::cli::args::WorktreeRmArguments;
-use crate::cli::confirm::{ConfirmationPolicy, exit_code_unless_confirmed};
+use crate::cli::confirm::{ConfirmationPolicy, can_ask, exit_code_unless_confirmed};
 use crate::cli::exit_code;
 use crate::cli::output::write_stdout;
 use crate::error::ToolError;
@@ -38,6 +38,8 @@ const NOT_REGISTERED: &str = "not registered";
 /// How long `ds worktree rm` waits for another creation or removal of the
 /// worktree, once the person has confirmed.
 const LOCK_WAIT: Duration = Duration::from_secs(10);
+const FORCE_OPTION: &str = "--force";
+const FORCE_AND_YES_OPTIONS: &str = "--force --yes";
 const IGNORED_FILES_WARNING: &str =
     "ignored files (.env, local databases, uploads) are deleted too";
 
@@ -102,7 +104,8 @@ pub fn run_worktree_rm(arguments: &WorktreeRmArguments) -> Result<u8, ToolError>
     let kept = kept_worktrees::read(&previewed.state_directory, &previewed.key);
     let preview = build_preview(&prepared, &previewed, kept)?;
     write_stdout(&render_preview(&preview))?;
-    if let Some(code) = refusal_without_force(&preview, arguments.force) {
+    let options = options_to_pass(arguments.yes, can_ask());
+    if let Some(code) = refusal_without_force(&preview, arguments.force, options) {
         return Ok(code);
     }
     let prompt = confirmation_prompt(&preview);
@@ -340,14 +343,26 @@ fn listed_or_none(summaries: &[ProcessSummary]) -> String {
     join_summaries(summaries)
 }
 
-fn refusal_without_force(preview: &Preview, is_forced: bool) -> Option<u8> {
+/// What a refusal for lack of `--force` tells the person to pass: without a
+/// terminal and without `--yes`, the confirmation would refuse next, so both.
+fn options_to_pass(is_yes_given: bool, can_ask: bool) -> &'static str {
+    if is_yes_given || can_ask {
+        return FORCE_OPTION;
+    }
+    FORCE_AND_YES_OPTIONS
+}
+
+fn refusal_without_force(preview: &Preview, is_forced: bool, options: &str) -> Option<u8> {
     if is_forced {
         return None;
     }
-    let reasons: Vec<String> = [in_use_reason(preview), unsaved_work_reason(preview)]
-        .into_iter()
-        .flatten()
-        .collect();
+    let reasons: Vec<String> = [
+        in_use_reason(preview, options),
+        unsaved_work_reason(preview, options),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     if reasons.is_empty() {
         return None;
     }
@@ -357,7 +372,7 @@ fn refusal_without_force(preview: &Preview, is_forced: bool) -> Option<u8> {
     Some(exit_code::ERROR)
 }
 
-fn in_use_reason(preview: &Preview) -> Option<String> {
+fn in_use_reason(preview: &Preview, options: &str) -> Option<String> {
     let users: Vec<String> = [
         (!preview.in_use.is_empty()).then(|| describe_users(&preview.in_use)),
         (!preview.sessions.is_empty()).then(|| describe_sessions(&preview.sessions)),
@@ -369,18 +384,18 @@ fn in_use_reason(preview: &Preview) -> Option<String> {
         return None;
     }
     Some(format!(
-        "{} is in use by {}; nothing was removed, close them or pass --force to remove it anyway",
+        "{} is in use by {}; nothing was removed, close them or pass {options} to remove it anyway",
         preview.path.display(),
         users.join(", ")
     ))
 }
 
-fn unsaved_work_reason(preview: &Preview) -> Option<String> {
+fn unsaved_work_reason(preview: &Preview, options: &str) -> Option<String> {
     let work = shown_work(preview);
     if work.is_empty() {
         return None;
     }
-    Some(describe_unsaved_work(&preview.path, &work))
+    Some(describe_unsaved_work_needing(&preview.path, &work, options))
 }
 
 fn confirmation_prompt(preview: &Preview) -> String {
@@ -476,10 +491,16 @@ mod tests {
         let mut ahead = preview();
         ahead.unreachable_commits = 1;
 
-        assert_eq!(refusal_without_force(&dirty, false), Some(exit_code::ERROR));
-        assert_eq!(refusal_without_force(&ahead, false), Some(exit_code::ERROR));
-        assert_eq!(refusal_without_force(&dirty, true), None);
-        assert_eq!(refusal_without_force(&preview(), false), None);
+        assert_eq!(
+            refusal_without_force(&dirty, false, FORCE_OPTION),
+            Some(exit_code::ERROR)
+        );
+        assert_eq!(
+            refusal_without_force(&ahead, false, FORCE_OPTION),
+            Some(exit_code::ERROR)
+        );
+        assert_eq!(refusal_without_force(&dirty, true, FORCE_OPTION), None);
+        assert_eq!(refusal_without_force(&preview(), false, FORCE_OPTION), None);
     }
 
     #[test]
@@ -498,10 +519,13 @@ mod tests {
     #[test]
     fn should_require_force_when_a_process_is_in_use() {
         assert_eq!(
-            refusal_without_force(&in_use_by_claude(), false),
+            refusal_without_force(&in_use_by_claude(), false, FORCE_OPTION),
             Some(exit_code::ERROR)
         );
-        assert_eq!(refusal_without_force(&in_use_by_claude(), true), None);
+        assert_eq!(
+            refusal_without_force(&in_use_by_claude(), true, FORCE_OPTION),
+            None
+        );
     }
 
     fn held_by_session(session_id: Option<&str>) -> Preview {
@@ -539,13 +563,16 @@ mod tests {
     fn should_refuse_without_force_when_a_session_holds_the_worktree() {
         let held = held_by_session(Some("abc-1"));
 
-        assert_eq!(refusal_without_force(&held, false), Some(exit_code::ERROR));
-        assert_eq!(refusal_without_force(&held, true), None);
+        assert_eq!(
+            refusal_without_force(&held, false, FORCE_OPTION),
+            Some(exit_code::ERROR)
+        );
+        assert_eq!(refusal_without_force(&held, true, FORCE_OPTION), None);
     }
 
     #[test]
     fn should_name_the_session_in_the_reason_when_a_session_holds_the_worktree() {
-        let reason = in_use_reason(&held_by_session(Some("abc-1"))).unwrap();
+        let reason = in_use_reason(&held_by_session(Some("abc-1")), FORCE_OPTION).unwrap();
 
         assert!(reason.contains("in use by another Claude Code session (session abc-1);"));
     }
@@ -616,9 +643,56 @@ mod tests {
 
     #[test]
     fn should_name_the_other_claude_session_when_it_is_what_blocks() {
-        let reason = in_use_reason(&in_use_by_claude()).unwrap();
+        let reason = in_use_reason(&in_use_by_claude(), FORCE_OPTION).unwrap();
 
         assert!(reason.contains("another Claude Code session (1234 (claude))"));
         assert!(reason.contains("--force"));
+    }
+
+    fn dirty_preview() -> Preview {
+        let mut dirty = preview();
+        dirty.uncommitted_changes = 2;
+        dirty
+    }
+
+    #[test]
+    fn should_name_force_and_yes_in_the_in_use_reason_when_yes_is_missing_without_a_terminal() {
+        let options = options_to_pass(false, false);
+
+        let reason = in_use_reason(&in_use_by_claude(), options).unwrap();
+
+        assert!(reason.contains("pass --force --yes to remove it anyway"));
+    }
+
+    #[test]
+    fn should_name_force_and_yes_in_the_unsaved_work_reason_when_yes_is_missing_without_a_terminal()
+    {
+        let options = options_to_pass(false, false);
+
+        let reason = unsaved_work_reason(&dirty_preview(), options).unwrap();
+
+        assert!(reason.contains("pass --force --yes to remove it anyway"));
+    }
+
+    #[test]
+    fn should_name_only_force_in_the_reasons_when_a_terminal_can_ask() {
+        let options = options_to_pass(false, true);
+
+        let in_use = in_use_reason(&in_use_by_claude(), options).unwrap();
+        let unsaved = unsaved_work_reason(&dirty_preview(), options).unwrap();
+
+        assert!(in_use.contains("pass --force to remove it anyway"));
+        assert!(unsaved.contains("pass --force to remove it anyway"));
+    }
+
+    #[test]
+    fn should_name_only_force_in_the_reasons_when_yes_is_given_without_a_terminal() {
+        let options = options_to_pass(true, false);
+
+        let in_use = in_use_reason(&in_use_by_claude(), options).unwrap();
+        let unsaved = unsaved_work_reason(&dirty_preview(), options).unwrap();
+
+        assert!(in_use.contains("pass --force to remove it anyway"));
+        assert!(unsaved.contains("pass --force to remove it anyway"));
     }
 }

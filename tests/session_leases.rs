@@ -165,6 +165,27 @@ fn should_refuse_worktree_rm_and_keep_everything_when_a_live_session_holds_the_l
 }
 
 #[test]
+fn should_name_force_and_yes_and_keep_the_worktree_when_no_option_is_given_without_a_terminal() {
+    let sandbox = sandbox();
+    let path = sandbox.created("feature-x");
+    let session = sandbox.spawn_session();
+    let start_time = start_time_of(session.id());
+    sandbox.write_lease(
+        &path,
+        session.id().try_into().unwrap(),
+        start_time,
+        "abc-123",
+    );
+
+    let run = sandbox.main.run(&["worktree", "rm", "feature-x"]);
+    kill(session);
+
+    assert_eq!(run.status, 1, "{}", run.stderr);
+    assert!(run.stderr.contains("pass --force --yes"));
+    assert!(path.exists());
+}
+
+#[test]
 fn should_remove_the_worktree_and_only_its_own_lease_folder_when_the_lease_is_dead() {
     let sandbox = sandbox();
     let path = sandbox.created("feature-x");
