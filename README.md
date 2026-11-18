@@ -20,7 +20,7 @@ v1 is in development and nothing is released.
 
 **Non-goals.**
 - Production or remote deployment: devslot is a dev tool.
-- Services shared between instances, background processes, named URLs and the Tunneler integration (planned after v1).
+- Services shared between instances, background processes and the Tunneler integration (planned after v1). A host per instance (`<name>.localhost`) exists, opt-in through `[web] port`; named URLs through a proxy do not.
 - Remapping ports written as literals in a compose file: they are reported, not managed.
 - Windows and macOS: the code stays portable, nothing is tested there.
 
@@ -56,7 +56,7 @@ In a project that has a compose file for development:
 ```sh
 ds doctor    # review the project: what ds manages, what would break isolation
 ds up        # register this checkout, write the .env block, start the services (--no-run: skip the run key)
-ds info      # name, slot, ports and URLs of this instance (--json for scripts)
+ds info      # name, slot, host, ports and URLs of this instance (--json for scripts)
 ds rm        # delete the instance's data, remove the block, opt the checkout out
 ```
 
@@ -75,6 +75,7 @@ VITE_HMR_PORT=20051
 DB_PORT=20052
 COMPOSE_PROJECT_NAME=my-links-feat-auth-3f2a
 DEVSLOT_INSTANCE=my-links-feat-auth-3f2a
+DEVSLOT_HOST=my-links-feat-auth-3f2a.localhost
 DEVSLOT_SLOT=1
 # <<< devslot <<<
 ```
@@ -99,11 +100,14 @@ The plugin's skill gives Claude Code these rules. For other agents (Codex, Curso
 This repository runs several instances of its dev stack on one machine, one per checkout, through devslot (`ds`). Other agents work on the same machine.
 
 - Start the services with `ds up --no-run`. Plain `ds up` also runs the `run` key in the foreground and does not return: run it as a background command, only to get the app too. Run a command with the instance environment with `ds run -- <command>`.
-- Read ports and URLs with `ds info --json`. Never guess or hardcode them: 3333, 5432 and 24678 are the defaults of other instances.
+- Stop the app and the services with `ds down`: it also stops the processes this instance started earlier, even in another turn, and keeps the data.
+- Read ports and URLs with `ds info --json`. Never guess or hardcode them: 3333, 5432 and 24678 are the defaults of other instances. When it has `app_url`, open that one (the instance's own host keeps cookies apart). A service's own CLI runs with `ds run -- docker compose -f <dev compose> exec <service> <cli>`.
+- devslot never changes the project: when the app hardcodes a port or a URL or needs several processes, the project declares it in `devslot.toml` (`run`, `[ports] extra`, `[env]`, `[web] port`); `ds doctor` says what to change (see [Make a project work with devslot](https://github.com/Sonny93/devslot/blob/main/docs/project-setup.md)). Never work around it by running on the default ports.
 - Reset the data with `ds reset` (everything) or `ds reset <service>`.
 - Never run `ds rm`, `ds prune`, `ds worktree rm`, `docker compose down -v`, `docker volume rm` or remove containers by hand: it can delete another agent's data. Ask the user.
 - When the devslot worktree guard is on (the session start says so), the main checkout is for reading and searching only: before editing files or running `ds up`, `ds run` or `ds reset`, enter a worktree with the EnterWorktree tool, with a short name taken from the task, and never work around a refusal through Bash. Run `ds worktree land` only after the user's explicit go-ahead on the committed work: it is fast-forward only, so when the base moved, run `git rebase <base>` in the worktree, resolve the conflicts, commit, and run `ds worktree land` again. Never push.
 - To remove this session's worktree when the user asks, leave it with the ExitWorktree tool, action `remove` and `discard_changes: true` (devslot's hook keeps a worktree that holds unsaved work or that another session uses); never leave with `keep` and then hand the user a removal command. When ExitWorktree says it was kept, run `ds ls`, which says why, and tell the user.
+- After a successful `ds worktree land`, ask the user whether to remove the session's worktree (ExitWorktree, action `remove`); never remove it on your own.
 - If `ds info` says this checkout is opted out, do not run `ds up` without asking the user.
 - `DEVSLOT_INSTANCE` names this instance; show it in logs or on a health endpoint when useful.
 - `ds doctor` explains why a checkout cannot be isolated.
@@ -116,7 +120,7 @@ This repository runs several instances of its dev stack on one machine, one per 
 - **Sessions started with `claude -p` keep their worktree.** Claude Code never fires `WorktreeRemove` for them, so the worktree, its instance and its data stay until you run `ds worktree rm <name>`.
 - **Sessions started with `--tmux` skip the plugin's `WorktreeCreate` hook.** See [Worktrees](docs/worktrees.md#sessions-started-with-claude---worktree-name---tmux) for the hooks to declare yourself.
 - **A server started without `ds run` may survive a worktree removal.** Its process listening on an instance port is stopped, but a parent that respawns it (for example `node ace serve` run by hand) is only listed. Servers started through `ds run` or `ds up` are stopped entirely.
-- **Cookies are not isolated by port.** Two instances opened on `localhost` with the same session cookie name log each other out. Named URLs per instance (after v1) will fix it.
+- **Cookies are not isolated by port.** Two instances opened on `localhost` with the same session cookie name log each other out. Set `[web] port` so the app is opened on the instance's own host (`<name>.localhost`), which keeps cookies apart: see [Make a project work with devslot](docs/project-setup.md#per-instance-host-and-cookies).
 - **Dev and local prod share the compose project** of a registered checkout, so `just prod` runs on the dev database volume. Workaround: `-p <name>` in the prod recipe (see the [spec](docs/spec.md)).
 - **A session that only `cd`'d into a worktree is seen once it ran `ds up`, `ds run` or `ds reset` there.** Containers started by hand (`docker compose up`) and agents other than Claude Code stay invisible: another session's removal can delete their data. The lease lasts as long as the session's `claude` process (`/clear` and subagents included), so `ds worktree rm` from a terminal needs `--force` while it runs. See [Worktrees in use](docs/worktrees.md#worktrees-in-use-linux-only).
 - **Processes are stopped on Linux only.** Elsewhere, a worktree removal stops nothing and lists nothing, and it cannot tell that another session uses the worktree.
