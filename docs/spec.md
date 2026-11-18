@@ -28,7 +28,7 @@ Goals:
 
 Recommended syntax in dev compose files: `127.0.0.1:${DB_PORT:-5432}:5432`. With the default value, the compose file still works on its own.
 
-Out of scope: services shared between instances, background processes, named URLs, remapping of hardcoded ports, Windows and macOS (the code stays portable, but nothing is tested on them).
+Out of scope: services shared between instances, background processes, named URLs through a proxy (a host per instance, `<name>.localhost`, exists since 2026-11-18, opt-in through `[web] port`: see [decisions](decisions.md)), remapping of hardcoded ports, Windows and macOS (the code stays portable, but nothing is tested on them).
 
 ## Concepts
 
