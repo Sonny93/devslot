@@ -103,6 +103,13 @@ APP_BASE_URL = "http://${DEVSLOT_HOST}:${WEB_PORT}"
 
 ## Fixed OAuth callbacks
 
-An OAuth provider accepts only the callback URLs registered with it, so one URL cannot follow every instance. Keep a separate callback variable set to the registered URL (for example `OAUTH_CALLBACK_URL=http://localhost:3333/callback`) and build the other URLs from the instance. Forcing `PORT` to the registered port in `devslot.local.toml` works for one instance at a time, and does not combine with per-instance hosts: the state cookie is set on the instance host and the callback arrives on `localhost`, so the state check fails.
+An OAuth provider accepts only the callback URLs registered with it, so one URL cannot follow every instance, and the callback lands on that URL, not on the instance host. The state cookie was set on the instance host, so it is absent there. That holds for a separate callback variable and for forcing `PORT` in `devslot.local.toml` alike.
+
+The flow that works:
+
+1. Keep the callback variable on the registered URL (for example `OAUTH_CALLBACK_URL=http://localhost:3333/callback`). The code exchange keeps sending that registered `redirect_uri`.
+2. Start the login from the instance's `app_url`. After the provider redirects to the registered URL, replace the origin in the address bar with the origin of `app_url`, keeping the path and the query. The state cookie is then present and the exchange succeeds.
+
+This needs the request on the registered URL to keep its URL. When another instance (often the main checkout) listens there and redirects on a state mismatch, the code is lost. So in development only, when its state cookie is absent, the app should show the callback URL instead of redirecting, so it can be reopened on the instance host.
 
 The files `devslot.toml` and `devslot.local.toml` are described in [Configuration](configuration.md).

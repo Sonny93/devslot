@@ -75,8 +75,8 @@ VITE_HMR_PORT=20051
 DB_PORT=20052
 COMPOSE_PROJECT_NAME=my-links-feat-auth-3f2a
 DEVSLOT_INSTANCE=my-links-feat-auth-3f2a
-DEVSLOT_HOST=my-links-feat-auth-3f2a.localhost
 DEVSLOT_SLOT=1
+DEVSLOT_HOST=my-links-feat-auth-3f2a.localhost
 # <<< devslot <<<
 ```
 

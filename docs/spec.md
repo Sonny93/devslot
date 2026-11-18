@@ -64,7 +64,7 @@ The tool finds the port variables by reading the compose file and the `.env`.
    The probe runs with a cleared environment, `--env-file /dev/null`, `-p devslot-probe` and a timeout, and the output never relays Compose's stderr or a resolved value.
 3. **Hardcoded ports** (`"5432:5432"`) give a warning that suggests `${VAR:-5432}`. They are not managed. Port ranges are not managed either.
 4. **App port**: `PORT`, read from `.env`, otherwise `.env.example`, plus the names in `[ports] extra`. Other `*_PORT` variables of the `.env` are left alone: they may point to an external server.
-5. **Vite HMR**: `VITE_HMR_PORT` is added when Vite is detected: a recursive walk from the checkout root that honors `.gitignore` (the `ignore` crate) and skips `node_modules` and hidden directories, looking for a `package.json` that lists `vite` and for `vite.config.*`. Vite has no environment variable for its HMR port: the config reads `VITE_HMR_PORT` with one line (`server.ws.port` from Vite 8, where `server.hmr.port` is deprecated; `server.hmr.port` before). Projects that use `@adonisjs/assembler` need nothing, since it sets the variable itself.
+5. **Vite HMR**: `VITE_HMR_PORT` is added when Vite is detected: a recursive walk from the checkout root that honors `.gitignore` (the `ignore` crate) and skips `node_modules` and hidden directories, looking for a `package.json` that lists `vite` and for `vite.config.*`. The variable is allocated even for a standalone dev server, because a custom server may read it outside `vite.config`. Vite uses the HMR port 24678 only in middleware mode (`middlewareMode`); a standalone dev server serves HMR on its own `server.port`. For a middleware-mode config, which has no environment variable for its HMR port, the config reads `VITE_HMR_PORT` with one line (`server.ws.port` from Vite 8, where `server.hmr.port` is deprecated; `server.hmr.port` before). Projects that use `@adonisjs/assembler` need nothing, since it sets the variable itself.
 6. **Reserved and unmanaged names**: a managed port variable name ends in `PORT` (case-insensitive) when it comes from the compose file or from `[ports] extra` of the committed `devslot.toml`. `PATH`, `HOME`, `PWD`, `SHELL`, `USER`, `TMPDIR` and names starting with `LD_`, `DOCKER_`, `COMPOSE_`, `BUILDX_`, `XDG_` or `DEVSLOT_` are never managed.
 7. **When one variable has several sources**, the first wins, in this order: `PORT`, `[ports] extra`, `VITE_HMR_PORT`, compose; the compose service and container port are kept when the compose also publishes it.
 
@@ -99,10 +99,13 @@ The same checks serve `ds up`, `ds run`, `ds ensure` and `ds doctor`. An error b
 | `port_variable_unmanaged`: compose port published through a variable whose name does not end in `PORT` | warning | Not managed; rename it to `*_PORT`. |
 | `env_file_ports`: a service loads `.env` with `env_file` and receives a managed port variable without pinning it in `environment:` | warning | The container would receive a host-side port. |
 | `bind_mount`: bind mount whose resolved source is outside the checkout root | warning | The instances would share the same files. The finding names the service and the position in `volumes`, never the path. |
-| `vite_hmr_port`: `vite` in `package.json` and `VITE_HMR_PORT` absent from `vite.config.*`, or no `vite.config.*` | warning | All instances would fight over HMR port 24678. Skipped when `@adonisjs/assembler` is a dependency. |
-| `vite_multiple_configs`: more than one Vite config | warning | A single `VITE_HMR_PORT` would be shared. |
+| `vite_hmr_port`: a Vite config that mentions `middlewareMode` and does not read `VITE_HMR_PORT` | warning | In middleware mode Vite uses HMR port 24678, so all instances would fight over it. A standalone dev server serves HMR on its own `server.port`: no warning. Skipped when `@adonisjs/assembler` is a dependency. |
+| `vite_multiple_configs`: two or more Vite configs that read `VITE_HMR_PORT` or mention `middlewareMode` | warning | A single `VITE_HMR_PORT` would be shared. |
+| `vite_literal_port`: a literal port in a `vite.config.*` (`port: 3333`, `const X_PORT = 3333`, a `localhost:3334` proxy target), in a `--port <n>` of a `package.json` script of a Vite manifest, or in a root justfile line that runs vite | warning | Every instance would use that port. A config that names a managed variable other than `VITE_HMR_PORT` is skipped. The finding says which variable to read, or to add to `[ports] extra`. |
 | `env_test_redefines`: `.env.test` redefines a managed variable | warning | Tests would target other ports than the app. |
-| `env_local_host_port`: a value holds a local host (`localhost`, `127.0.0.1`, `0.0.0.0`, `[::1]`) followed by the default port of a managed variable | warning | It does not follow the assigned port, unless `[env]` rebuilds it. External hosts are ignored. |
+| `env_local_host_port`: a value of `.env` or `.env.example` holds a local host (`localhost`, `127.0.0.1`, `0.0.0.0`, `[::1]`) followed by the default port of a managed variable | warning | It does not follow the assigned port, unless `[env]` rebuilds it. External hosts are ignored. |
+| `env_unmanaged_local_port`: a value of `.env` or `.env.example` holds a local host followed by a literal port that no devslot variable manages (not the port of a `[ports] ignore` variable, not an `[env]` key) | warning | The service would be shared or collide between instances. One finding per key, naming the key, the file and the port; it suggests a `*_PORT` in `[ports] extra` and `.env.example`, and rebuilding the key in `[env]`. |
+| `web_port_unmanaged`: `[web] port` names a variable that is not a managed web port (unknown, or a service-kind port) | warning | Every url stays on `localhost` and `ds info --json` has no `app_url`. |
 | `compose_skipped`: a scanned compose file that Compose rejects on its own | warning | Override files and fragments fail alone; they are merged into the dev compose instead. |
 | `slot_geometry_changed`: the registered range no longer matches the slot settings | warning | The instance keeps its ports; a change of slot settings does not move it. |
 | `session_process_name`: `CLAUDE_PID` is set (a Claude Code session) and the session process is not named `claude`, or none is found (Linux only) | warning | No session lease is written, so a worktree removal by another session will not see this session's worktrees in use. |
@@ -145,18 +148,20 @@ version = 1
 path = "/home/me/dev/my-links.feat-auth"
 name = "my-links-feat-auth-3f2a"
 slot = 1
+host = "my-links-feat-auth-3f2a.localhost"
+web_port = "PORT"   # only when [web] port is set
 range = [20050, 20099]
 ports = { PORT = 20050, VITE_HMR_PORT = 20051, DB_PORT = 20052 }
 details = { PORT = { kind = "web" }, VITE_HMR_PORT = { kind = "web" }, DB_PORT = { kind = "service", service = "postgres", target = 5432 } }
 ```
 
-`range` is the block the slot covered when assigned, so an instance keeps its ports after a change of slot size. `details` gives the kind of each port, and for a service port its compose service and container port, so `ds info` and `ds ls` need no Docker call. A top-level `opted_out` list holds the paths of checkouts removed by `ds rm`.
+`range` is the block the slot covered when assigned, so an instance keeps its ports after a change of slot size. `details` gives the kind of each port, and for a service port its compose service and container port, so `ds info` and `ds ls` need no Docker call. `host` is the instance's `DEVSLOT_HOST`, chosen at registration from the label of the instance name (`_` to `-`, at most 63 characters keeping the hash; `-<slot>`, then `-<slot>-<n>`, appended while another instance has the host) and stored: it is never recomputed. `web_port` is the variable `[web] port` named when the entry was last saved. An entry without `host` (written by an older version) gets one when it is read and saved at the next registration refresh; an invalid host, or one used by two entries, makes the registry malformed. A top-level `opted_out` list holds the paths of checkouts removed by `ds rm`.
 
 ## Environment and the `.env` block
 
 The tool provides the instance values in two ways: it passes them to the process it launches, and it copies them into a delimited block at the end of `.env`. With or without `ds`, everyone reads the same values.
 
-**Variables**, in the order of the block: each port variable, `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE` (only when needed, see Port discovery), `DEVSLOT_INSTANCE`, `DEVSLOT_SLOT`, then the built values of `[env]`. `DEVSLOT_INSTANCE` is the instance name and `DEVSLOT_SLOT` its slot number, so an app can show which instance it is. Credentials, `APP_KEY` and the rest of the `.env` are never touched.
+**Variables**, in the order of the block: each port variable, `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE` (only when needed, see Port discovery), `DEVSLOT_INSTANCE`, `DEVSLOT_SLOT`, `DEVSLOT_HOST`, then the built values of `[env]`. `DEVSLOT_INSTANCE` is the instance name, `DEVSLOT_SLOT` its slot number and `DEVSLOT_HOST` its host (`<label>.localhost`, see [Configuration](configuration.md#per-instance-host-and-web-port)), so an app can show which instance it is. Credentials, `APP_KEY` and the rest of the `.env` are never touched.
 
 **`ds` overwrites its own variables.** If the caller's environment already defines one with another value (for example after an `eval $(ds env)` in another checkout), `ds run` replaces it and reports it on stderr. `ds env` prints only the port variables, `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE`, `DEVSLOT_*` and the `[env]` values of `devslot.local.toml`. To force a value, use `devslot.local.toml`.
 
@@ -172,6 +177,7 @@ DB_PORT=20052
 COMPOSE_PROJECT_NAME=my-links-feat-auth-3f2a
 DEVSLOT_INSTANCE=my-links-feat-auth-3f2a
 DEVSLOT_SLOT=1
+DEVSLOT_HOST=my-links-feat-auth-3f2a.localhost
 # <<< devslot <<<
 ```
 
@@ -240,7 +246,7 @@ require = []                   # path globs of the main checkouts agents must no
 require_exclude = []           # wins over require
 ```
 
-`[env]` keys match `[A-Za-z_][A-Za-z0-9_]*`, values are strings or integers, and `${NAME}` is replaced by an instance variable (an unknown name is an error). Reserved names and a denylist of names that make programs run code are refused. The committed `devslot.toml` may only set keys already declared in `.env` or `.env.example`; a managed port may be forced only in `devslot.local.toml`. `ds info` shows where the compose file choice comes from: `devslot.toml`, `devslot.local.toml` or `detected`.
+`[env]` keys match `[A-Za-z_][A-Za-z0-9_]*`, values are strings or integers, and `${NAME}` is replaced by an instance variable (an unknown name is an error; `${DEVSLOT_HOST}` is the instance's host). Reserved names and a denylist of names that make programs run code are refused. The committed `devslot.toml` may only set keys already declared in `.env` or `.env.example`; a managed port may be forced only in `devslot.local.toml`. `ds info` shows where the compose file choice comes from: `devslot.toml`, `devslot.local.toml` or `detected`.
 
 ## JSON output
 
@@ -257,9 +263,10 @@ require_exclude = []           # wins over require
       "name": "my-links-feat-auth-3f2a",
       "path": "/home/me/dev/my-links.feat-auth",
       "slot": 1,
+      "host": "my-links-feat-auth-3f2a.localhost",
       "services_running": true,
       "ports": [
-        { "var": "PORT", "port": 20050, "kind": "web", "url": "http://localhost:20050" },
+        { "var": "PORT", "port": 20050, "kind": "web", "url": "http://my-links-feat-auth-3f2a.localhost:20050" },
         { "var": "VITE_HMR_PORT", "port": 20051, "kind": "web", "url": "http://localhost:20051" },
         { "var": "DB_PORT", "port": 20052, "kind": "service", "service": "postgres", "target": 5432 }
       ]
@@ -270,7 +277,7 @@ require_exclude = []           # wins over require
 
 `shared` is always empty. `services_running` is `null` when Docker could not tell. Only web ports have a `url`.
 
-`ds info --json` of a registered checkout has `version`, `registered: true`, `name`, `path`, `slot`, `range` (`[first, last]`), `compose_file`, `compose_file_origin`, `ports` (same shape as above) and `services` (`running`, `stopped`, `none` or `unknown`). An unregistered checkout gives `version`, `registered: false`, `path` and `opted_out`.
+`ds info --json` of a registered checkout has `version`, `registered: true`, `name`, `path`, `slot`, `host`, `app_url` (only when `[web] port` names a managed web port: `http://<host>:<port>`), `range` (`[first, last]`), `compose_file`, `compose_file_origin`, `ports` (same shape as above) and `services` (`running`, `stopped`, `none` or `unknown`). An unregistered checkout gives `version`, `registered: false`, `path` and `opted_out`.
 
 `ds doctor --json` has `version`, `checkout`, `compose_file`, `ports` (`var`, `kind`, `default`, `source`, `file`, `service`, `target`), `findings` (`level`, `check`, `file`, `service`, `key`, `message`) and `summary` (`errors`, `warnings`).
 
