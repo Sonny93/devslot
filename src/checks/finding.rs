@@ -89,6 +89,8 @@ pub enum Check {
     WorktreeRequireIgnored,
     /// A main checkout registered before the worktree guard covered it.
     WorktreeGuardRegistered,
+    /// `[web] port` names a variable that is not a managed web port.
+    WebPortUnmanaged,
 }
 
 /// One problem found in the project.

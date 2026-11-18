@@ -55,13 +55,6 @@ pub struct InfoPort {
     pub url: Option<String>,
 }
 
-impl InfoPort {
-    /// The URL of a web port on this machine.
-    pub fn url_of(port: u16) -> String {
-        format!("http://localhost:{port}")
-    }
-}
-
 /// What `ds info` knows about a registered checkout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RegisteredInfo {
@@ -75,6 +68,11 @@ pub struct RegisteredInfo {
     pub path: String,
     /// The slot number.
     pub slot: u32,
+    /// The local host name of the instance, `<label>.localhost`.
+    pub host: String,
+    /// Where the app opens: the URL of the web port `[web] port` names, on
+    /// the host of the instance; `null` without that setting.
+    pub app_url: Option<String>,
     /// The first and last port of the slot.
     pub range: [u16; 2],
     /// The dev compose file, relative to the checkout root.
@@ -119,6 +117,8 @@ pub struct ListedInstance {
     pub path: String,
     /// The slot number.
     pub slot: u32,
+    /// The local host name of the instance, `<label>.localhost`.
+    pub host: String,
     /// Whether a container of the compose project runs; `null` when Docker
     /// could not tell.
     pub services_running: Option<bool>,

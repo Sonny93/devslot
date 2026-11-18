@@ -104,6 +104,9 @@ mod tests {
                     target: None,
                 },
             }],
+            host: "app.localhost".to_owned(),
+            web_port_variable: None,
+            is_host_unsaved: false,
         }
     }
 
@@ -144,7 +147,8 @@ mod tests {
                 "PORT",
                 "COMPOSE_PROJECT_NAME",
                 "DEVSLOT_INSTANCE",
-                "DEVSLOT_SLOT"
+                "DEVSLOT_SLOT",
+                "DEVSLOT_HOST"
             ]
         );
     }
@@ -181,7 +185,8 @@ mod tests {
                     "COMPOSE_PROJECT_NAME",
                     "COMPOSE_FILE",
                     "DEVSLOT_INSTANCE",
-                    "DEVSLOT_SLOT"
+                    "DEVSLOT_SLOT",
+                    "DEVSLOT_HOST"
                 ],
                 Some("dev.compose.yml:compose.override.yml")
             )
@@ -208,6 +213,21 @@ mod tests {
             outcome,
             Err(BlockEntriesError::SeparatorInFileName { .. })
         ));
+    }
+
+    #[test]
+    fn should_write_the_host_of_the_instance_after_its_ids() {
+        let root = tempfile::tempdir().unwrap();
+
+        let entries = block_entries(
+            &instance(),
+            root.path(),
+            &DevComposeSelection::NoneFound,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(value_of(&entries, "DEVSLOT_HOST"), Some("app.localhost"));
     }
 
     #[test]

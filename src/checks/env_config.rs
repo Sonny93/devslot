@@ -260,6 +260,9 @@ mod tests {
                     last: 20099,
                 },
                 ports: vec![],
+                host: "app.localhost".to_owned(),
+                web_port_variable: None,
+                is_host_unsaved: false,
             }],
             opted_out: vec![],
         }

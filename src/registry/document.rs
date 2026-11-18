@@ -1,7 +1,7 @@
 //! Reading the registry document into records, and applying one record to the
 //! document in place so everything else in the file stays as it is.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, value};
@@ -12,8 +12,9 @@ use super::record::{
 };
 use crate::discovery::PortKind;
 use crate::global_config::MAX_SLOT_SIZE;
+use crate::host_label::{host_of_label, is_valid_host, pick_label};
 use crate::port_range::PortRange;
-use crate::project_config::check_variable_name;
+use crate::project_config::{check_variable_name, is_valid_variable_name};
 
 /// The only registry version devslot understands.
 pub const REGISTRY_VERSION: i64 = 1;
@@ -24,6 +25,8 @@ pub const EMPTY_REGISTRY: &str = "version = 1\n";
 const VERSION_KEY: &str = "version";
 const OPTED_OUT_KEY: &str = "opted_out";
 const INSTANCE_KEY: &str = "instance";
+const HOST_KEY: &str = "host";
+const WEB_PORT_KEY: &str = "web_port";
 
 struct Problem {
     entry: String,
@@ -56,7 +59,8 @@ pub fn parse_registry(text: &str, file: &Path) -> Result<(DocumentMut, Registry)
 fn read_registry(document: &DocumentMut) -> Result<Registry, Problem> {
     check_version(document)?;
     let opted_out = read_opted_out(document)?;
-    let instances = read_instances(document)?;
+    let mut instances = read_instances(document)?;
+    fill_missing_hosts(&mut instances);
     check_consistency(&instances)?;
     Ok(Registry {
         instances,
@@ -122,13 +126,65 @@ fn read_instance(table: &Table, index: usize) -> Result<InstanceRecord, Problem>
     let slot = u32::try_from(slot).map_err(|_| problem(&entry, "slot is out of range"))?;
     let range = read_range(table.get("range"), &entry)?;
     let ports = read_ports(table, range, &entry)?;
+    let host = read_host(table, &entry)?;
+    let web_port_variable = read_web_port_variable(table, &entry)?;
     Ok(InstanceRecord {
         path,
         name,
         slot,
         range,
         ports,
+        is_host_unsaved: host.is_none(),
+        host: host.unwrap_or_default(),
+        web_port_variable,
     })
+}
+
+fn read_host(table: &Table, entry: &str) -> Result<Option<String>, Problem> {
+    let Some(item) = table.get(HOST_KEY) else {
+        return Ok(None);
+    };
+    let host = item
+        .as_str()
+        .filter(|host| is_valid_host(host))
+        .ok_or_else(|| {
+            problem(
+                entry,
+                "host must be one <label>.localhost name of letters, digits and dashes",
+            )
+        })?;
+    Ok(Some(host.to_owned()))
+}
+
+fn read_web_port_variable(table: &Table, entry: &str) -> Result<Option<String>, Problem> {
+    let Some(item) = table.get(WEB_PORT_KEY) else {
+        return Ok(None);
+    };
+    let variable = item
+        .as_str()
+        .filter(|variable| is_valid_variable_name(variable))
+        .ok_or_else(|| problem(entry, "web_port must be a variable name"))?;
+    Ok(Some(variable.to_owned()))
+}
+
+/// Gives every entry without a host the one a registration would have given
+/// it, in file order, around the hosts already stored.
+fn fill_missing_hosts(instances: &mut [InstanceRecord]) {
+    let mut taken: HashSet<String> = instances
+        .iter()
+        .filter(|instance| !instance.is_host_unsaved)
+        .map(|instance| instance.host.clone())
+        .collect();
+    for instance in instances
+        .iter_mut()
+        .filter(|instance| instance.is_host_unsaved)
+    {
+        let label = pick_label(&instance.name, instance.slot, |label| {
+            taken.contains(&host_of_label(label))
+        });
+        instance.host = host_of_label(&label);
+        taken.insert(instance.host.clone());
+    }
 }
 
 fn entry_label(table: &Table, index: usize) -> String {
@@ -271,6 +327,10 @@ fn check_consistency(instances: &[InstanceRecord]) -> Result<(), Problem> {
         let reason = format!("the name {} is used twice", instances[first].name);
         return Err(pair_problem(instances, first, second, reason));
     }
+    if let Some((first, second)) = first_duplicate_host(instances) {
+        let reason = format!("the host {} is used twice", instances[first].host);
+        return Err(pair_problem(instances, first, second, reason));
+    }
     if let Some((first, second)) = first_overlapping_range(instances) {
         return Err(pair_problem(
             instances,
@@ -312,6 +372,14 @@ fn first_duplicate_name(instances: &[InstanceRecord]) -> Option<(usize, usize)> 
     let mut seen: HashMap<&str, usize> = HashMap::with_capacity(instances.len());
     instances.iter().enumerate().find_map(|(index, instance)| {
         seen.insert(instance.name.as_str(), index)
+            .map(|earlier| (earlier, index))
+    })
+}
+
+fn first_duplicate_host(instances: &[InstanceRecord]) -> Option<(usize, usize)> {
+    let mut seen: HashMap<&str, usize> = HashMap::with_capacity(instances.len());
+    instances.iter().enumerate().find_map(|(index, instance)| {
+        seen.insert(instance.host.as_str(), index)
             .map(|earlier| (earlier, index))
     })
 }
@@ -494,6 +562,7 @@ fn new_table(record: &InstanceRecord, path_text: &str, needs_blank_line: bool) -
     }
     table.insert("path", value(path_text));
     table.insert("name", value(record.name.as_str()));
+    table.insert(HOST_KEY, value(record.host.as_str()));
     table.insert("slot", value(i64::from(record.slot)));
     table.insert("range", value(range_array(record.range)));
     let mut ports = InlineTable::new();
@@ -504,6 +573,9 @@ fn new_table(record: &InstanceRecord, path_text: &str, needs_blank_line: bool) -
     }
     table.insert("ports", value(ports));
     table.insert("details", value(details));
+    if let Some(variable) = &record.web_port_variable {
+        table.insert(WEB_PORT_KEY, value(variable.as_str()));
+    }
     table
 }
 
@@ -531,6 +603,25 @@ fn update_table(table: &mut Table, record: &InstanceRecord) {
     for assigned in &record.ports {
         set_port(table, assigned);
         set_detail(table, assigned, &entry);
+    }
+    if table.get(HOST_KEY).is_none() {
+        table.insert(HOST_KEY, value(record.host.as_str()));
+    }
+    set_web_port_variable(table, record.web_port_variable.as_deref());
+}
+
+fn set_web_port_variable(table: &mut Table, variable: Option<&str>) {
+    let current = table.get(WEB_PORT_KEY).and_then(Item::as_str);
+    if current == variable {
+        return;
+    }
+    match variable {
+        Some(variable) => {
+            table.insert(WEB_PORT_KEY, value(variable));
+        }
+        None => {
+            table.remove(WEB_PORT_KEY);
+        }
     }
 }
 
@@ -580,6 +671,7 @@ mod tests {
 [[instance]]
 path = "/work/my-links.feat-auth"
 name = "my-links-feat-auth-3f2a"
+host = "my-links-feat-auth-3f2a.localhost"
 slot = 1
 range = [20050, 20099]
 ports = { PORT = 20050, VITE_HMR_PORT = 20051, DB_PORT = 20052 }
@@ -599,7 +691,7 @@ details = { PORT = { kind = "web" }, VITE_HMR_PORT = { kind = "web" }, DB_PORT =
 
     fn entry(path: &str, name: &str, range: (u16, u16), port: u32) -> String {
         format!(
-            "\n[[instance]]\npath = \"{path}\"\nname = \"{name}\"\nslot = 1\nrange = [{}, {}]\nports = {{ PORT = {port} }}\ndetails = {{ PORT = {{ kind = \"web\" }} }}\n",
+            "\n[[instance]]\npath = \"{path}\"\nname = \"{name}\"\nhost = \"{name}.localhost\"\nslot = 1\nrange = [{}, {}]\nports = {{ PORT = {port} }}\ndetails = {{ PORT = {{ kind = \"web\" }} }}\n",
             range.0, range.1
         )
     }
@@ -635,6 +727,9 @@ details = { PORT = { kind = "web" }, VITE_HMR_PORT = { kind = "web" }, DB_PORT =
                 last: range.1,
             },
             ports,
+            host: format!("{name}.localhost"),
+            web_port_variable: None,
+            is_host_unsaved: false,
         }
     }
 
@@ -984,5 +1079,165 @@ details = { PORT = { kind = "web" }, VITE_HMR_PORT = { kind = "web" }, DB_PORT =
         let error = apply_record(&mut document, &new, Path::new(FILE)).unwrap_err();
 
         assert!(matches!(error, RegistryError::PathNotUtf8 { .. }));
+    }
+
+    const OLD_ENTRY: &str = "\n[[instance]]\npath = \"/work/old\"\nname = \"my_app-3f2a\"\nslot = 1\nrange = [20050, 20099]\nports = { PORT = 20050 }\ndetails = { PORT = { kind = \"web\" } }\n";
+
+    fn old_entry(path: &str, name: &str, first: u16) -> String {
+        format!(
+            "\n[[instance]]\npath = \"{path}\"\nname = \"{name}\"\nslot = 1\nrange = [{first}, {}]\nports = {{ PORT = {first} }}\ndetails = {{ PORT = {{ kind = \"web\" }} }}\n",
+            first + 49
+        )
+    }
+
+    #[test]
+    fn should_read_the_stored_host_and_web_port_variable() {
+        let text = SPEC_EXAMPLE.replace("slot = 1", "web_port = \"PORT\"\nslot = 1");
+
+        let instance = &parse(&text).unwrap().instances[0];
+
+        assert_eq!(
+            (
+                instance.host.as_str(),
+                instance.web_port_variable.as_deref(),
+                instance.is_host_unsaved
+            ),
+            ("my-links-feat-auth-3f2a.localhost", Some("PORT"), false)
+        );
+    }
+
+    #[test]
+    fn should_read_an_entry_without_host_and_compute_it_from_the_name_when_reading() {
+        let text = format!("version = 1\n{OLD_ENTRY}");
+
+        let instance = &parse(&text).unwrap().instances[0];
+
+        assert_eq!(
+            (
+                instance.host.as_str(),
+                instance.web_port_variable.as_deref(),
+                instance.is_host_unsaved
+            ),
+            ("my-app-3f2a.localhost", None, true)
+        );
+    }
+
+    #[test]
+    fn should_compute_a_host_around_the_stored_ones_when_entries_have_none() {
+        let stored = entry("/work/a", "my-app-3f2a", (20100, 20149), 20100);
+        let text = format!("version = 1\n{OLD_ENTRY}{stored}");
+
+        let registry = parse(&text).unwrap();
+
+        let hosts: Vec<&str> = registry
+            .instances
+            .iter()
+            .map(|instance| instance.host.as_str())
+            .collect();
+        assert_eq!(hosts, ["my-app-3f2a-1.localhost", "my-app-3f2a.localhost"]);
+    }
+
+    #[test]
+    fn should_refuse_a_host_that_is_not_a_single_localhost_label() {
+        let text = SPEC_EXAMPLE.replace("my-links-feat-auth-3f2a.localhost", "evil.example.com");
+
+        assert_eq!(
+            malformed_reason(&text),
+            "instance #1 (/work/my-links.feat-auth): host must be one <label>.localhost name of letters, digits and dashes"
+        );
+    }
+
+    #[test]
+    fn should_refuse_two_entries_with_the_same_host() {
+        let first = entry("/work/a", "a", (20050, 20099), 20050);
+        let second =
+            entry("/work/b", "b", (20100, 20149), 20100).replace("b.localhost", "a.localhost");
+
+        assert_eq!(
+            malformed_reason(&registry_text(&[first, second])),
+            "instance /work/a and instance /work/b: the host a.localhost is used twice"
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_web_port_that_is_not_a_variable_name() {
+        let text = SPEC_EXAMPLE.replace("slot = 1", "web_port = \"evil.example.com\"\nslot = 1");
+
+        assert_eq!(
+            malformed_reason(&text),
+            "instance #1 (/work/my-links.feat-auth): web_port must be a variable name"
+        );
+    }
+
+    #[test]
+    fn should_add_the_host_to_an_old_entry_when_it_is_saved_and_touch_nothing_else() {
+        let before = format!("version = 1\n{OLD_ENTRY}");
+        let old = parse(&before).unwrap().instances[0].clone();
+
+        let after = apply(&before, &old);
+
+        assert_eq!(after, format!("{before}host = \"my-app-3f2a.localhost\"\n"));
+    }
+
+    #[test]
+    fn should_never_replace_the_stored_host_when_a_record_carries_another_one() {
+        let mut other = parse(SPEC_EXAMPLE).unwrap().instances[0].clone();
+        other.host = "changed.localhost".to_owned();
+
+        assert_eq!(apply(SPEC_EXAMPLE, &other), SPEC_EXAMPLE);
+    }
+
+    #[test]
+    fn should_add_change_and_remove_the_web_port_variable_in_place() {
+        let mut record = parse(SPEC_EXAMPLE).unwrap().instances[0].clone();
+        record.web_port_variable = Some("PORT".to_owned());
+        let added = apply(SPEC_EXAMPLE, &record);
+        record.web_port_variable = Some("VITE_HMR_PORT".to_owned());
+        let changed = apply(&added, &record);
+        record.web_port_variable = None;
+        let removed = apply(&changed, &record);
+
+        assert_eq!(
+            (
+                added.contains("web_port = \"PORT\"\n"),
+                changed.contains("web_port = \"VITE_HMR_PORT\"\n"),
+                changed.contains("web_port = \"PORT\"\n"),
+                removed
+            ),
+            (true, true, false, SPEC_EXAMPLE.to_owned())
+        );
+    }
+
+    #[test]
+    fn should_round_trip_an_entry_with_a_host_and_a_web_port_variable() {
+        let mut record = record(
+            "/work/a",
+            "a",
+            (20050, 20099),
+            vec![web_port("PORT", 20050)],
+        );
+        record.web_port_variable = Some("PORT".to_owned());
+
+        let text = apply(EMPTY_REGISTRY, &record);
+
+        assert_eq!(parse(&text).unwrap().instances, vec![record]);
+    }
+
+    #[test]
+    fn should_not_make_an_old_registry_malformed_when_no_entry_has_a_host() {
+        let text = format!(
+            "version = 1\n{}{}",
+            old_entry("/work/a", "app-3f2a", 20050),
+            old_entry("/work/b", "app_3f2a", 20100)
+        );
+
+        let hosts: Vec<String> = parse(&text)
+            .unwrap()
+            .instances
+            .into_iter()
+            .map(|instance| instance.host)
+            .collect();
+
+        assert_eq!(hosts, ["app-3f2a.localhost", "app-3f2a-1.localhost"]);
     }
 }

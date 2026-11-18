@@ -229,6 +229,9 @@ mod tests {
                     target: None,
                 },
             }],
+            host: format!("{name}.localhost"),
+            web_port_variable: None,
+            is_host_unsaved: false,
         }
     }
 

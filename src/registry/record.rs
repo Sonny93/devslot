@@ -50,6 +50,15 @@ pub struct InstanceRecord {
     pub range: PortRange,
     /// The variables and their ports, in assignment order.
     pub ports: Vec<AssignedPort>,
+    /// The local host name of the instance, `<label>.localhost`. Stored once
+    /// and never recomputed.
+    pub host: String,
+    /// The variable `[web] port` named when the entry was last saved: the web
+    /// port that is opened on `host` instead of `localhost`.
+    pub web_port_variable: Option<String>,
+    /// Whether the entry has no host in the file: `host` was computed on
+    /// read, and the next registration saves it.
+    pub is_host_unsaved: bool,
 }
 
 impl InstanceRecord {
@@ -59,6 +68,30 @@ impl InstanceRecord {
             .iter()
             .find(|assigned| assigned.variable == variable)
             .map(|assigned| assigned.port)
+    }
+
+    /// The web port opened on the host of the instance: the one `[web] port`
+    /// names, when it is a web port of this instance.
+    pub fn app_port(&self) -> Option<&AssignedPort> {
+        let variable = self.web_port_variable.as_deref()?;
+        self.ports
+            .iter()
+            .find(|assigned| assigned.variable == variable && assigned.detail.kind == PortKind::Web)
+    }
+
+    /// Where `assigned` can be opened; `None` for a service port.
+    pub fn url_of(&self, assigned: &AssignedPort) -> Option<String> {
+        if assigned.detail.kind != PortKind::Web {
+            return None;
+        }
+        let is_app_port = self
+            .app_port()
+            .is_some_and(|app| app.variable == assigned.variable);
+        Some(if is_app_port {
+            format!("http://{}:{}", self.host, assigned.port)
+        } else {
+            format!("http://localhost:{}", assigned.port)
+        })
     }
 }
 
@@ -117,6 +150,14 @@ impl Registry {
         self.instances
             .iter()
             .any(|instance| instance.name == name && normalize_path(&instance.path) != own)
+    }
+
+    /// Whether another instance than the one at `path` already has `host`.
+    pub fn host_is_taken_by_other(&self, host: &str, path: &Path) -> bool {
+        let own = normalize_path(path);
+        self.instances
+            .iter()
+            .any(|instance| instance.host == host && normalize_path(&instance.path) != own)
     }
 
     /// Whether any registered range shares a port with `range`.

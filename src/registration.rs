@@ -267,7 +267,7 @@ fn register_locked(
     }
     let existing = locked.registry().find(root).cloned();
     let record = match allocate(pending, locked.registry(), existing.as_ref()) {
-        Ok(record) => record,
+        Ok(record) => with_web_port(record, &pending.analysis.config),
         Err(error) => return Ok(Allocated::NoRoom(error)),
     };
     let change = change_of(existing.as_ref(), &record);
@@ -304,10 +304,17 @@ fn allocate(
     )
 }
 
+fn with_web_port(record: InstanceRecord, config: &ProjectConfig) -> InstanceRecord {
+    InstanceRecord {
+        web_port_variable: config.web_port.clone(),
+        ..record
+    }
+}
+
 fn change_of(existing: Option<&InstanceRecord>, record: &InstanceRecord) -> RegistrationChange {
     match existing {
         None => RegistrationChange::Created,
-        Some(known) if known == record => RegistrationChange::Unchanged,
+        Some(known) if known == record && !known.is_host_unsaved => RegistrationChange::Unchanged,
         Some(_) => RegistrationChange::Updated,
     }
 }
@@ -777,6 +784,9 @@ mod tests {
                         last: 20099,
                     },
                     ports: vec![],
+                    host: "app.localhost".to_owned(),
+                    web_port_variable: None,
+                    is_host_unsaved: false,
                 })
             })
             .unwrap();
@@ -1084,5 +1094,109 @@ mod tests {
         };
         assert_eq!(findings[0].check, Check::EnvNotIgnored);
         assert_eq!(env_text(&checkout), "PORT=3333\n");
+    }
+
+    fn register_default(fixture: &Fixture, checkout: &Checkout) -> Registration {
+        registered(register_in(
+            fixture,
+            checkout,
+            &postgres_compose(),
+            SlotGeometry::default(),
+        ))
+    }
+
+    #[test]
+    fn should_store_the_host_of_a_new_instance_from_its_name() {
+        let fixture = Fixture::new();
+        let checkout = fixture.project("app", &TEMPLATE_FILES);
+
+        let registration = register_default(&fixture, &checkout);
+
+        let host = format!("{}.localhost", registration.instance.name);
+        assert_eq!(registration.instance.host, host);
+        assert!(
+            fixture
+                .registry_text()
+                .contains(&format!("host = \"{host}\""))
+        );
+    }
+
+    #[test]
+    fn should_save_the_host_of_an_entry_without_one_when_registering_again() {
+        let fixture = Fixture::new();
+        let checkout = fixture.project("app", &TEMPLATE_FILES);
+        let first = register_default(&fixture, &checkout);
+        let kept_lines: Vec<String> = fixture
+            .registry_text()
+            .lines()
+            .filter(|line| !line.starts_with("host = "))
+            .map(str::to_owned)
+            .collect();
+        let without_host = format!("{}\n", kept_lines.join("\n"));
+        std::fs::write(
+            fixture.state.path().join("state/devslot/registry.toml"),
+            without_host,
+        )
+        .unwrap();
+
+        let second = register_default(&fixture, &checkout);
+
+        assert_eq!(second.change, RegistrationChange::Updated);
+        assert_eq!(second.instance.host, first.instance.host);
+        assert!(
+            fixture
+                .registry_text()
+                .contains(&format!("host = \"{}\"", first.instance.host))
+        );
+    }
+
+    #[test]
+    fn should_keep_the_stored_host_when_the_derivation_would_give_another_one() {
+        let fixture = Fixture::new();
+        let checkout = fixture.project("app", &TEMPLATE_FILES);
+        let first = register_default(&fixture, &checkout);
+        let edited = fixture.registry_text().replace(
+            &format!("host = \"{}\"", first.instance.host),
+            "host = \"chosen-earlier.localhost\"",
+        );
+        std::fs::write(
+            fixture.state.path().join("state/devslot/registry.toml"),
+            edited,
+        )
+        .unwrap();
+
+        let second = register_default(&fixture, &checkout);
+
+        assert_eq!(
+            (second.change, second.instance.host.as_str()),
+            (RegistrationChange::Unchanged, "chosen-earlier.localhost")
+        );
+    }
+
+    #[test]
+    fn should_store_the_web_port_variable_and_remove_it_when_the_setting_goes_away() {
+        let fixture = Fixture::new();
+        let checkout = fixture.project("app", &TEMPLATE_FILES);
+        std::fs::write(
+            checkout.root.join("devslot.toml"),
+            "[web]\nport = \"PORT\"\n",
+        )
+        .unwrap();
+        let with_setting = register_default(&fixture, &checkout);
+        let text_with_setting = fixture.registry_text();
+        std::fs::remove_file(checkout.root.join("devslot.toml")).unwrap();
+
+        let without_setting = register_default(&fixture, &checkout);
+
+        assert_eq!(
+            (
+                with_setting.instance.web_port_variable.as_deref(),
+                text_with_setting.contains("web_port = \"PORT\""),
+                without_setting.change,
+                without_setting.instance.web_port_variable,
+                fixture.registry_text().contains("web_port"),
+            ),
+            (Some("PORT"), true, RegistrationChange::Updated, None, false)
+        );
     }
 }

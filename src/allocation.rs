@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::discovery::ManagedPort;
 use crate::global_config::SlotGeometry;
+use crate::host_label::{host_of_label, pick_label};
 use crate::registry::record::{AssignedPort, InstanceRecord, PortDetail, Registry};
 
 /// The first slot a new instance may take: slot 0 is reserved.
@@ -118,7 +119,8 @@ pub fn allocate_known(
 
 /// Gives a new instance the smallest slot from 1 of the current geometry whose
 /// range overlaps no registered range and whose ports are all free. The
-/// variables take its first ports in request order.
+/// variables take its first ports in request order. The host comes from the
+/// name, with the slot appended when another instance already has it.
 pub fn allocate_new(
     identity: NewInstanceIdentity,
     registry: &Registry,
@@ -144,12 +146,18 @@ pub fn allocate_new(
             .zip(range.ports())
             .map(|(request, port)| assigned_port(request, port))
             .collect();
+        let label = pick_label(&identity.name, slot, |label| {
+            registry.host_is_taken_by_other(&host_of_label(label), &identity.path)
+        });
         return Ok(InstanceRecord {
             path: identity.path,
+            host: host_of_label(&label),
             name: identity.name,
             slot,
             range,
             ports,
+            web_port_variable: None,
+            is_host_unsaved: false,
         });
     }
     Err(AllocationError::NoFreeSlot {
@@ -240,6 +248,9 @@ mod tests {
                 .iter()
                 .map(|(variable, port)| assigned_port(&request(variable), *port))
                 .collect(),
+            host: format!("name-{slot}-{}.localhost", path.len()),
+            web_port_variable: None,
+            is_host_unsaved: false,
         }
     }
 
@@ -248,6 +259,24 @@ mod tests {
             instances,
             opted_out: vec![],
         }
+    }
+
+    fn named_identity(path: &str, name: &str) -> NewInstanceIdentity {
+        NewInstanceIdentity {
+            path: PathBuf::from(path),
+            name: name.to_owned(),
+        }
+    }
+
+    fn allocate_named(registry: &Registry, path: &str, name: &str) -> InstanceRecord {
+        allocate_new(
+            named_identity(path, name),
+            registry,
+            SlotGeometry::default(),
+            &[request("PORT")],
+            &nothing_busy(),
+        )
+        .unwrap()
     }
 
     fn variables_and_ports(record: &InstanceRecord) -> Vec<(&str, u16)> {
@@ -606,5 +635,41 @@ mod tests {
         .unwrap();
 
         assert_eq!(record.port_of("DB_PORT"), Some(20052));
+    }
+
+    #[test]
+    fn should_give_a_new_instance_the_host_of_its_name_with_underscores_as_dashes() {
+        let record = allocate_named(&Registry::default(), "/a", "my_app-feat_x-3f2a");
+
+        assert_eq!(record.host, "my-app-feat-x-3f2a.localhost");
+    }
+
+    #[test]
+    fn should_append_the_slot_to_the_host_when_another_instance_has_the_label() {
+        let mut first = allocate_named(&Registry::default(), "/a", "my_app-3f2a");
+        first.slot = 1;
+        let registry = registry_of(vec![first]);
+
+        let second = allocate_named(&registry, "/b", "my-app-3f2a");
+
+        assert_eq!(
+            (
+                registry.instances[0].host.as_str(),
+                second.host.as_str(),
+                second.slot
+            ),
+            ("my-app-3f2a.localhost", "my-app-3f2a-2.localhost", 2)
+        );
+    }
+
+    #[test]
+    fn should_keep_the_host_a_known_instance_already_has() {
+        let existing = allocate_named(&Registry::default(), "/a", "app-3f2a");
+        let registry = registry_of(vec![existing.clone()]);
+
+        let known =
+            allocate_known(&existing, &registry, &[request("PORT")], &nothing_busy()).unwrap();
+
+        assert_eq!(known.host, "app-3f2a.localhost");
     }
 }

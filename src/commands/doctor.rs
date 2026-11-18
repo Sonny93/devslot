@@ -8,6 +8,7 @@ use crate::checks::finding::{Finding, Summary};
 use crate::checks::session::{SessionRoot, check_session_root};
 use crate::checks::slot::{SlotCheckInput, check_slot_geometry};
 use crate::checks::vite::check_vite;
+use crate::checks::web_port::check_web_port;
 use crate::checks::worktree_guard::{GuardCheckInput, check_worktree_guard};
 use crate::cli::exit_code;
 use crate::cli::output::write_stdout;
@@ -112,6 +113,10 @@ pub fn run_doctor(
     findings.extend(check_vite(&checkout.root, &analysis.vite));
     findings.extend(slot_check.and_then(check_slot_geometry));
     findings.extend(check_session_root(session_root));
+    findings.extend(check_web_port(
+        analysis.config.web_port.as_deref(),
+        &analysis.ports,
+    ));
     Ok(DoctorReport {
         version: REPORT_VERSION,
         checkout: checkout.root.display().to_string(),
@@ -409,6 +414,9 @@ mod tests {
                 last: 30049,
             },
             ports: vec![],
+            host: "app.localhost".to_owned(),
+            web_port_variable: None,
+            is_host_unsaved: false,
         };
         let slot_check = SlotCheckInput {
             instance: &instance,
