@@ -140,6 +140,8 @@ mod tests {
             version: 1,
             registered: true,
             name: "app-3f2a".to_owned(),
+            host: "app-3f2a.localhost".to_owned(),
+            app_url: None,
             path: "/work/app".to_owned(),
             slot: 1,
             range: [20050, 20099],

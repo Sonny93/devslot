@@ -22,6 +22,8 @@ pub const COMPOSE_FILE_VARIABLE: &str = "COMPOSE_FILE";
 pub const INSTANCE_VARIABLE: &str = "DEVSLOT_INSTANCE";
 /// The slot number variable.
 pub const SLOT_VARIABLE: &str = "DEVSLOT_SLOT";
+/// The local host name variable.
+pub const HOST_VARIABLE: &str = "DEVSLOT_HOST";
 
 const COMPOSE_FILE_SEPARATOR: &str = ":";
 
@@ -196,6 +198,7 @@ fn instance_variables(
     }
     variables.push(owned(INSTANCE_VARIABLE, instance.name.clone()));
     variables.push(owned(SLOT_VARIABLE, instance.slot.to_string()));
+    variables.push(owned(HOST_VARIABLE, instance.host.clone()));
     variables
 }
 
@@ -269,6 +272,9 @@ mod tests {
                 last: 20099,
             },
             ports: vec![port("PORT", 20050), port("DB_PORT", 20052)],
+            host: "app.localhost".to_owned(),
+            web_port_variable: None,
+            is_host_unsaved: false,
         }
     }
 
@@ -311,6 +317,7 @@ mod tests {
                 ),
                 ("DEVSLOT_INSTANCE", "app-3f2a"),
                 ("DEVSLOT_SLOT", "1"),
+                ("DEVSLOT_HOST", "app.localhost"),
             ]
         );
     }
@@ -335,6 +342,22 @@ mod tests {
         assert_eq!(
             environment.value_of("VITE_API_URL"),
             Some("http://localhost:20050/api")
+        );
+    }
+
+    #[test]
+    fn should_replace_a_reference_to_the_host_with_the_host_of_the_instance() {
+        let settings = [setting(
+            "APP_URL",
+            "http://${DEVSLOT_HOST}:${PORT}",
+            CONFIG_FILE,
+        )];
+
+        let environment = build_environment(&instance(), None, &settings).unwrap();
+
+        assert_eq!(
+            environment.value_of("APP_URL"),
+            Some("http://app.localhost:20050")
         );
     }
 
@@ -454,7 +477,7 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"PORT":"20050","DB_PORT":"20052","COMPOSE_PROJECT_NAME":"app-3f2a","DEVSLOT_INSTANCE":"app-3f2a","DEVSLOT_SLOT":"1"}"#
+            r#"{"PORT":"20050","DB_PORT":"20052","COMPOSE_PROJECT_NAME":"app-3f2a","DEVSLOT_INSTANCE":"app-3f2a","DEVSLOT_SLOT":"1","DEVSLOT_HOST":"app.localhost"}"#
         );
     }
 

@@ -208,6 +208,9 @@ mod tests {
         InstanceRecord {
             path: PathBuf::from("/work/app"),
             name: "app-3f2a".to_owned(),
+            host: "app.localhost".to_owned(),
+            web_port_variable: None,
+            is_host_unsaved: false,
             slot: 1,
             range: PortRange {
                 first: 20050,

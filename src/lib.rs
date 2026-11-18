@@ -26,6 +26,7 @@ pub mod error;
 pub mod git_worktree;
 pub mod glob_match;
 pub mod global_config;
+pub mod host_label;
 pub mod instance_name;
 pub mod instance_processes;
 pub mod kept_worktrees;

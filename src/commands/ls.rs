@@ -58,8 +58,13 @@ pub fn list_report(registry: &Registry, running: Option<&BTreeSet<String>>) -> L
                 name: instance.name.clone(),
                 path: instance.path.display().to_string(),
                 slot: instance.slot,
+                host: instance.host.clone(),
                 services_running: running.map(|names| names.contains(&instance.name)),
-                ports: instance.ports.iter().map(info_port).collect(),
+                ports: instance
+                    .ports
+                    .iter()
+                    .map(|assigned| info_port(instance, assigned))
+                    .collect(),
             })
             .collect(),
     }
@@ -96,6 +101,9 @@ mod tests {
                             target: None,
                         },
                     }],
+                    host: format!("{name}.localhost"),
+                    web_port_variable: None,
+                    is_host_unsaved: false,
                 })
                 .collect(),
             opted_out: Vec::new(),
@@ -132,5 +140,30 @@ mod tests {
             Some("http://localhost:20050")
         );
         assert_eq!(report.shared, Vec::<String>::new());
+    }
+
+    #[test]
+    fn should_give_each_instance_its_host() {
+        let report = list_report(&registry_of(&["app-1", "app-2"]), None);
+
+        let hosts: Vec<&str> = report
+            .instances
+            .iter()
+            .map(|instance| instance.host.as_str())
+            .collect();
+        assert_eq!(hosts, ["app-1.localhost", "app-2.localhost"]);
+    }
+
+    #[test]
+    fn should_open_the_stored_web_port_on_the_host_without_reading_any_config_file() {
+        let mut registry = registry_of(&["app-1"]);
+        registry.instances[0].web_port_variable = Some("PORT".to_owned());
+
+        let report = list_report(&registry, None);
+
+        assert_eq!(
+            report.instances[0].ports[0].url.as_deref(),
+            Some("http://app-1.localhost:20050")
+        );
     }
 }

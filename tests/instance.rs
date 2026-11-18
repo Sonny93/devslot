@@ -969,3 +969,124 @@ fn should_leave_a_compose_variable_without_the_suffix_unmanaged_and_warn() {
     assert!(!environment.contains_key("PSQLRC"));
     assert!(!project.machine().read_registry().contains("PSQLRC"));
 }
+
+#[test]
+fn should_give_the_instance_a_localhost_subdomain_host_in_env_run_and_info() {
+    let project = Project::from_scenario("template");
+    let run = project.run_with(&["run", "--", "sh", "-c", "echo $DEVSLOT_HOST"], &[]);
+
+    let environment = environment_of(&project);
+    let shell = project.run_with(&["env"], &[]);
+    let info = json_of(&project.run_with(&["info", "--json"], &[]));
+
+    let host = &environment["DEVSLOT_HOST"];
+    assert!(host.ends_with(".localhost"));
+    assert!(host.chars().all(|character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || character == '-'
+            || character == '.'
+    }));
+    assert_eq!(run.stdout, format!("{host}\n"));
+    assert!(
+        shell
+            .stdout
+            .contains(&format!("export DEVSLOT_HOST='{host}'\n"))
+    );
+    assert_eq!(info["host"], host.as_str());
+}
+
+#[test]
+fn should_substitute_the_host_in_an_env_value() {
+    let project = Project::from_scenario("template");
+    project.write(
+        "devslot.local.toml",
+        "[env]\nAPP_URL = \"http://${DEVSLOT_HOST}:${PORT}\"\n",
+    );
+    project.run_with(&["run", "--", "true"], &[]);
+
+    let environment = environment_of(&project);
+
+    assert_eq!(
+        environment["APP_URL"],
+        format!(
+            "http://{}:{}",
+            environment["DEVSLOT_HOST"], environment["PORT"]
+        )
+    );
+}
+
+#[test]
+fn should_keep_every_url_on_localhost_and_give_no_app_url_without_a_web_port_setting() {
+    let project = Project::from_scenario("template");
+    project.run_with(&["run", "--", "true"], &[]);
+
+    let info = json_of(&project.run_with(&["info", "--json"], &[]));
+
+    assert_eq!(info["app_url"], Value::Null);
+    for port in info["ports"].as_array().unwrap() {
+        if let Some(url) = port["url"].as_str() {
+            assert!(url.starts_with("http://localhost:"), "{url}");
+        }
+    }
+}
+
+#[test]
+fn should_open_only_the_named_web_port_on_the_host_when_web_port_is_set() {
+    let project = Project::from_scenario("template");
+    project.write("devslot.toml", "[web]\nport = \"PORT\"\n");
+    project.run_with(&["run", "--", "true"], &[]);
+    let environment = environment_of(&project);
+
+    let info = json_of(&project.run_with(&["info", "--json"], &[]));
+
+    let app_url = format!(
+        "http://{}:{}",
+        environment["DEVSLOT_HOST"], environment["PORT"]
+    );
+    let urls: BTreeMap<&str, Option<&str>> = info["ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|port| (port["var"].as_str().unwrap(), port["url"].as_str()))
+        .collect();
+    assert_eq!(info["app_url"], app_url.as_str());
+    assert_eq!(urls["PORT"], Some(app_url.as_str()));
+    assert!(urls["VITE_HMR_PORT"].is_none_or(|url| url.starts_with("http://localhost:")));
+}
+
+#[test]
+fn should_exit_2_naming_the_key_when_web_port_is_a_host_or_a_url() {
+    let project = Project::from_scenario("template");
+    project.write(
+        "devslot.local.toml",
+        "[web]\nport = \"http://evil.example\"\n",
+    );
+
+    let run = project.run_with(&["run", "--", "true"], &[]);
+
+    assert_eq!(run.status, 2);
+    assert!(run.stderr.contains("[web] port"));
+    assert!(!run.stderr.contains("evil.example"));
+}
+
+#[test]
+fn should_warn_in_doctor_and_keep_urls_on_localhost_when_web_port_is_not_a_managed_port() {
+    let project = Project::from_scenario("template");
+    project.write("devslot.toml", "[web]\nport = \"NOPE_PORT\"\n");
+
+    let doctor = project.run_with(&["doctor", "--json"], &[]);
+    project.run_with(&["run", "--", "true"], &[]);
+    let info = json_of(&project.run_with(&["info", "--json"], &[]));
+
+    let report: Value = serde_json::from_str(&doctor.stdout).unwrap();
+    let finding = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["check"] == "web_port_unmanaged")
+        .unwrap();
+    assert_eq!(finding["level"], "warning");
+    assert_eq!(finding["key"], "[web] port");
+    assert_eq!(info["app_url"], Value::Null);
+}

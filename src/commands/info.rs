@@ -7,7 +7,6 @@ use crate::cli::render::render_info_text;
 use crate::commands::machine::{Machine, locate_checkout};
 use crate::compose::runner::{ComposeRunner, ComposeTarget, DockerRunner};
 use crate::compose::selection::{DevComposeSelection, select_dev_compose};
-use crate::discovery::PortKind;
 use crate::environment::{build_environment, compose_file_paths};
 use crate::error::ToolError;
 use crate::project_config::ProjectConfig;
@@ -81,10 +80,18 @@ pub fn describe_registered(
         name: instance.name.clone(),
         path: instance.path.display().to_string(),
         slot: instance.slot,
+        host: instance.host.clone(),
+        app_url: instance
+            .app_port()
+            .and_then(|assigned| instance.url_of(assigned)),
         range: [instance.range.first, instance.range.last],
         compose_file,
         compose_file_origin,
-        ports: instance.ports.iter().map(info_port).collect(),
+        ports: instance
+            .ports
+            .iter()
+            .map(|assigned| info_port(instance, assigned))
+            .collect(),
         services,
     })
 }
@@ -112,27 +119,31 @@ fn status_target(
     })
 }
 
-/// The port of an instance in the shape both `ds info` and `ds ls` print.
-pub fn info_port(assigned: &AssignedPort) -> InfoPort {
+/// The port of `instance` in the shape both `ds info` and `ds ls` print.
+pub fn info_port(instance: &InstanceRecord, assigned: &AssignedPort) -> InfoPort {
     InfoPort {
         variable: assigned.variable.clone(),
         port: assigned.port,
         kind: assigned.detail.kind,
         service: assigned.detail.service.clone(),
         target: assigned.detail.target,
-        url: (assigned.detail.kind == PortKind::Web).then(|| InfoPort::url_of(assigned.port)),
+        url: instance.url_of(assigned),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::discovery::PortKind;
+    use crate::port_range::PortRange;
     use crate::registry::record::PortDetail;
 
-    fn assigned(kind: PortKind) -> AssignedPort {
+    fn assigned(variable: &str, port: u16, kind: PortKind) -> AssignedPort {
         AssignedPort {
-            variable: "PORT".to_owned(),
-            port: 20050,
+            variable: variable.to_owned(),
+            port,
             detail: PortDetail {
                 kind,
                 service: None,
@@ -141,16 +152,98 @@ mod tests {
         }
     }
 
+    fn instance(web_port_variable: Option<&str>) -> InstanceRecord {
+        InstanceRecord {
+            path: PathBuf::from("/work/app"),
+            name: "app-3f2a".to_owned(),
+            slot: 1,
+            range: PortRange {
+                first: 20050,
+                last: 20099,
+            },
+            ports: vec![
+                assigned("PORT", 20050, PortKind::Web),
+                assigned("ADMIN_PORT", 20051, PortKind::Web),
+                assigned("DB_PORT", 20052, PortKind::Service),
+            ],
+            host: "app-3f2a.localhost".to_owned(),
+            web_port_variable: web_port_variable.map(str::to_owned),
+            is_host_unsaved: false,
+        }
+    }
+
+    fn url_of(instance: &InstanceRecord, variable: &str) -> Option<String> {
+        let assigned = instance
+            .ports
+            .iter()
+            .find(|assigned| assigned.variable == variable)
+            .unwrap();
+        info_port(instance, assigned).url
+    }
+
     #[test]
-    fn should_give_a_web_port_its_url() {
+    fn should_give_a_web_port_its_localhost_url_without_a_web_port_setting() {
         assert_eq!(
-            info_port(&assigned(PortKind::Web)).url.as_deref(),
+            url_of(&instance(None), "PORT").as_deref(),
             Some("http://localhost:20050")
         );
     }
 
     #[test]
     fn should_give_a_service_port_no_url() {
-        assert_eq!(info_port(&assigned(PortKind::Service)).url, None);
+        assert_eq!(url_of(&instance(None), "DB_PORT"), None);
+    }
+
+    #[test]
+    fn should_put_the_named_web_port_on_the_host_and_keep_the_others_on_localhost() {
+        let instance = instance(Some("PORT"));
+
+        assert_eq!(
+            (
+                url_of(&instance, "PORT").as_deref(),
+                url_of(&instance, "ADMIN_PORT").as_deref()
+            ),
+            (
+                Some("http://app-3f2a.localhost:20050"),
+                Some("http://localhost:20051")
+            )
+        );
+    }
+
+    #[test]
+    fn should_keep_every_url_on_localhost_when_the_named_variable_is_not_a_port_of_the_instance() {
+        let instance = instance(Some("NOPE_PORT"));
+
+        assert_eq!(
+            url_of(&instance, "PORT").as_deref(),
+            Some("http://localhost:20050")
+        );
+    }
+
+    #[test]
+    fn should_keep_every_url_on_localhost_when_the_named_variable_is_a_service_port() {
+        let instance = instance(Some("DB_PORT"));
+
+        assert_eq!(
+            url_of(&instance, "PORT").as_deref(),
+            Some("http://localhost:20050")
+        );
+    }
+
+    #[test]
+    fn should_give_the_app_url_in_the_report_only_with_a_named_web_port() {
+        let checkout_root = tempfile::tempdir().unwrap();
+        let checkout = Checkout::locate(checkout_root.path()).unwrap();
+        let config = ProjectConfig::default();
+        let describe = |instance: &InstanceRecord| {
+            describe_registered(&checkout, instance, &config, ServicesState::Unknown)
+                .unwrap()
+                .app_url
+        };
+
+        assert_eq!(
+            (describe(&instance(Some("PORT"))), describe(&instance(None))),
+            (Some("http://app-3f2a.localhost:20050".to_owned()), None)
+        );
     }
 }

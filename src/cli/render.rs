@@ -227,6 +227,10 @@ fn render_registered_info_with(info: &RegisteredInfo, services: &str) -> String 
         "Slot:          {} ({}-{})",
         info.slot, info.range[0], info.range[1]
     );
+    let _ = writeln!(output, "Host:          {}", info.host);
+    if let Some(app_url) = &info.app_url {
+        let _ = writeln!(output, "App URL:       {app_url}");
+    }
     let _ = writeln!(output, "Compose file:  {compose}");
     let _ = writeln!(output, "Services:      {services}");
     output.push_str("\nPorts\n");
@@ -343,6 +347,8 @@ mod tests {
             name: "app-3f2a".to_owned(),
             path: "/work/app".to_owned(),
             slot: 1,
+            host: "app-3f2a.localhost".to_owned(),
+            app_url: None,
             range: [20050, 20099],
             compose_file: Some("dev.compose.yml".to_owned()),
             compose_file_origin: Some("detected".to_owned()),
@@ -377,6 +383,7 @@ mod tests {
             "Name:          app-3f2a\n\
              Path:          /work/app\n\
              Slot:          1 (20050-20099)\n\
+             Host:          app-3f2a.localhost\n\
              Compose file:  dev.compose.yml (detected)\n\
              Services:      running\n\
              \n\
@@ -385,6 +392,18 @@ mod tests {
              \x20 PORT      20050  web      -              http://localhost:20050\n\
              \x20 DB_PORT   20052  service  postgres:5432  -\n"
         );
+    }
+
+    #[test]
+    fn should_render_the_app_url_after_the_host_when_the_instance_has_one() {
+        let mut info = registered_info();
+        info.app_url = Some("http://app-3f2a.localhost:20050".to_owned());
+
+        let text = render_info_text(&InfoReport::Registered(info));
+
+        assert!(text.contains(
+            "Host:          app-3f2a.localhost\nApp URL:       http://app-3f2a.localhost:20050\nCompose file:"
+        ));
     }
 
     #[test]
@@ -400,6 +419,7 @@ mod tests {
             name: name.to_owned(),
             path: format!("/work/{name}"),
             slot: 1,
+            host: format!("{name}.localhost"),
             services_running,
             ports: registered_info().ports,
         }

@@ -1,7 +1,7 @@
 //! The project configuration: `devslot.toml` overridden by `devslot.local.toml`.
 //!
 //! Only the keys devslot reads are modeled (`[compose]`, `[ports]`, `[env]`,
-//! `run` and `[write]`); other keys are accepted and ignored.
+//! `run`, `[write]` and `[web]`); other keys are accepted and ignored.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -69,6 +69,13 @@ pub enum ConfigError {
         /// The file name.
         file: &'static str,
     },
+    /// `[web] port` is not a variable name. The value is never quoted: it must
+    /// never be a host or a URL.
+    #[error("[web] port in {file} must be the name of a port variable ([A-Za-z_][A-Za-z0-9_]*)")]
+    InvalidWebPort {
+        /// The file name.
+        file: &'static str,
+    },
     /// An `[env]` entry cannot be exported. The value is never quoted.
     #[error("invalid [env] key {key:?} in {file}: {reason}")]
     InvalidEnv {
@@ -92,6 +99,20 @@ struct RawConfig {
     run: Option<String>,
     #[serde(default)]
     write: RawWrite,
+    #[serde(default)]
+    web: RawWeb,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawWeb {
+    port: Option<RawWebPort>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawWebPort {
+    Variable(String),
+    Unsupported(serde::de::IgnoredAny),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -157,6 +178,9 @@ pub struct ProjectConfig {
     pub run_origin: Option<&'static str>,
     /// `[write] enabled`: whether ds may write `.env`; the local file wins.
     pub write_enabled: Option<bool>,
+    /// `[web] port`: the variable of the web port opened on the host of the
+    /// instance; the local file wins. Always a variable name, never a host.
+    pub web_port: Option<String>,
 }
 
 impl ProjectConfig {
@@ -207,6 +231,9 @@ impl ProjectConfig {
             }
             if layer.write.enabled.is_some() {
                 config.write_enabled = layer.write.enabled;
+            }
+            if let Some(RawWebPort::Variable(name)) = layer.web.port {
+                config.web_port = Some(name);
             }
             for (key, value) in layer.env {
                 let RawEnvValue::Text(value) = value else {
@@ -259,6 +286,7 @@ fn parse(text: &str, file: &'static str) -> Result<RawConfig, ConfigError> {
     check_port_names(&raw.ports, file)?;
     check_run(raw.run.as_deref(), file)?;
     check_committed_extra_names(&raw.ports, file)?;
+    check_web_port(raw.web.port.as_ref(), file)?;
     for (key, value) in &mut raw.env {
         let text = match value {
             RawEnvValue::Text(text) => text.clone(),
@@ -278,6 +306,14 @@ fn parse(text: &str, file: &'static str) -> Result<RawConfig, ConfigError> {
         *value = RawEnvValue::Text(text);
     }
     Ok(raw)
+}
+
+fn check_web_port(port: Option<&RawWebPort>, file: &'static str) -> Result<(), ConfigError> {
+    match port {
+        None => Ok(()),
+        Some(RawWebPort::Variable(name)) if is_valid_variable_name(name) => Ok(()),
+        Some(_) => Err(ConfigError::InvalidWebPort { file }),
+    }
 }
 
 fn check_run(run: Option<&str>, file: &'static str) -> Result<(), ConfigError> {
@@ -444,6 +480,89 @@ mod tests {
             ProjectConfig::load(root.path()).unwrap().write_enabled,
             Some(false)
         );
+    }
+
+    #[test]
+    fn should_read_the_web_port_variable() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), CONFIG_FILE, "[web]\nport = \"PORT\"\n");
+
+        assert_eq!(
+            ProjectConfig::load(root.path())
+                .unwrap()
+                .web_port
+                .as_deref(),
+            Some("PORT")
+        );
+    }
+
+    #[test]
+    fn should_leave_the_web_port_unset_when_no_file_sets_it() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert_eq!(ProjectConfig::load(root.path()).unwrap().web_port, None);
+    }
+
+    #[test]
+    fn should_let_the_local_web_port_win_over_the_committed_one() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), CONFIG_FILE, "[web]\nport = \"PORT\"\n");
+        write(
+            root.path(),
+            LOCAL_CONFIG_FILE,
+            "[web]\nport = \"WEB_PORT\"\n",
+        );
+
+        assert_eq!(
+            ProjectConfig::load(root.path())
+                .unwrap()
+                .web_port
+                .as_deref(),
+            Some("WEB_PORT")
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_web_port_that_is_a_host_or_a_url_naming_the_key_but_not_the_value() {
+        let values = [
+            "evil.example.com",
+            "http://evil.example.com",
+            "app.localhost",
+            "PORT:80",
+            "1PORT",
+            "",
+            "PORT ",
+        ];
+        for value in values {
+            let root = tempfile::tempdir().unwrap();
+            write(
+                root.path(),
+                CONFIG_FILE,
+                &format!("[web]\nport = \"{value}\"\n"),
+            );
+
+            let error = ProjectConfig::load(root.path()).unwrap_err();
+
+            assert!(matches!(
+                error,
+                ConfigError::InvalidWebPort { file: CONFIG_FILE }
+            ));
+            assert!(error.to_string().contains("[web] port"));
+            assert!(value.is_empty() || !error.to_string().contains(value));
+        }
+    }
+
+    #[test]
+    fn should_refuse_a_web_port_that_is_not_a_string() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), LOCAL_CONFIG_FILE, "[web]\nport = 3000\n");
+
+        assert!(matches!(
+            ProjectConfig::load(root.path()),
+            Err(ConfigError::InvalidWebPort {
+                file: LOCAL_CONFIG_FILE
+            })
+        ));
     }
 
     #[test]

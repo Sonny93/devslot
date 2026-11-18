@@ -10,4 +10,5 @@ pub mod session;
 pub mod slot;
 pub mod vite;
 pub mod vite_ports;
+pub mod web_port;
 pub mod worktree_guard;
