@@ -237,9 +237,10 @@ fn ends_with_a_port_name(text: &str) -> bool {
         .chars()
         .rev()
         .collect();
-    ["PORT", "Port", "port"]
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
+    name.eq_ignore_ascii_case(PORT_WORD)
+        || ["PORT", "Port", "_port"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
 }
 
 fn names_variable(text: &str, variable: &str) -> bool {
@@ -336,6 +337,24 @@ mod tests {
         let findings = findings_for_config("const DEV_SERVER_PORT = 3333\n", &[]);
 
         assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn should_report_an_identifier_when_it_ends_like_a_port_name_in_camel_snake_or_exact_case() {
+        let findings =
+            findings_for_config("devServerPort = 3000\ndev_port = 3000\nport = 3000\n", &[]);
+
+        assert_eq!(findings.len(), 3);
+    }
+
+    #[test]
+    fn should_not_report_an_ordinary_word_that_ends_in_port_when_it_is_assigned_a_number() {
+        let findings = findings_for_config(
+            "report = 5\ntransport = 2\nviewport = 1\nsupport = 3\n",
+            &[],
+        );
+
+        assert_eq!(findings, vec![]);
     }
 
     #[test]
