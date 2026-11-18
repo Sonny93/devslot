@@ -8,8 +8,6 @@ use std::path::Path;
 use super::proc_root::ProcRoot;
 use super::{InstanceScope, ProcessSummary};
 
-const INSTANCE_VARIABLE: &str = "DEVSLOT_INSTANCE";
-
 /// What a scan needs to know about the machine and the instance.
 #[derive(Debug, Clone, Copy)]
 pub struct ScanContext<'a> {
@@ -153,7 +151,7 @@ fn belongs_to_instance(context: &ScanContext, inodes: &HashSet<u64>, pid: i32) -
     let Some(scope) = context.scope else {
         return false;
     };
-    let marker = format!("{INSTANCE_VARIABLE}={}", scope.name);
+    let marker = format!("{}={}", scope.marker.variable(), scope.name);
     context.root.holds_socket(pid, inodes) || context.root.has_environment_entry(pid, &marker)
 }
 
@@ -185,6 +183,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use crate::instance_processes::ProcessMarker;
     use crate::instance_processes::testing::FakeProc;
 
     const OWN_UID: u32 = 1000;
@@ -210,6 +209,7 @@ mod tests {
             scope: InstanceScope {
                 name: INSTANCE.to_owned(),
                 ports: vec![PORT],
+                marker: ProcessMarker::Instance,
             },
         }
     }
@@ -240,7 +240,7 @@ mod tests {
     }
 
     fn marker() -> String {
-        format!("{INSTANCE_VARIABLE}={INSTANCE}")
+        format!("{}={INSTANCE}", ProcessMarker::Instance.variable())
     }
 
     #[test]
@@ -250,6 +250,46 @@ mod tests {
             .fake
             .add_process(200, 1, 200, "node", &setup.fake.directory("work/feat/web"));
         setup.fake.set_environment(200, &["A=1", &marker()]);
+
+        assert_eq!(setup.target_pids(), vec![200]);
+    }
+
+    #[test]
+    fn should_only_list_an_instance_marked_process_when_the_run_marker_is_required() {
+        let mut setup = setup();
+        setup.scope.marker = ProcessMarker::Run;
+        setup
+            .fake
+            .add_process(200, 1, 200, "nvim", &setup.fake.directory("work/feat"));
+        setup.fake.set_environment(200, &[&marker()]);
+
+        assert_eq!(setup.target_pids(), Vec::<i32>::new());
+        assert_eq!(setup.other_pids(), vec![200]);
+    }
+
+    #[test]
+    fn should_target_a_process_that_carries_the_run_marker() {
+        let mut setup = setup();
+        setup.scope.marker = ProcessMarker::Run;
+        setup
+            .fake
+            .add_process(200, 1, 200, "node", &setup.fake.directory("work/feat"));
+        setup
+            .fake
+            .set_environment(200, &[&format!("DEVSLOT_RUN={INSTANCE}")]);
+
+        assert_eq!(setup.target_pids(), vec![200]);
+    }
+
+    #[test]
+    fn should_target_a_listener_on_a_port_when_the_run_marker_is_required() {
+        let mut setup = setup();
+        setup.scope.marker = ProcessMarker::Run;
+        setup
+            .fake
+            .add_process(200, 1, 200, "node", &setup.fake.directory("work/feat"));
+        setup.fake.add_listener(PORT, 777, "0A");
+        setup.fake.add_socket(200, 777);
 
         assert_eq!(setup.target_pids(), vec![200]);
     }

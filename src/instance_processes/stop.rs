@@ -170,8 +170,8 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::instance_processes::InstanceScope;
     use crate::instance_processes::testing::FakeProc;
+    use crate::instance_processes::{InstanceScope, ProcessMarker};
 
     const OWN_PID: i32 = 100;
     const INSTANCE: &str = "app-feat-3f2a";
@@ -209,6 +209,7 @@ mod tests {
         let scope = InstanceScope {
             name: INSTANCE.to_owned(),
             ports: Vec::new(),
+            marker: ProcessMarker::Instance,
         };
         let context = ScanContext {
             root: &root,

@@ -24,13 +24,40 @@ mod stop;
 #[cfg(test)]
 mod testing;
 
+/// The variable that only the processes devslot launches carry
+/// (`ds run`, the `run` key of `ds up`), never `ds env` nor the `.env` block.
+pub const RUN_VARIABLE: &str = "DEVSLOT_RUN";
+const INSTANCE_VARIABLE: &str = "DEVSLOT_INSTANCE";
+
+/// The environment entry that ties a process to an instance, besides its ports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessMarker {
+    /// `DEVSLOT_INSTANCE=<name>`, also exported by `ds env` and the `.env`
+    /// block, so an editor started from such a shell carries it too.
+    Instance,
+    /// `DEVSLOT_RUN=<name>`, set only on what devslot launches.
+    Run,
+}
+
+impl ProcessMarker {
+    /// The name of the environment variable.
+    pub const fn variable(self) -> &'static str {
+        match self {
+            Self::Instance => INSTANCE_VARIABLE,
+            Self::Run => RUN_VARIABLE,
+        }
+    }
+}
+
 /// The instance registered for a worktree: what ties a process to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceScope {
-    /// The instance name, the value of `DEVSLOT_INSTANCE`.
+    /// The instance name, the value of the marker variable.
     pub name: String,
     /// The ports registered for the instance.
     pub ports: Vec<u16>,
+    /// The environment entry that marks a process of the instance.
+    pub marker: ProcessMarker,
 }
 
 /// A process, as shown to the user: its id and its kernel name, never its

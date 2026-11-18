@@ -247,6 +247,30 @@ fn should_print_export_lines_in_the_shell_format_by_default() {
 }
 
 #[test]
+fn should_set_the_run_marker_to_the_instance_name_in_what_run_launches() {
+    let project = Project::from_scenario("template");
+
+    let run = project.run_with(&["run", "--", "sh", "-c", "echo $DEVSLOT_RUN"], &[]);
+
+    let environment = environment_of(&project);
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(run.stdout, format!("{}\n", environment["DEVSLOT_INSTANCE"]));
+}
+
+#[test]
+fn should_never_export_the_run_marker_in_env_or_in_the_env_block() {
+    let project = Project::from_scenario("template");
+    project.run_with(&["run", "--", "true"], &[]);
+
+    let shell = project.run_with(&["env"], &[]);
+    let json = project.run_with(&["env", "--format", "json"], &[]);
+
+    assert!(!shell.stdout.contains("DEVSLOT_RUN"));
+    assert!(!json.stdout.contains("DEVSLOT_RUN"));
+    assert!(!project.read(".env").contains("DEVSLOT_RUN"));
+}
+
+#[test]
 fn should_never_print_a_value_of_the_env_file_in_env_or_info() {
     let project = Project::from_scenario("template");
     project.run_with(&["run", "--", "true"], &[]);

@@ -106,7 +106,8 @@ mod tests {
                 "COMPOSE_FILE",
                 "BUILDX_CONFIG",
                 "XDG_RUNTIME_DIR",
-                "DEVSLOT_INSTANCE"
+                "DEVSLOT_INSTANCE",
+                "DEVSLOT_RUN"
             ]
             .iter()
             .all(|name| is_reserved(name))

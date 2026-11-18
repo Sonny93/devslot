@@ -7,7 +7,10 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 use crate::cli::exit_code;
-use crate::environment::{EnvironmentVariable, InstanceEnvironment, VariableSource};
+use crate::environment::{
+    EnvironmentVariable, INSTANCE_VARIABLE, InstanceEnvironment, VariableSource,
+};
+use crate::instance_processes::RUN_VARIABLE;
 
 const SHELL_PROGRAM: &str = "/bin/sh";
 const SHELL_COMMAND_FLAG: &str = "-c";
@@ -67,20 +70,32 @@ pub fn exec_command(command: &[OsString], environment: &InstanceEnvironment) -> 
     let Some((program, arguments)) = command.split_first() else {
         return exit_code::USAGE;
     };
-    let error = Command::new(program)
-        .args(arguments)
-        .envs(
-            environment
-                .variables
-                .iter()
-                .map(|variable| (&variable.name, &variable.value)),
-        )
-        .exec();
+    let mut launched = Command::new(program);
+    launched.args(arguments).envs(
+        environment
+            .variables
+            .iter()
+            .map(|variable| (&variable.name, &variable.value)),
+    );
+    if let Some(name) = launched_marker(environment) {
+        launched.env(RUN_VARIABLE, name);
+    }
+    let error = launched.exec();
     eprintln!(
         "ds: error: cannot run {}: {error}",
         program.to_string_lossy()
     );
     exit_code_for(error.kind())
+}
+
+/// The instance name for `DEVSLOT_RUN`: the marker `ds down` looks for, set
+/// only on what devslot launches, never by `ds env` nor the `.env` block.
+fn launched_marker(environment: &InstanceEnvironment) -> Option<&str> {
+    environment
+        .variables
+        .iter()
+        .find(|variable| variable.name == INSTANCE_VARIABLE)
+        .map(|variable| variable.value.as_str())
 }
 
 const fn exit_code_for(kind: ErrorKind) -> u8 {
@@ -100,6 +115,26 @@ mod tests {
             value: value.to_owned(),
             source,
         }
+    }
+
+    #[test]
+    fn should_mark_the_launched_process_with_the_instance_name() {
+        let environment = InstanceEnvironment {
+            variables: vec![variable(
+                INSTANCE_VARIABLE,
+                "app-1",
+                VariableSource::Instance,
+            )],
+        };
+
+        assert_eq!(launched_marker(&environment), Some("app-1"));
+    }
+
+    #[test]
+    fn should_not_mark_the_process_when_the_environment_has_no_instance() {
+        let environment = InstanceEnvironment { variables: vec![] };
+
+        assert_eq!(launched_marker(&environment), None);
     }
 
     #[test]
