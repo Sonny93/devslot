@@ -141,12 +141,26 @@ fn first_number(range: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// The word a Vite config uses to run the dev server inside another server.
+const MIDDLEWARE_MODE: &str = "middlewareMode";
+
+/// The text of a project file, read within the usual size bound.
+pub fn read_text(path: &Path) -> Option<String> {
+    let Ok(BoundedRead::Bytes(bytes)) = read_bounded(path) else {
+        return None;
+    };
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Whether the config file mentions the HMR port variable.
 pub fn config_reads_hmr_port(path: &Path) -> bool {
-    let Ok(BoundedRead::Bytes(bytes)) = read_bounded(path) else {
-        return false;
-    };
-    String::from_utf8_lossy(&bytes).contains(HMR_PORT_VARIABLE)
+    read_text(path).is_some_and(|text| text.contains(HMR_PORT_VARIABLE))
+}
+
+/// Whether the config file mentions `middlewareMode`, the one mode where the
+/// HMR port defaults to [`DEFAULT_HMR_PORT`].
+pub fn config_uses_middleware_mode(path: &Path) -> bool {
+    read_text(path).is_some_and(|text| text.contains(MIDDLEWARE_MODE))
 }
 
 #[cfg(test)]
@@ -342,5 +356,29 @@ mod tests {
         write(root.path(), "vite.config.ts", &config);
 
         assert!(!config_reads_hmr_port(&root.path().join("vite.config.ts")));
+    }
+
+    #[test]
+    fn should_detect_the_middleware_mode_when_the_config_mentions_it() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "vite.config.ts",
+            "server: { middlewareMode: true }",
+        );
+
+        assert!(config_uses_middleware_mode(
+            &root.path().join("vite.config.ts")
+        ));
+    }
+
+    #[test]
+    fn should_not_detect_the_middleware_mode_when_the_config_ignores_it() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "vite.config.ts", "export default {}");
+
+        assert!(!config_uses_middleware_mode(
+            &root.path().join("vite.config.ts")
+        ));
     }
 }

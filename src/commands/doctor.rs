@@ -1,6 +1,6 @@
 //! `ds doctor`: checkout, config, discovery and checks, without writing anything.
 
-use crate::analysis::{CheckoutAnalysis, ProbeScope, selection_findings};
+use crate::analysis::{CheckoutAnalysis, ProbeOutcome, ProbeScope, selection_findings};
 use crate::checkout::Checkout;
 use crate::checks::env::{EnvCheckInput, check_env};
 use crate::checks::env_config::check_forced_port_conflicts;
@@ -14,11 +14,13 @@ use crate::cli::output::write_stdout;
 use crate::cli::render::render_text;
 use crate::cli::style::{ColorChoice, Style};
 use crate::commands::machine::{Machine, locate_checkout};
+use crate::compose::sentinels::usual_value;
 use crate::docker::{ComposeCli, DockerCompose};
 use crate::env_sync::has_creation_source;
 use crate::error::ToolError;
 use crate::global_config::{GlobalConfig, home_from_environment};
 use crate::instance_processes::{CLAUDE_COMM, claude_pid_from_environment, session_root_process};
+use crate::project::dotenv::lookup_value;
 use crate::project_config::{CONFIG_FILE, LOCAL_CONFIG_FILE};
 use crate::registry::record::Registry;
 use crate::report::{DoctorReport, REPORT_VERSION};
@@ -109,7 +111,7 @@ pub fn run_doctor(
     findings.extend(env_findings(checkout, &analysis)?);
     findings.extend(analysis.config_findings());
     findings.extend(forced_port_findings(checkout, &analysis, registry));
-    findings.extend(check_vite(&checkout.root, &analysis.vite));
+    findings.extend(check_vite(&checkout.root, &analysis.vite, &analysis.ports));
     findings.extend(slot_check.and_then(check_slot_geometry));
     findings.extend(check_session_root(session_root));
     Ok(DoctorReport {
@@ -149,7 +151,45 @@ fn env_findings(
         is_env_ignored,
         managed: &analysis.ports,
         env_config_keys: &analysis.config.env_keys(),
+        ignored_ports: &ignored_usual_ports(analysis),
     }))
+}
+
+fn ignored_usual_ports(analysis: &CheckoutAnalysis) -> Vec<u16> {
+    analysis
+        .config
+        .ignored_ports
+        .names
+        .iter()
+        .filter_map(|name| {
+            usual_value(&compose_default(analysis, name), || {
+                env_value(analysis, name)
+            })
+        })
+        .filter_map(|value| value.trim().parse().ok())
+        .collect()
+}
+
+fn compose_default(analysis: &CheckoutAnalysis, name: &str) -> String {
+    analysis
+        .probed_files
+        .iter()
+        .filter_map(|file| match &file.outcome {
+            ProbeOutcome::Read(probed) => probed.defaults.get(name),
+            ProbeOutcome::Rejected => None,
+        })
+        .find(|value| !value.is_empty())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn env_value(analysis: &CheckoutAnalysis, name: &str) -> Option<String> {
+    lookup_value(
+        analysis.env_files.effective_env_file(),
+        analysis.env_files.example_file(),
+        name,
+    )
+    .map(str::to_owned)
 }
 
 #[cfg(test)]

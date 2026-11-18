@@ -57,10 +57,14 @@ pub enum Check {
     EnvTestRedefines,
     /// A value that hardcodes the default port of a managed variable.
     EnvLocalHostPort,
+    /// A value that points at a local host on a port no devslot variable manages.
+    EnvUnmanagedLocalPort,
     /// Vite found but `VITE_HMR_PORT` is not read by its config.
     ViteHmrPort,
     /// More than one Vite config.
     ViteMultipleConfigs,
+    /// A port written as a literal in a Vite config, a package script or the justfile.
+    ViteLiteralPort,
     /// A compose file that Compose rejects (the dev compose).
     ComposeUnreadable,
     /// A scanned compose file that cannot be read on its own.
