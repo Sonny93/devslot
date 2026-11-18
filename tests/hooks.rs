@@ -654,7 +654,7 @@ fn should_deny_the_command_when_it_runs_ds_rm_ds_prune_ds_worktree_rm_or_a_hook(
         assert_eq!(output["permissionDecision"], "deny", "{command}");
         assert_eq!(
             output["permissionDecisionReason"],
-            "ds rm, ds prune and ds worktree rm delete data, ds hook is run by Claude Code itself, and other agents work on this machine; ask the user to run it",
+            "ds rm, ds prune and ds worktree rm delete data, ds hook is run by Claude Code itself, and other agents work on this machine; ask the user to run it. To remove this session's own worktree, use the ExitWorktree tool with action remove instead. For another worktree, give the user the exact command: ds worktree rm <name> run from the repository (or ds worktree rm <path>), adding --yes when they run it with ! inside Claude Code (no terminal).",
             "{command}"
         );
     }
@@ -779,7 +779,7 @@ fn should_print_the_info_and_the_guidance_when_the_checkout_is_registered() {
     assert!(run.stdout.contains("Services:      run ds info to check\n"));
     assert!(run.stdout.contains("DB_PORT"));
     assert!(run.stdout.ends_with(
-        "Use ds info --json for ports and URLs; ds up --no-run starts the services (plain ds up then runs the app in the foreground and does not return); ds reset resets the data; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand. When the devslot worktree guard is on, enter a worktree with the EnterWorktree tool before writing code or starting an environment, and run ds worktree land only after the user's explicit go-ahead (fast-forward only: when the base moved, git rebase it in the worktree, resolve, commit, run ds worktree land again; never push).\n"
+        "Use ds info --json for ports and URLs; ds up --no-run starts the services (plain ds up then runs the app in the foreground and does not return); ds reset resets the data; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand. When the devslot worktree guard is on, enter a worktree with the EnterWorktree tool before writing code or starting an environment, and run ds worktree land only after the user's explicit go-ahead (fast-forward only: when the base moved, git rebase it in the worktree, resolve, commit, run ds worktree land again; never push). To remove this session's worktree when the user asks, leave it with the ExitWorktree tool, action remove and discard_changes true, never keep followed by a removal command; if it says the worktree was kept, ds ls says why.\n"
     ));
     assert_eq!(project.machine().docker_log(), Vec::<String>::new());
 }

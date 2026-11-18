@@ -47,6 +47,7 @@ mod agent_rules_tests {
     const DELETING_COMMANDS: [&str; 3] = ["ds rm", "ds prune", "ds worktree rm"];
     const STARTING_COMMAND: &str = "ds up --no-run";
     const LANDING_COMMAND: &str = "ds worktree land";
+    const EXITING_TOOL: &str = "ExitWorktree";
 
     fn readme_rules() -> &'static str {
         let from_heading = README
@@ -84,6 +85,15 @@ mod agent_rules_tests {
             &all_commands,
         );
         problems.extend(missing(&[("DENY_REASON", DENY_REASON)], &DELETING_COMMANDS));
+        problems.extend(missing(
+            &[
+                ("SKILL.md", SKILL),
+                ("the README rules for agents", readme_rules()),
+                ("GUIDANCE", GUIDANCE),
+                ("DENY_REASON", DENY_REASON),
+            ],
+            &[EXITING_TOOL],
+        ));
 
         assert_eq!(problems, Vec::<String>::new());
     }

@@ -23,7 +23,7 @@ use crate::error::ToolError;
 use crate::registry::record::InstanceRecord;
 
 const HOOK_EVENT_NAME: &str = "PreToolUse";
-pub(super) const DENY_REASON: &str = "ds rm, ds prune and ds worktree rm delete data, ds hook is run by Claude Code itself, and other agents work on this machine; ask the user to run it";
+pub(super) const DENY_REASON: &str = "ds rm, ds prune and ds worktree rm delete data, ds hook is run by Claude Code itself, and other agents work on this machine; ask the user to run it. To remove this session's own worktree, use the ExitWorktree tool with action remove instead. For another worktree, give the user the exact command: ds worktree rm <name> run from the repository (or ds worktree rm <path>), adding --yes when they run it with ! inside Claude Code (no terminal).";
 /// Claude Code kills the hook after 20 seconds; the work stops before that.
 const HOOK_BUDGET: Duration = Duration::from_secs(15);
 /// A `Write` or `MultiEdit` carries the whole file in its input.
