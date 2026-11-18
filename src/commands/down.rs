@@ -9,7 +9,7 @@ use crate::commands::machine::{Machine, load_instance_context, locate_checkout};
 use crate::commands::worktree_removal::scope_of;
 use crate::compose::runner::{ComposeRunner, ComposeTarget, DockerRunner};
 use crate::error::ToolError;
-use crate::instance_processes::{InstanceScope, ProcessControl, SystemProcesses};
+use crate::instance_processes::{InstanceScope, ProcessControl, ProcessMarker, SystemProcesses};
 
 const NOT_REGISTERED_MESSAGE: &str = "ds: error: this checkout is not registered; nothing to stop";
 
@@ -27,7 +27,10 @@ pub fn run_down() -> Result<u8, ToolError> {
         &SystemProcesses,
         &DockerRunner::from_environment(),
         &checkout.root,
-        &scope_of(instance),
+        &InstanceScope {
+            marker: ProcessMarker::Run,
+            ..scope_of(instance)
+        },
         &context.target,
     )
 }
@@ -149,6 +152,7 @@ mod tests {
         InstanceScope {
             name: "app-3f2a".to_owned(),
             ports: vec![4100, 4101],
+            marker: ProcessMarker::Run,
         }
     }
 

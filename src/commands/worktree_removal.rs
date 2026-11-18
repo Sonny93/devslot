@@ -33,8 +33,8 @@ use crate::git_worktree::{
     remove_worktree, uncommitted_change_count, unreachable_commit_count,
 };
 use crate::instance_processes::{
-    CLAUDE_COMM, InstanceScope, ProcessControl, ProcessSummary, Requester, SystemProcesses,
-    join_summaries,
+    CLAUDE_COMM, InstanceScope, ProcessControl, ProcessMarker, ProcessSummary, Requester,
+    SystemProcesses, join_summaries,
 };
 use crate::registry::record::{InstanceRecord, RegistryChange};
 use crate::session_leases::{self, SessionLease, join_descriptions};
@@ -321,6 +321,7 @@ pub fn scope_of(instance: &InstanceRecord) -> InstanceScope {
             .iter()
             .map(|assigned| assigned.port)
             .collect(),
+        marker: ProcessMarker::Instance,
     }
 }
 

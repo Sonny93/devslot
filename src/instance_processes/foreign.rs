@@ -93,8 +93,8 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::instance_processes::InstanceScope;
     use crate::instance_processes::testing::FakeProc;
+    use crate::instance_processes::{InstanceScope, ProcessMarker};
 
     const OWN_PID: i32 = 100;
     const SHELL_PID: i32 = 20;
@@ -124,6 +124,7 @@ mod tests {
             scope: InstanceScope {
                 name: INSTANCE.to_owned(),
                 ports: Vec::new(),
+                marker: ProcessMarker::Instance,
             },
         }
     }

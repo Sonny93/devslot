@@ -99,7 +99,7 @@ APP_BASE_URL = "http://${DEVSLOT_HOST}:${WEB_PORT}"
 
 ## Several processes
 
-`run` is one command. When the app needs several processes (API, queue worker, front), make `run` a single command that keeps them as foreground children and stops them together, for example `concurrently -k "node ace serve" "node ace queue:work"`, or a script that traps the signal and waits. `ds down` and a worktree removal stop the instance's processes (same user, working directory inside the checkout, not `ds` or its ancestors, a listener on a registered port or `DEVSLOT_INSTANCE=<name>` in the environment). A process that detaches (the pm2 daemon, `nohup ... &`) escapes both and keeps running: use pm2 in `pm2-runtime` mode, or leave the daemon out of dev.
+`run` is one command. When the app needs several processes (API, queue worker, front), make `run` a single command that keeps them as foreground children and stops them together, for example `concurrently -k "node ace serve" "node ace queue:work"`, or a script that traps the signal and waits. `ds down` stops the instance's processes (same user, working directory inside the checkout, not `ds` or its ancestors, a listener on a registered port or `DEVSLOT_RUN=<name>` in the environment, which only what `ds run` and `ds up` start carry); a process that only has `DEVSLOT_INSTANCE` (an editor started from a shell that ran `ds env`) is listed, never stopped. A worktree removal stops the same processes plus the ones with `DEVSLOT_INSTANCE=<name>`. A process that detaches (the pm2 daemon, `nohup ... &`) escapes both and keeps running: use pm2 in `pm2-runtime` mode, or leave the daemon out of dev.
 
 ## Fixed OAuth callbacks
 
