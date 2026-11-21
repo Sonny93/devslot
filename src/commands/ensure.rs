@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use crate::analysis::EnvFiles;
+use crate::block_entries::BlockEntriesError;
 use crate::checkout::{Checkout, CheckoutError};
 use crate::checks::finding::{Check, Finding, Level};
 use crate::cli::exit_code;
@@ -22,6 +23,7 @@ use crate::ensure_cache::{
     remove_budget_entry, remove_entry, try_take_flight, write_entry,
 };
 use crate::env_sync::{BlockTarget, EnvSyncError, expected_text, write_block, write_blockers};
+use crate::environment::EnvironmentError;
 use crate::error::ToolError;
 use crate::global_config::{GlobalConfig, effective_write_enabled, home_from_environment};
 use crate::project::env_file::{EnvContent, read_env, remove_temp_files_older_than};
@@ -235,13 +237,21 @@ fn ensure_registered(
 ) -> Result<EnsureResult, ToolError> {
     remove_temp_files_older_than(&checkout.root, STALE_TEMP_AGE).map_err(EnvSyncError::from)?;
     let config = ProjectConfig::load(&checkout.root)?;
-    if !effective_write_enabled(&config, global) || is_env_current(checkout, instance, &config)? {
+    let state = if effective_write_enabled(&config, global) {
+        env_state(checkout, instance, &config)?
+    } else {
+        EnvState::Current
+    };
+    if state == EnvState::Current {
         remove_budget_entry(&entry_path(machine.paths.state_directory(), &checkout.root));
         return Ok(EnsureResult::Silent);
     }
     let cache = RefusalCache::of(machine, checkout, dev_file);
     if cache.is_silent() {
         return Ok(EnsureResult::Silent);
+    }
+    if state == EnvState::RegistryBehind {
+        return refresh_registration((checkout, machine, global), &cache, (style, deadline));
     }
     let flight = try_take_flight(machine.paths.state_directory(), &checkout.root);
     if matches!(flight, Flight::Busy) {
@@ -253,6 +263,43 @@ fn ensure_registered(
         (style, deadline),
     );
     cache.absorb_budget(result)
+}
+
+/// How the `.env` block of a registered checkout compares with what its
+/// project asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum EnvState {
+    /// The block is what the registry asks for.
+    Current,
+    /// The block must be rewritten from the registry.
+    Stale,
+    /// `[env]` refers to a variable the registry does not have yet (a new
+    /// `[ports] extra` or compose variable): the registration must be refreshed.
+    RegistryBehind,
+}
+
+fn env_state(
+    checkout: &Checkout,
+    instance: &InstanceRecord,
+    config: &ProjectConfig,
+) -> Result<EnvState, ToolError> {
+    match is_env_current(checkout, instance, config) {
+        Ok(true) => Ok(EnvState::Current),
+        Ok(false) => Ok(EnvState::Stale),
+        Err(error) if is_unknown_reference(&error) => Ok(EnvState::RegistryBehind),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether the error is an `[env]` reference to a variable the instance does
+/// not have.
+fn is_unknown_reference(error: &ToolError) -> bool {
+    matches!(
+        error,
+        ToolError::EnvSync(EnvSyncError::Entries(BlockEntriesError::Environment(
+            EnvironmentError::UnknownReference { .. }
+        )))
+    )
 }
 
 fn write_registered(
@@ -308,16 +355,15 @@ pub fn check_before_writing(checkout: &Checkout) -> Result<Vec<Finding>, ToolErr
     write_blockers(checkout, &EnvFiles::read(&checkout.root, None)?)
 }
 
-/// Whether `.env` already holds exactly the block the registry asks for.
+/// Whether `.env` already holds exactly the block the registry asks for. The
+/// block is built even when `.env` is missing, so an error in what the
+/// registry asks for is reported in every case.
 /// Reads files only: no lock, no Docker.
 pub fn is_env_current(
     checkout: &Checkout,
     instance: &InstanceRecord,
     config: &ProjectConfig,
 ) -> Result<bool, ToolError> {
-    let Ok(EnvContent::Text(current)) = read_env(&checkout.root) else {
-        return Ok(false);
-    };
     let selection = select_dev_compose(&checkout.root, config.compose_file.as_deref());
     let target = BlockTarget {
         checkout,
@@ -325,7 +371,12 @@ pub fn is_env_current(
         selection: &selection,
         settings: &config.env,
     };
-    Ok(expected_text(&target, &current)? == current)
+    let current = match read_env(&checkout.root) {
+        Ok(EnvContent::Text(text)) => Some(text),
+        _ => None,
+    };
+    let expected = expected_text(&target, current.as_deref().unwrap_or_default())?;
+    Ok(current.is_some_and(|text| text == expected))
 }
 
 /// Under the lock: re-reads the registry, and when the checkout is still
@@ -370,6 +421,17 @@ fn ensure_unregistered(
     if cache.is_silent() {
         return Ok(EnsureResult::Silent);
     }
+    refresh_registration((checkout, machine, global), &cache, (style, deadline))
+}
+
+/// Registers the checkout again (or for the first time) under the single
+/// flight of the checkout, with the compose probe inside the hook budget. The
+/// caller has already checked that the refusal cache is not silent.
+fn refresh_registration(
+    (checkout, machine, global): (&Checkout, &Machine, &GlobalConfig),
+    cache: &RefusalCache,
+    (style, deadline): (Style, Option<Deadline>),
+) -> Result<EnsureResult, ToolError> {
     let flight = try_take_flight(machine.paths.state_directory(), &checkout.root);
     if matches!(flight, Flight::Busy) {
         return Ok(EnsureResult::Silent);
@@ -382,7 +444,7 @@ fn ensure_unregistered(
         (PROBE_TIMEOUT, deadline),
     )
     .map_err(|error| lock_timeout_as_budget(error, deadline));
-    cache.absorb_budget(registration_result(outcome, &cache, (machine, style)))
+    cache.absorb_budget(registration_result(outcome, cache, (machine, style)))
 }
 
 fn registration_result(

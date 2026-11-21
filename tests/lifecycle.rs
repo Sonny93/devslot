@@ -250,6 +250,128 @@ fn should_make_no_docker_call_on_the_second_ensure() {
     assert_eq!(project.machine().docker_log(), Vec::<String>::new());
 }
 
+const NEW_EXTRA_PORT_CONFIG: &str = "[ports]\nextra = [\"WEB_PORT\"]\n[env]\nAPP_BASE_URL = \"http://${DEVSLOT_HOST}:${WEB_PORT}\"\n";
+
+fn registered_project_with_new_extra_port() -> Project {
+    let project = git_project();
+    project.run(&["ensure"]);
+    project.write("devslot.local.toml", NEW_EXTRA_PORT_CONFIG);
+    project.machine().clear_docker_log();
+    project
+}
+
+#[test]
+fn should_allocate_the_new_port_and_write_the_block_when_ensure_runs_after_a_new_extra_port() {
+    let project = git_project();
+    project.run(&["ensure"]);
+    let ports_before = environment_of(&project);
+    project.write("devslot.local.toml", NEW_EXTRA_PORT_CONFIG);
+
+    let run = project.run(&["ensure"]);
+
+    let environment = environment_of(&project);
+    let text = project.read(".env");
+    let web_port = &environment["WEB_PORT"];
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    let slot_first_port = 14000 + 10 * environment["DEVSLOT_SLOT"].parse::<u16>().unwrap();
+    assert!((slot_first_port..slot_first_port + 10).contains(&web_port.parse::<u16>().unwrap()));
+    assert!(text.contains(&format!("WEB_PORT={web_port}")));
+    assert!(text.contains(&format!(
+        "APP_BASE_URL=http://{}:{web_port}",
+        environment["DEVSLOT_HOST"]
+    )));
+    for (name, value) in ports_before
+        .iter()
+        .filter(|(name, _)| name.ends_with("PORT"))
+    {
+        assert_eq!(&environment[name], value);
+    }
+}
+
+#[test]
+fn should_recreate_the_env_with_the_new_port_when_it_was_deleted_and_an_extra_port_was_added() {
+    let project = git_project();
+    project.run(&["ensure"]);
+    project.remove(".env");
+    project.write(".env.example", FAKE_ENV);
+    project.write("devslot.local.toml", NEW_EXTRA_PORT_CONFIG);
+
+    let run = project.run(&["ensure"]);
+
+    let web_port = environment_of(&project)["WEB_PORT"].clone();
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(
+        project
+            .read(".env")
+            .contains(&format!("WEB_PORT={web_port}"))
+    );
+}
+
+#[test]
+fn should_make_no_docker_call_on_the_ensure_after_the_one_that_allocated_the_new_port() {
+    let project = registered_project_with_new_extra_port();
+    project.run(&["ensure"]);
+    project.machine().clear_docker_log();
+
+    let second = project.run_with(&["ensure"], &[("DEVSLOT_DOCKER", "/does/not/exist")]);
+
+    assert_eq!(second.status, 0, "{}", second.stderr);
+    assert_eq!(second.stderr, "");
+    assert_eq!(project.machine().docker_log(), Vec::<String>::new());
+}
+
+#[test]
+fn should_keep_the_neighbour_slot_and_ports_when_ensure_allocates_a_new_extra_port() {
+    let machine = Machine::with_test_slots();
+    let project = Project::from_scenario_on(&machine, "template");
+    let neighbour = Project::from_scenario_on(&machine, "template");
+    project.initialize_git(".env\n");
+    neighbour.initialize_git(".env\n");
+    project.run(&["ensure"]);
+    neighbour.run(&["ensure"]);
+    let before = machine.read_registry();
+    project.write("devslot.local.toml", NEW_EXTRA_PORT_CONFIG);
+
+    let run = project.run(&["ensure"]);
+
+    let after = machine.read_registry();
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(
+        entry_of(&after, &canonical(&neighbour)),
+        entry_of(&before, &canonical(&neighbour))
+    );
+}
+
+#[test]
+fn should_refuse_with_exit_1_and_leave_the_env_alone_when_a_reference_stays_unknown_after_the_refresh()
+ {
+    let project = git_project();
+    project.run(&["ensure"]);
+    let env_before = project.read(".env");
+    project.write("devslot.local.toml", "[env]\nURL = \"http://x:${NOPE}\"\n");
+
+    let run = project.run(&["ensure"]);
+
+    assert_eq!(run.status, 1, "{}", run.stderr);
+    assert!(run.stderr.contains("URL"), "{}", run.stderr);
+    assert_eq!(project.read(".env"), env_before);
+}
+
+#[test]
+fn should_stay_silent_on_the_repeated_ensure_when_a_reference_stays_unknown_with_no_file_change() {
+    let project = git_project();
+    project.run(&["ensure"]);
+    project.write("devslot.local.toml", "[env]\nURL = \"http://x:${NOPE}\"\n");
+    project.run(&["ensure"]);
+    project.machine().clear_docker_log();
+
+    let second = project.run_with(&["ensure"], &[("DEVSLOT_DOCKER", "/does/not/exist")]);
+
+    assert_eq!(second.status, 0, "{}", second.stderr);
+    assert_eq!(second.stderr, "");
+    assert_eq!(project.machine().docker_log(), Vec::<String>::new());
+}
+
 #[test]
 fn should_do_nothing_when_ensure_runs_outside_git() {
     let project = Project::from_scenario("template");
