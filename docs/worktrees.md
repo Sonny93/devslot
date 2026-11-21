@@ -50,8 +50,8 @@ The workflow, end to end:
 1. The session starts in the main checkout. `ds hook session-start` adds a line to the context (see below) so the agent reads there and enters a worktree before writing.
 2. The agent calls the `EnterWorktree` tool with a short name taken from the task. The `WorktreeCreate` hook creates the worktree and records its base branch.
 3. The agent writes code and commits in the worktree, where writes and `ds up`, `ds run` and `ds reset` are allowed.
-4. When the user approves the committed work, the agent runs `ds worktree land` (see [Land the work](#land-the-work-on-the-main-checkout)). It never pushes: that stays with the user.
-5. When the session ends, the `WorktreeRemove` hook removes the worktree, unless it holds unsaved work.
+4. When the work is committed and verified, the agent offers to close it in one question: land it and remove the worktree. A yes (or the user typing `/devslot:finish`) is the go-ahead: the agent runs `ds worktree land` (see [Land the work](#land-the-work-on-the-main-checkout)), then leaves with `ExitWorktree` (action `remove`). It never pushes: that stays with the user.
+5. The `WorktreeRemove` hook removes the worktree, which also stops the instance's processes and deletes its containers, volumes and networks, unless it holds unsaved work. No `ds down` comes first.
 
 What is refused, by `ds hook pre-tool-use`:
 
@@ -79,7 +79,7 @@ ds worktree land
 
 It runs `git merge --ff-only` in the main checkout, so a landing updates that checkout's files and runs the repository's `post-merge` hook; an uncommitted change of yours there that the landing touches makes git refuse, and nothing is landed. It also refuses when the branch adds a file that exists in the main checkout without being tracked there (untracked or ignored, such as a local `.env`), instead of overwriting it. The full list of refusals and the exit codes are in [Commands](commands.md).
 
-Landing does not remove the worktree: the branch and the folder stay until the session ends or you run `ds worktree rm`.
+Landing does not remove the worktree: the branch and the folder stay until the agent leaves with `ExitWorktree` (the closing question, or `/devslot:finish`) or you run `ds worktree rm`.
 
 ## Unsaved work blocks the removal hook
 
