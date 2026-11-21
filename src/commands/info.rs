@@ -81,7 +81,12 @@ pub fn describe_registered(
         version: REPORT_VERSION,
         registered: true,
         name: instance.name.clone(),
+        project: instance
+            .origin
+            .as_ref()
+            .map(|origin| origin.project.clone()),
         path: instance.path.display().to_string(),
+        worktree: instance.origin.as_ref().map(|origin| origin.is_worktree),
         slot: instance.slot,
         host: instance.host.clone(),
         app_url: app_url(instance, &ports),
@@ -137,7 +142,7 @@ mod tests {
     use crate::discovery::PortKind;
     use crate::port_range::PortRange;
     use crate::project_config::{EnvSetting, LOCAL_CONFIG_FILE};
-    use crate::registry::record::{AssignedPort, PortDetail};
+    use crate::registry::record::{AssignedPort, CheckoutOrigin, PortDetail};
 
     fn assigned(variable: &str, port: u16, kind: PortKind) -> AssignedPort {
         AssignedPort {
@@ -250,6 +255,46 @@ mod tests {
             (describe(&instance(Some("PORT"))), describe(&instance(None))),
             (Some("http://app-3f2a.localhost:20050".to_owned()), None)
         );
+    }
+
+    #[test]
+    fn should_report_the_project_and_worktree_flag_when_the_record_has_an_origin() {
+        let checkout_root = tempfile::tempdir().unwrap();
+        let checkout = Checkout::locate(checkout_root.path()).unwrap();
+        let mut record = instance(None);
+        record.origin = Some(CheckoutOrigin {
+            project: "my-links".to_owned(),
+            is_worktree: true,
+        });
+
+        let report = describe_registered(
+            &checkout,
+            &record,
+            &ProjectConfig::default(),
+            ServicesState::Unknown,
+        )
+        .unwrap();
+
+        assert_eq!(
+            (report.project.as_deref(), report.worktree),
+            (Some("my-links"), Some(true))
+        );
+    }
+
+    #[test]
+    fn should_report_no_project_and_no_worktree_flag_when_the_record_has_no_origin() {
+        let checkout_root = tempfile::tempdir().unwrap();
+        let checkout = Checkout::locate(checkout_root.path()).unwrap();
+
+        let report = describe_registered(
+            &checkout,
+            &instance(None),
+            &ProjectConfig::default(),
+            ServicesState::Unknown,
+        )
+        .unwrap();
+
+        assert_eq!((report.project, report.worktree), (None, None));
     }
 
     #[test]

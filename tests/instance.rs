@@ -217,6 +217,46 @@ fn should_show_the_instance_in_info_json_with_the_shape_of_ds_ls() {
 }
 
 #[test]
+fn should_give_the_project_and_the_worktree_flag_in_info_json_for_a_main_checkout_and_a_linked_worktree()
+ {
+    let machine = Machine::with_test_slots();
+    let main = Project::from_scenario_on(&machine, "template");
+    main.initialize_git_and_commit(".env\n");
+    let linked = main.add_worktree("feature");
+    for project in [&main, &linked] {
+        let run = project.run(&["run", "--", "true"]);
+        assert_eq!(run.status, 0, "{}", run.stderr);
+    }
+
+    let main_info = json_of(&main.run(&["info", "--json"]));
+    let linked_info = json_of(&linked.run(&["info", "--json"]));
+
+    let project_name = main
+        .path()
+        .canonicalize()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        (
+            main_info["project"].as_str(),
+            main_info["worktree"].as_bool(),
+            linked_info["project"].as_str(),
+            linked_info["worktree"].as_bool()
+        ),
+        (
+            Some(project_name.as_str()),
+            Some(false),
+            Some(project_name.as_str()),
+            Some(true)
+        )
+    );
+}
+
+#[test]
 fn should_print_the_instance_as_text_in_info() {
     let project = Project::from_scenario("template");
     project.run_with(&["run", "--", "true"], &[]);

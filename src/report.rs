@@ -68,8 +68,14 @@ pub struct RegisteredInfo {
     pub registered: bool,
     /// The instance name, also the compose project name.
     pub name: String,
+    /// The raw repository name (the folder name outside git): the same for
+    /// every worktree of a repository. `null` when the entry predates it.
+    pub project: Option<String>,
     /// The checkout root.
     pub path: String,
+    /// Whether git counts the checkout as a linked worktree. `null` when the
+    /// entry predates it.
+    pub worktree: Option<bool>,
     /// The slot number.
     pub slot: u32,
     /// The local host name of the instance, `<label>.localhost`.
