@@ -242,3 +242,130 @@ fn should_list_no_instance_when_the_registry_is_empty() {
     assert_eq!(report["shared"], Value::Array(Vec::new()));
     assert_eq!(text.stdout, "No instance is registered on this machine.\n");
 }
+
+const FORCE_PORT: &str = "[env]\nPORT = \"3333\"\n";
+
+fn listed<'a>(report: &'a Value, name: &str) -> &'a Value {
+    report["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|instance| instance["name"] == name)
+        .unwrap()
+}
+
+fn port_of<'a>(instance: &'a Value, variable: &str) -> &'a Value {
+    instance["ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|port| port["var"] == variable)
+        .unwrap()
+}
+
+fn list_json(project: &Project) -> Value {
+    let run = listing(project, &["ls", "--json"], &[]);
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    serde_json::from_str(&run.stdout).unwrap()
+}
+
+#[test]
+fn should_list_the_forced_port_of_an_instance_and_leave_its_neighbour_unchanged() {
+    let machines = two_instances();
+    let first_name = name_of(&machines.first);
+    let second_name = name_of(&machines.second);
+    let before = list_json(&machines.first);
+    machines.first.write("devslot.local.toml", FORCE_PORT);
+
+    let report = list_json(&machines.first);
+
+    let forced = port_of(listed(&report, &first_name), "PORT");
+    assert_eq!(forced["port"], 3333);
+    assert_eq!(forced["forced"], true);
+    assert_eq!(forced["url"], "http://localhost:3333");
+    assert_eq!(listed(&report, &second_name), listed(&before, &second_name));
+}
+
+#[test]
+fn should_list_the_allocated_ports_when_the_local_file_is_malformed() {
+    let machines = two_instances();
+    let first_name = name_of(&machines.first);
+    let before = list_json(&machines.first);
+    machines.first.write("devslot.local.toml", "[env\nPORT = ");
+
+    let report = list_json(&machines.first);
+
+    assert_eq!(listed(&report, &first_name), listed(&before, &first_name));
+}
+
+#[test]
+fn should_list_the_allocated_ports_when_the_folder_of_an_instance_was_deleted() {
+    let machines = two_instances();
+    let second_name = name_of(&machines.second);
+    let before = list_json(&machines.first);
+    std::fs::remove_dir_all(machines.second.path()).unwrap();
+
+    let report = list_json(&machines.first);
+
+    assert_eq!(listed(&report, &second_name), listed(&before, &second_name));
+}
+
+#[test]
+fn should_list_the_forced_port_when_the_committed_file_is_malformed() {
+    let machines = two_instances();
+    let first_name = name_of(&machines.first);
+    machines.first.write("devslot.local.toml", FORCE_PORT);
+    machines.first.write("devslot.toml", "[env\nbroken = ");
+
+    let report = list_json(&machines.first);
+
+    assert_eq!(port_of(listed(&report, &first_name), "PORT")["port"], 3333);
+}
+
+#[test]
+fn should_list_the_allocated_port_when_the_forced_value_is_not_canonical() {
+    let machines = two_instances();
+    let first_name = name_of(&machines.first);
+    let before = list_json(&machines.first);
+    for value in ["0", "03333", "abc"] {
+        machines.first.write(
+            "devslot.local.toml",
+            &format!("[env]\nPORT = \"{value}\"\n"),
+        );
+
+        let report = list_json(&machines.first);
+
+        assert_eq!(
+            port_of(listed(&report, &first_name), "PORT"),
+            port_of(listed(&before, &first_name), "PORT"),
+            "value {value}"
+        );
+    }
+}
+
+#[test]
+fn should_mark_the_forced_port_in_words_when_listing_as_text() {
+    let machines = two_instances();
+    machines.first.write("devslot.local.toml", FORCE_PORT);
+
+    let run = listing(&machines.first, &["ls"], &[]);
+
+    assert!(
+        run.stdout.contains("3333 (forced in devslot.local.toml)"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn should_list_the_allocated_port_when_git_tracks_the_local_file() {
+    let machines = two_instances();
+    let first_name = name_of(&machines.first);
+    let before = list_json(&machines.first);
+    machines.first.write("devslot.local.toml", FORCE_PORT);
+    machines.first.git(&["add", "devslot.local.toml"]);
+
+    let report = list_json(&machines.first);
+
+    assert_eq!(listed(&report, &first_name), listed(&before, &first_name));
+}

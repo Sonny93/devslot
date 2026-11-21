@@ -19,6 +19,7 @@ pub mod compose;
 pub mod deadline;
 pub mod discovery;
 pub mod docker;
+pub mod effective_port;
 pub mod ensure_cache;
 pub mod env_sync;
 pub mod environment;

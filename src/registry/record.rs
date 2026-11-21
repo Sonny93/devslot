@@ -69,30 +69,6 @@ impl InstanceRecord {
             .find(|assigned| assigned.variable == variable)
             .map(|assigned| assigned.port)
     }
-
-    /// The web port opened on the host of the instance: the one `[web] port`
-    /// names, when it is a web port of this instance.
-    pub fn app_port(&self) -> Option<&AssignedPort> {
-        let variable = self.web_port_variable.as_deref()?;
-        self.ports
-            .iter()
-            .find(|assigned| assigned.variable == variable && assigned.detail.kind == PortKind::Web)
-    }
-
-    /// Where `assigned` can be opened; `None` for a service port.
-    pub fn url_of(&self, assigned: &AssignedPort) -> Option<String> {
-        if assigned.detail.kind != PortKind::Web {
-            return None;
-        }
-        let is_app_port = self
-            .app_port()
-            .is_some_and(|app| app.variable == assigned.variable);
-        Some(if is_app_port {
-            format!("http://{}:{}", self.host, assigned.port)
-        } else {
-            format!("http://localhost:{}", assigned.port)
-        })
-    }
 }
 
 /// One change to the registry file. Several changes are applied and written

@@ -1,5 +1,6 @@
 //! `ds ls`: every instance of the machine, from the registry, with whether
-//! its services run. One Docker call for the whole machine, no lock.
+//! its services run. One Docker call for the whole machine, no lock. The
+//! only file read per instance is its `devslot.local.toml`, for forced ports.
 
 use std::collections::BTreeSet;
 
@@ -9,9 +10,11 @@ use crate::cli::render::{render_kept_worktrees, render_list_text};
 use crate::commands::info::info_port;
 use crate::commands::machine::Machine;
 use crate::compose::runner::{ComposeRunner, DockerRunner};
+use crate::effective_port::{effective_ports, untracked_settings};
 use crate::error::ToolError;
 use crate::kept_worktrees;
-use crate::registry::record::Registry;
+use crate::project_config::{EnvSetting, ProjectConfig};
+use crate::registry::record::{InstanceRecord, Registry};
 use crate::report::{ListReport, ListedInstance, REPORT_VERSION};
 
 /// Prints the instances of the machine.
@@ -19,7 +22,7 @@ pub fn run_ls(as_json: bool) -> Result<u8, ToolError> {
     let machine = Machine::from_process()?;
     let registry = machine.store.read()?;
     let running = DockerRunner::from_environment().running_projects().ok();
-    let report = list_report(&registry, running.as_ref());
+    let report = list_report(&registry, running.as_ref(), &read_forcing_settings);
     let mut text = render(&report, &registry, as_json)?;
     if !as_json {
         text.push_str(&render_kept_worktrees(&kept_worktrees::list(
@@ -45,9 +48,22 @@ fn render(report: &ListReport, registry: &Registry, as_json: bool) -> Result<Str
     Ok(json)
 }
 
+/// The `[env]` entries of the `devslot.local.toml` of `instance`. A missing
+/// folder or file, an unreadable, oversized, malformed or git-tracked file gives none: the
+/// listing then shows the allocated ports.
+fn read_forcing_settings(instance: &InstanceRecord) -> Vec<EnvSetting> {
+    let settings = ProjectConfig::read_local_env(&instance.path).unwrap_or_default();
+    untracked_settings(&instance.path, instance, settings)
+}
+
 /// The report of the registry; `running` holds the names of the compose
 /// projects with a running container, `None` when Docker could not tell.
-pub fn list_report(registry: &Registry, running: Option<&BTreeSet<String>>) -> ListReport {
+/// `read_settings` gives the settings that may force the ports of an instance.
+pub fn list_report(
+    registry: &Registry,
+    running: Option<&BTreeSet<String>>,
+    read_settings: &dyn Fn(&InstanceRecord) -> Vec<EnvSetting>,
+) -> ListReport {
     ListReport {
         version: REPORT_VERSION,
         shared: Vec::new(),
@@ -60,10 +76,9 @@ pub fn list_report(registry: &Registry, running: Option<&BTreeSet<String>>) -> L
                 slot: instance.slot,
                 host: instance.host.clone(),
                 services_running: running.map(|names| names.contains(&instance.name)),
-                ports: instance
-                    .ports
+                ports: effective_ports(instance, &read_settings(instance))
                     .iter()
-                    .map(|assigned| info_port(instance, assigned))
+                    .map(|port| info_port(instance, port))
                     .collect(),
             })
             .collect(),
@@ -77,7 +92,12 @@ mod tests {
     use super::*;
     use crate::discovery::PortKind;
     use crate::port_range::PortRange;
-    use crate::registry::record::{AssignedPort, InstanceRecord, PortDetail};
+    use crate::project_config::LOCAL_CONFIG_FILE;
+    use crate::registry::record::{AssignedPort, PortDetail};
+
+    fn no_settings(_: &InstanceRecord) -> Vec<EnvSetting> {
+        Vec::new()
+    }
 
     fn registry_of(names: &[&str]) -> Registry {
         Registry {
@@ -114,7 +134,11 @@ mod tests {
     fn should_mark_an_instance_running_when_its_name_is_in_the_running_set() {
         let running: BTreeSet<String> = ["app-1".to_owned()].into();
 
-        let report = list_report(&registry_of(&["app-1", "app-2"]), Some(&running));
+        let report = list_report(
+            &registry_of(&["app-1", "app-2"]),
+            Some(&running),
+            &no_settings,
+        );
 
         let states: Vec<Option<bool>> = report
             .instances
@@ -126,14 +150,14 @@ mod tests {
 
     #[test]
     fn should_leave_the_state_unknown_when_docker_could_not_tell() {
-        let report = list_report(&registry_of(&["app-1"]), None);
+        let report = list_report(&registry_of(&["app-1"]), None, &no_settings);
 
         assert_eq!(report.instances[0].services_running, None);
     }
 
     #[test]
     fn should_give_the_web_port_its_url_and_list_no_shared_service() {
-        let report = list_report(&registry_of(&["app-1"]), None);
+        let report = list_report(&registry_of(&["app-1"]), None, &no_settings);
 
         assert_eq!(
             report.instances[0].ports[0].url.as_deref(),
@@ -144,7 +168,7 @@ mod tests {
 
     #[test]
     fn should_give_each_instance_its_host() {
-        let report = list_report(&registry_of(&["app-1", "app-2"]), None);
+        let report = list_report(&registry_of(&["app-1", "app-2"]), None, &no_settings);
 
         let hosts: Vec<&str> = report
             .instances
@@ -155,15 +179,41 @@ mod tests {
     }
 
     #[test]
-    fn should_open_the_stored_web_port_on_the_host_without_reading_any_config_file() {
+    fn should_open_the_stored_web_port_on_the_host_when_no_port_is_forced() {
         let mut registry = registry_of(&["app-1"]);
         registry.instances[0].web_port_variable = Some("PORT".to_owned());
 
-        let report = list_report(&registry, None);
+        let report = list_report(&registry, None, &no_settings);
 
         assert_eq!(
             report.instances[0].ports[0].url.as_deref(),
             Some("http://app-1.localhost:20050")
         );
+    }
+
+    #[test]
+    fn should_list_the_forced_port_of_the_instance_that_forces_it_only() {
+        let mut registry = registry_of(&["app-1", "app-2"]);
+        registry.instances[0].web_port_variable = Some("PORT".to_owned());
+        let read_settings = |instance: &InstanceRecord| {
+            if instance.name != "app-1" {
+                return Vec::new();
+            }
+            vec![EnvSetting {
+                key: "PORT".to_owned(),
+                value: "3333".to_owned(),
+                file: LOCAL_CONFIG_FILE,
+            }]
+        };
+
+        let report = list_report(&registry, None, &read_settings);
+
+        let first = &report.instances[0].ports[0];
+        let second = &report.instances[1].ports[0];
+        assert_eq!(
+            (first.port, first.url.as_deref(), first.forced),
+            (3333, Some("http://app-1.localhost:3333"), true)
+        );
+        assert_eq!((second.port, second.forced), (20050, false));
     }
 }

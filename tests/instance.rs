@@ -1114,3 +1114,104 @@ fn should_warn_in_doctor_and_keep_urls_on_localhost_when_web_port_is_not_a_manag
     assert_eq!(finding["key"], "[web] port");
     assert_eq!(info["app_url"], Value::Null);
 }
+
+const FORCE_WEB_PORT: &str = "[web]\nport = \"PORT\"\n\n[env]\nPORT = \"3333\"\n";
+
+fn port_entry<'a>(info: &'a Value, variable: &str) -> &'a Value {
+    info["ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|port| port["var"] == variable)
+        .unwrap()
+}
+
+#[test]
+fn should_report_the_forced_port_with_its_urls_in_info_json_when_the_local_file_forces_it() {
+    let project = Project::from_scenario("template");
+    project.initialize_git(".env\n");
+    project.write("devslot.local.toml", "[web]\nport = \"PORT\"\n");
+    project.run_with(&["run", "--", "true"], &[]);
+    let allocated = json_of(&project.run_with(&["info", "--json"], &[]));
+    project.write("devslot.local.toml", FORCE_WEB_PORT);
+
+    let info = json_of(&project.run_with(&["info", "--json"], &[]));
+
+    let host = info["host"].as_str().unwrap();
+    let forced = port_entry(&info, "PORT");
+    assert_eq!(forced["port"], 3333);
+    assert_eq!(forced["forced"], true);
+    assert_eq!(forced["url"], format!("http://{host}:3333"));
+    assert_eq!(info["app_url"], format!("http://{host}:3333"));
+    for variable in ["VITE_HMR_PORT", "DB_PORT"] {
+        assert_eq!(
+            port_entry(&info, variable),
+            port_entry(&allocated, variable)
+        );
+        assert!(port_entry(&info, variable).get("forced").is_none());
+    }
+}
+
+#[test]
+fn should_leave_the_registry_untouched_when_info_reports_a_forced_port() {
+    let project = Project::from_scenario("template");
+    project.run_with(&["run", "--", "true"], &[]);
+    project.write("devslot.local.toml", FORCE_WEB_PORT);
+    let registry_before = project.machine().read_registry();
+
+    project.run_with(&["info", "--json"], &[]);
+
+    assert_eq!(project.machine().read_registry(), registry_before);
+}
+
+#[test]
+fn should_mark_the_forced_port_in_words_in_info_text_when_the_local_file_forces_it() {
+    let project = Project::from_scenario("template");
+    project.initialize_git(".env\n");
+    project.run_with(&["run", "--", "true"], &[]);
+    project.write("devslot.local.toml", FORCE_WEB_PORT);
+
+    let run = project.run_with(&["info"], &[]);
+
+    assert!(
+        run.stdout.contains("3333 (forced in devslot.local.toml)"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn should_keep_the_allocated_port_in_info_json_when_the_forced_value_is_not_canonical() {
+    let project = Project::from_scenario("template");
+    project.run_with(&["run", "--", "true"], &[]);
+    let allocated = json_of(&project.run_with(&["info", "--json"], &[]));
+    for value in ["0", "03333", "abc"] {
+        project.write(
+            "devslot.local.toml",
+            &format!("[env]\nPORT = \"{value}\"\n"),
+        );
+
+        let info = json_of(&project.run_with(&["info", "--json"], &[]));
+
+        assert_eq!(
+            port_entry(&info, "PORT"),
+            port_entry(&allocated, "PORT"),
+            "value {value}"
+        );
+    }
+}
+
+#[test]
+fn should_keep_the_allocated_port_in_info_json_when_git_tracks_the_local_file() {
+    let project = Project::from_scenario("template");
+    project.initialize_git(".env\n");
+    project.run_with(&["run", "--", "true"], &[]);
+    let allocated = json_of(&project.run_with(&["info", "--json"], &[]));
+    project.write("devslot.local.toml", FORCE_WEB_PORT);
+    project.git(&["add", "devslot.local.toml"]);
+
+    let info = json_of(&project.run_with(&["info", "--json"], &[]));
+
+    assert_eq!(port_entry(&info, "PORT"), port_entry(&allocated, "PORT"));
+    assert!(port_entry(&info, "PORT").get("forced").is_none());
+}

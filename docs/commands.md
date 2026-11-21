@@ -10,7 +10,7 @@ Reference of the `ds` commands. `ds <command> --help` lists the options and the 
 | `ds run -- <command>` | Registers the checkout if needed and runs a command with the instance environment. |
 | `ds env [--format sh\|json]` | Prints the environment of the instance. |
 | `ds info [--json]` | Shows the name, slot, host, ports, URLs and services state of this checkout's instance. With `--json`, `host` is the instance's `DEVSLOT_HOST`, and `app_url` is present when `[web] port` names a managed port. |
-| `ds ls [--json]` | Lists every instance of the machine with its host, ports and whether its services run, then the worktrees Claude Code asked to remove that are still there, with the reason. On a narrow terminal the PATH column wraps: `--json` gives the same list without it. |
+| `ds ls [--json]` | Lists every instance of the machine with its host, ports (a port forced in `devslot.local.toml` shows its forced value, read from that file of each instance alone) and whether its services run, then the worktrees Claude Code asked to remove that are still there, with the reason. On a narrow terminal the PATH column wraps: `--json` gives the same list without it. |
 | `ds ensure` | Registers the checkout and writes its block without starting anything (what the hook runs). A registered checkout is read from the registry only, unless `[env]` refers to a variable the registry does not have yet (a new `[ports] extra`): the registration is then refreshed once, with a compose probe. Does nothing in a main checkout covered by the worktree guard. |
 | `ds reset [service]` | Deletes the data of the instance, or of one service, and starts the services again. |
 | `ds rm [--yes]` | Deletes the instance's data, removes the block and opts the checkout out. |

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::finding::{Check, Finding, Level};
 use crate::discovery::ManagedPort;
+use crate::effective_port::forced_port_of;
 use crate::project::dotenv::EnvFile;
 use crate::project_config::{CONFIG_FILE, LOCAL_CONFIG_FILE, ProjectConfig};
 use crate::registry::record::{Registry, normalize_path};
@@ -119,7 +120,7 @@ pub fn check_forced_port_conflicts(
         .iter()
         .filter(|setting| setting.file == LOCAL_CONFIG_FILE)
     {
-        let Some(port) = setting.value.trim().parse::<u16>().ok() else {
+        let Some(port) = forced_port_of(setting) else {
             continue;
         };
         if !managed
@@ -358,6 +359,21 @@ mod tests {
         assert!(findings[0].message.contains("DB_PORT"));
         assert!(findings[0].message.contains("20062"));
         assert!(findings[0].message.contains("other-1234"));
+    }
+
+    #[test]
+    fn should_ignore_a_forced_value_that_is_not_a_canonical_port() {
+        let mut config = config_with("DB_PORT", LOCAL_CONFIG_FILE);
+        config.env[0].value = "020062".to_owned();
+
+        let findings = check_forced_port_conflicts(
+            &config,
+            &[managed("DB_PORT")],
+            &registry_with_other_instance(),
+            Path::new("/work/mine"),
+        );
+
+        assert_eq!(findings, Vec::new());
     }
 
     #[test]

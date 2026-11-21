@@ -40,7 +40,7 @@ pub struct InfoPort {
     /// The variable name.
     #[serde(rename = "var")]
     pub variable: String,
-    /// The port.
+    /// The port the app listens on: the forced one, else the allocated one.
     pub port: u16,
     /// Web or service.
     pub kind: PortKind,
@@ -53,6 +53,10 @@ pub struct InfoPort {
     /// Where a web port can be opened; absent for a service port.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Whether `devslot.local.toml` forces the port: it then lies outside the
+    /// slot range and may be shared with another instance. Absent otherwise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub forced: bool,
 }
 
 /// What `ds info` knows about a registered checkout.

@@ -13,6 +13,7 @@ use crate::shell_quote::shell_quote;
 
 const LEVEL_WORD_WIDTH: usize = 7;
 const NO_VALUE: &str = "-";
+const FORCED_MARK: &str = "(forced in devslot.local.toml)";
 const SERVICES_NOT_CHECKED: &str = "run ds info to check";
 const KEPT_WORKTREES_HEADING: &str = "Worktrees Claude Code asked to remove that are still there:";
 const NO_INSTANCE_LINE: &str = "No instance is registered on this machine.\n";
@@ -267,6 +268,13 @@ fn render_registered_info_with(info: &RegisteredInfo, services: &str) -> String 
     output
 }
 
+fn port_text(port: &InfoPort) -> String {
+    if port.forced {
+        return format!("{} {FORCED_MARK}", port.port);
+    }
+    port.port.to_string()
+}
+
 fn render_info_ports(ports: &[InfoPort]) -> String {
     if ports.is_empty() {
         return "  none\n".to_owned();
@@ -282,7 +290,7 @@ fn render_info_ports(ports: &[InfoPort]) -> String {
             };
             [
                 port.variable.clone(),
-                port.port.to_string(),
+                port_text(port),
                 port.kind.word().to_owned(),
                 target,
                 port.url.clone().unwrap_or_else(|| NO_VALUE.to_owned()),
@@ -410,6 +418,7 @@ mod tests {
                     service: None,
                     target: None,
                     url: Some("http://localhost:20050".to_owned()),
+                    forced: false,
                 },
                 crate::report::InfoPort {
                     variable: "DB_PORT".to_owned(),
@@ -418,6 +427,7 @@ mod tests {
                     service: Some("postgres".to_owned()),
                     target: Some(5432),
                     url: None,
+                    forced: false,
                 },
             ],
             services: ServicesState::Running,
@@ -442,6 +452,21 @@ mod tests {
              \x20 PORT      20050  web      -              http://localhost:20050\n\
              \x20 DB_PORT   20052  service  postgres:5432  -\n"
         );
+    }
+
+    #[test]
+    fn should_mark_a_forced_port_in_words_when_rendering_the_ports() {
+        let mut info = registered_info();
+        info.ports[0].port = 3333;
+        info.ports[0].forced = true;
+
+        let text = render_info_text(&InfoReport::Registered(info));
+
+        assert!(
+            text.contains("PORT      3333 (forced in devslot.local.toml)"),
+            "{text}"
+        );
+        assert!(!text.contains("20052 (forced"));
     }
 
     #[test]

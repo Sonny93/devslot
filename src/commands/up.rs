@@ -12,10 +12,12 @@ use crate::commands::launch::{exec_shell_script, warn_about_replacements};
 use crate::commands::machine::{InstanceContext, Machine, load_instance_context, locate_checkout};
 use crate::commands::registering::{announce, register_checkout, registration_or_exit_code};
 use crate::compose::runner::{ComposeRunner, ComposeTarget, DockerRunner};
+use crate::effective_port::effective_ports;
 use crate::error::ToolError;
 use crate::global_config::GlobalConfig;
 use crate::port_check::busy_ports;
 use crate::port_probe::SystemPortProbe;
+use crate::project_config::EnvSetting;
 use crate::registration::Intent;
 use crate::registry::record::InstanceRecord;
 use crate::session_leases;
@@ -48,6 +50,8 @@ pub struct UpPlan<'a> {
     pub has_compose_file: bool,
     /// Whether an app is run after the services, so its web ports matter too.
     pub runs_app: bool,
+    /// The `[env]` settings, some of which may force a port.
+    pub env_settings: &'a [EnvSetting],
 }
 
 /// Registers the checkout, starts its services, then runs the app.
@@ -70,6 +74,7 @@ pub fn run_up(color: ColorChoice, arguments: &UpArguments) -> Result<u8, ToolErr
         target: &context.target,
         has_compose_file: context.has_compose_file,
         runs_app: runs_app(&context, arguments),
+        env_settings: &context.config.env,
     };
     let outcome = start_services(&DockerRunner::from_environment(), &SystemPortProbe, &plan)?;
     if matches!(
@@ -118,7 +123,8 @@ pub fn start_services(
         return Ok(UpOutcome::NotIsolated);
     }
     let own_ports = own_published_ports(runner, plan.target);
-    let busy = busy_ports(plan.instance, plan.runs_app, &own_ports, probe);
+    let ports = effective_ports(plan.instance, plan.env_settings);
+    let busy = busy_ports(&ports, plan.runs_app, &own_ports, probe);
     if !busy.is_empty() {
         for port in &busy {
             eprintln!("{}", port.message());
@@ -225,6 +231,7 @@ mod tests {
                 target: &target,
                 has_compose_file,
                 runs_app,
+                env_settings: &[],
             },
         )
         .unwrap()

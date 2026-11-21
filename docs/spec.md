@@ -276,7 +276,7 @@ require_exclude = []           # wins over require
 }
 ```
 
-`shared` is always empty. `services_running` is `null` when Docker could not tell. Only web ports have a `url`.
+`shared` is always empty. `services_running` is `null` when Docker could not tell. Only web ports have a `url`. `port` is the effective port: the one allocated in the slot, or the value `devslot.local.toml` forces for that variable when it is canonical (1 to 65535, no sign or leading zero). `"forced": true` marks a forced port, absent otherwise; it lies outside the slot `range` and may be shared with another instance, so a consumer must not key on the port alone. `ds ls` reads only the `devslot.local.toml` of each instance, and lists the allocated ports when that file is missing or malformed.
 
 `ds info --json` of a registered checkout has `version`, `registered: true`, `name`, `path`, `slot`, `host`, `app_url` (only when `[web] port` names a managed web port: `http://<host>:<port>`), `range` (`[first, last]`), `compose_file`, `compose_file_origin`, `ports` (same shape as above) and `services` (`running`, `stopped`, `none` or `unknown`). An unregistered checkout gives `version`, `registered: false`, `path` and `opted_out`.
 

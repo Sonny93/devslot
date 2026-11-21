@@ -7,10 +7,11 @@ use crate::cli::render::render_info_text;
 use crate::commands::machine::{Machine, locate_checkout};
 use crate::compose::runner::{ComposeRunner, ComposeTarget, DockerRunner};
 use crate::compose::selection::{DevComposeSelection, select_dev_compose};
+use crate::effective_port::{EffectivePort, app_url, effective_ports, untracked_settings, url_of};
 use crate::environment::{build_environment, compose_file_paths};
 use crate::error::ToolError;
 use crate::project_config::ProjectConfig;
-use crate::registry::record::{AssignedPort, InstanceRecord};
+use crate::registry::record::InstanceRecord;
 use crate::report::{InfoPort, InfoReport, REPORT_VERSION, RegisteredInfo, UnregisteredInfo};
 use crate::services_state::ServicesState;
 
@@ -74,6 +75,8 @@ pub fn describe_registered(
         }
         DevComposeSelection::ConfiguredMissing(_) | DevComposeSelection::NoneFound => (None, None),
     };
+    let settings = untracked_settings(&checkout.root, instance, config.env.clone());
+    let ports = effective_ports(instance, &settings);
     Ok(RegisteredInfo {
         version: REPORT_VERSION,
         registered: true,
@@ -81,17 +84,11 @@ pub fn describe_registered(
         path: instance.path.display().to_string(),
         slot: instance.slot,
         host: instance.host.clone(),
-        app_url: instance
-            .app_port()
-            .and_then(|assigned| instance.url_of(assigned)),
+        app_url: app_url(instance, &ports),
         range: [instance.range.first, instance.range.last],
         compose_file,
         compose_file_origin,
-        ports: instance
-            .ports
-            .iter()
-            .map(|assigned| info_port(instance, assigned))
-            .collect(),
+        ports: ports.iter().map(|port| info_port(instance, port)).collect(),
         services,
     })
 }
@@ -120,14 +117,15 @@ fn status_target(
 }
 
 /// The port of `instance` in the shape both `ds info` and `ds ls` print.
-pub fn info_port(instance: &InstanceRecord, assigned: &AssignedPort) -> InfoPort {
+pub fn info_port(instance: &InstanceRecord, port: &EffectivePort) -> InfoPort {
     InfoPort {
-        variable: assigned.variable.clone(),
-        port: assigned.port,
-        kind: assigned.detail.kind,
-        service: assigned.detail.service.clone(),
-        target: assigned.detail.target,
-        url: instance.url_of(assigned),
+        variable: port.variable.clone(),
+        port: port.port,
+        kind: port.detail.kind,
+        service: port.detail.service.clone(),
+        target: port.detail.target,
+        url: url_of(instance, port),
+        forced: port.is_forced,
     }
 }
 
@@ -138,7 +136,8 @@ mod tests {
     use super::*;
     use crate::discovery::PortKind;
     use crate::port_range::PortRange;
-    use crate::registry::record::PortDetail;
+    use crate::project_config::{EnvSetting, LOCAL_CONFIG_FILE};
+    use crate::registry::record::{AssignedPort, PortDetail};
 
     fn assigned(variable: &str, port: u16, kind: PortKind) -> AssignedPort {
         AssignedPort {
@@ -173,12 +172,17 @@ mod tests {
     }
 
     fn url_of(instance: &InstanceRecord, variable: &str) -> Option<String> {
-        let assigned = instance
-            .ports
-            .iter()
-            .find(|assigned| assigned.variable == variable)
-            .unwrap();
-        info_port(instance, assigned).url
+        reported_port(instance, &[], variable).url
+    }
+
+    fn reported_port(
+        instance: &InstanceRecord,
+        settings: &[EnvSetting],
+        variable: &str,
+    ) -> InfoPort {
+        let ports = effective_ports(instance, settings);
+        let port = ports.iter().find(|port| port.variable == variable).unwrap();
+        info_port(instance, port)
     }
 
     #[test]
@@ -244,6 +248,55 @@ mod tests {
         assert_eq!(
             (describe(&instance(Some("PORT"))), describe(&instance(None))),
             (Some("http://app-3f2a.localhost:20050".to_owned()), None)
+        );
+    }
+
+    #[test]
+    fn should_report_the_forced_port_with_its_url_and_the_mark() {
+        let settings = [EnvSetting {
+            key: "PORT".to_owned(),
+            value: "3333".to_owned(),
+            file: LOCAL_CONFIG_FILE,
+        }];
+
+        let port = reported_port(&instance(Some("PORT")), &settings, "PORT");
+
+        assert_eq!(
+            (port.port, port.url.as_deref(), port.forced),
+            (3333, Some("http://app-3f2a.localhost:3333"), true)
+        );
+    }
+
+    #[test]
+    fn should_report_the_app_url_with_the_forced_port() {
+        let checkout_root = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(checkout_root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let checkout = Checkout::locate(checkout_root.path()).unwrap();
+        let config = ProjectConfig {
+            env: vec![EnvSetting {
+                key: "PORT".to_owned(),
+                value: "3333".to_owned(),
+                file: LOCAL_CONFIG_FILE,
+            }],
+            ..ProjectConfig::default()
+        };
+
+        let info = describe_registered(
+            &checkout,
+            &instance(Some("PORT")),
+            &config,
+            ServicesState::Unknown,
+        )
+        .unwrap();
+
+        assert_eq!(
+            info.app_url.as_deref(),
+            Some("http://app-3f2a.localhost:3333")
         );
     }
 }

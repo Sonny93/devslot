@@ -191,6 +191,16 @@ impl ProjectConfig {
         Ok(Self::merge(base, local))
     }
 
+    /// The `[env]` entries of `devslot.local.toml` alone, without reading the
+    /// committed file, so a broken committed file hides nothing. A missing
+    /// file gives no entry.
+    pub fn read_local_env(root: &Path) -> Result<Vec<EnvSetting>, ConfigError> {
+        let Some(layer) = read_layer(root, LOCAL_CONFIG_FILE)? else {
+            return Ok(Vec::new());
+        };
+        Ok(Self::merge(None, Some(layer)).env)
+    }
+
     /// The keys of `[env]`, in merge order.
     pub fn env_keys(&self) -> Vec<String> {
         self.env.iter().map(|setting| setting.key.clone()).collect()
@@ -410,6 +420,31 @@ mod tests {
             (config.run.as_deref(), config.run_origin),
             (Some("pnpm dev"), Some(CONFIG_FILE))
         );
+    }
+
+    #[test]
+    fn should_read_only_the_local_env_when_reading_the_local_layer() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), CONFIG_FILE, "[env\nbroken = ");
+        write(root.path(), LOCAL_CONFIG_FILE, "[env]\nPORT = 3333\n");
+
+        let settings = ProjectConfig::read_local_env(root.path()).unwrap();
+
+        assert_eq!(
+            settings,
+            [EnvSetting {
+                key: "PORT".to_owned(),
+                value: "3333".to_owned(),
+                file: LOCAL_CONFIG_FILE
+            }]
+        );
+    }
+
+    #[test]
+    fn should_give_no_local_env_when_the_local_file_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert_eq!(ProjectConfig::read_local_env(root.path()).unwrap(), []);
     }
 
     #[test]
