@@ -1253,3 +1253,25 @@ fn should_document_exit_codes_in_the_help_of_each_new_command() {
         assert!(run.stdout.contains("XDG_STATE_HOME"), "{command}");
     }
 }
+
+#[test]
+fn should_refuse_to_write_the_block_and_stay_silent_on_repeat_when_git_tracks_a_forcing_local_config()
+ {
+    let project = git_project();
+    project.run(&["ensure"]);
+    let env_before = project.read(".env");
+    project.write("devslot.local.toml", "[env]\nPORT = \"3333\"\n");
+    project.git(&["add", "devslot.local.toml"]);
+
+    let first = project.run(&["ensure"]);
+    let second = project.run(&["ensure"]);
+
+    assert_eq!(first.status, 1, "{}", first.stderr);
+    assert!(
+        first.stderr.contains("git tracks this file"),
+        "{}",
+        first.stderr
+    );
+    assert_eq!((second.status, second.stderr.as_str()), (0, ""));
+    assert_eq!(project.read(".env"), env_before);
+}

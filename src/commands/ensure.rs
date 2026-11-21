@@ -7,8 +7,10 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use crate::analysis::EnvFiles;
+use crate::analysis::is_local_config_tracked;
 use crate::block_entries::BlockEntriesError;
 use crate::checkout::{Checkout, CheckoutError};
+use crate::checks::env_config::check_local_config_tracked;
 use crate::checks::finding::{Check, Finding, Level};
 use crate::cli::exit_code;
 use crate::cli::style::{ColorChoice, Style};
@@ -352,7 +354,11 @@ fn lock_timeout_as_budget(error: ToolError, deadline: Option<Deadline>) -> ToolE
 /// The errors that forbid writing `.env`, found without the registry lock:
 /// the `git check-ignore` call and the reads of `.env` stay out of the lock.
 pub fn check_before_writing(checkout: &Checkout) -> Result<Vec<Finding>, ToolError> {
-    write_blockers(checkout, &EnvFiles::read(&checkout.root, None)?)
+    let mut blockers = write_blockers(checkout, &EnvFiles::read(&checkout.root, None)?)?;
+    blockers.extend(check_local_config_tracked(is_local_config_tracked(
+        checkout,
+    )?));
+    Ok(blockers)
 }
 
 /// Whether `.env` already holds exactly the block the registry asks for. The

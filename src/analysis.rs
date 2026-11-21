@@ -249,7 +249,8 @@ impl CheckoutAnalysis {
     }
 }
 
-fn is_local_config_tracked(checkout: &Checkout) -> Result<bool, ToolError> {
+/// Whether git tracks `devslot.local.toml`; false outside git or without the file.
+pub fn is_local_config_tracked(checkout: &Checkout) -> Result<bool, ToolError> {
     if !checkout.is_git || !checkout.root.join(LOCAL_CONFIG_FILE).exists() {
         return Ok(false);
     }
