@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use crate::discovery::PortKind;
-use crate::project_config::{EnvSetting, LOCAL_CONFIG_FILE};
+use crate::project_config::{EnvSetting, LOCAL_CONFIG_FILE, ProjectConfig};
 use crate::registry::record::{InstanceRecord, PortDetail};
 use crate::worktree_guard::is_tracked;
 
@@ -66,6 +66,14 @@ pub fn untracked_settings(
         return Vec::new();
     }
     settings
+}
+
+/// The `[env]` entries of the `devslot.local.toml` of `instance`. A missing
+/// folder or file, an unreadable, oversized, malformed or git-tracked file gives none: the
+/// listing then shows the allocated ports.
+pub fn read_forcing_settings(instance: &InstanceRecord) -> Vec<EnvSetting> {
+    let settings = ProjectConfig::read_local_env(&instance.path).unwrap_or_default();
+    untracked_settings(&instance.path, instance, settings)
 }
 
 /// The ports of `instance` with the forced values of `settings` applied.

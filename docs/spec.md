@@ -94,6 +94,7 @@ The same checks serve `ds up`, `ds run`, `ds ensure` and `ds doctor`. An error b
 | `env_key_undeclared`: committed `[env]` key that `.env` and `.env.example` do not declare | error | The committed file may only rebuild values the project already declares. |
 | `local_config_tracked`: `devslot.local.toml` tracked by git | error | A machine-local file must stay local. |
 | `forced_port_conflict`: a forced port belongs to another instance | error | Two instances would listen on the same port. |
+| `forced_port_shared`: another instance forces a port that lies in this instance's slot or that this checkout forces too (`ds doctor` only) | warning | The instances clash if they run together, or this one may be handed that port later. |
 | `hardcoded_port`: published port written as a literal (`"5432:5432"`) | warning | Not managed, conflicts with a second instance. |
 | `port_range`: published port range | warning | Not managed. |
 | `port_variable_unmanaged`: compose port published through a variable whose name does not end in `PORT` | warning | Not managed; rename it to `*_PORT`. |

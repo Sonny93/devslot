@@ -5,6 +5,9 @@ use crate::checkout::Checkout;
 use crate::checks::env::{EnvCheckInput, check_env};
 use crate::checks::env_config::check_forced_port_conflicts;
 use crate::checks::finding::{Finding, Summary};
+use crate::checks::forced_port_shared::{
+    OtherForcing, OwnForcedPort, SharedForcingInput, check_forced_port_shared,
+};
 use crate::checks::session::{SessionRoot, check_session_root};
 use crate::checks::slot::{SlotCheckInput, check_slot_geometry};
 use crate::checks::vite::check_vite;
@@ -17,13 +20,14 @@ use crate::cli::style::{ColorChoice, Style};
 use crate::commands::machine::{Machine, locate_checkout};
 use crate::compose::sentinels::usual_value;
 use crate::docker::{ComposeCli, DockerCompose};
+use crate::effective_port::{effective_ports, forced_port_of, read_forcing_settings};
 use crate::env_sync::has_creation_source;
 use crate::error::ToolError;
 use crate::global_config::{GlobalConfig, home_from_environment};
 use crate::instance_processes::{CLAUDE_COMM, claude_pid_from_environment, session_root_process};
 use crate::project::dotenv::lookup_value;
 use crate::project_config::{CONFIG_FILE, LOCAL_CONFIG_FILE};
-use crate::registry::record::Registry;
+use crate::registry::record::{InstanceRecord, Registry, normalize_path};
 use crate::report::{DoctorReport, REPORT_VERSION};
 use crate::worktree_guard::guard_status;
 use crate::worktree_require_override::read_require_key;
@@ -134,9 +138,79 @@ fn forced_port_findings(
     analysis: &CheckoutAnalysis,
     registry: Option<&Registry>,
 ) -> Vec<Finding> {
-    registry.map_or_else(Vec::new, |registry| {
-        check_forced_port_conflicts(&analysis.config, &analysis.ports, registry, &checkout.root)
+    let Some(registry) = registry else {
+        return Vec::new();
+    };
+    let mut findings =
+        check_forced_port_conflicts(&analysis.config, &analysis.ports, registry, &checkout.root);
+    findings.extend(shared_port_findings(checkout, analysis, registry));
+    findings
+}
+
+fn shared_port_findings(
+    checkout: &Checkout,
+    analysis: &CheckoutAnalysis,
+    registry: &Registry,
+) -> Vec<Finding> {
+    let own = normalize_path(&checkout.root);
+    let forced_by_others: Vec<(&InstanceRecord, Vec<u16>)> = registry
+        .instances
+        .iter()
+        .filter(|instance| normalize_path(&instance.path) != own)
+        .map(|instance| (instance, forced_ports_of(instance)))
+        .filter(|(_, ports)| !ports.is_empty())
+        .collect();
+    if forced_by_others.is_empty() {
+        return Vec::new();
+    }
+    let others: Vec<OtherForcing<'_>> = forced_by_others
+        .iter()
+        .map(|(instance, ports)| OtherForcing { instance, ports })
+        .collect();
+    check_forced_port_shared(&SharedForcingInput {
+        own_path: &checkout.root,
+        own_range: registry.find(&checkout.root).map(|instance| instance.range),
+        own_forced: &own_forced_ports(checkout, analysis),
+        others: &others,
     })
+}
+
+fn forced_ports_of(instance: &InstanceRecord) -> Vec<u16> {
+    effective_ports(instance, &read_forcing_settings(instance))
+        .into_iter()
+        .filter(|port| port.is_forced)
+        .map(|port| port.port)
+        .collect()
+}
+
+/// The canonical ports this checkout forces for its managed variables; none
+/// when git tracks `devslot.local.toml` or cannot tell.
+fn own_forced_ports(checkout: &Checkout, analysis: &CheckoutAnalysis) -> Vec<OwnForcedPort> {
+    let forced: Vec<OwnForcedPort> = analysis
+        .config
+        .env
+        .iter()
+        .filter(|setting| {
+            analysis
+                .ports
+                .iter()
+                .any(|managed| managed.variable == setting.key)
+        })
+        .filter_map(|setting| {
+            forced_port_of(setting).map(|port| OwnForcedPort {
+                variable: setting.key.clone(),
+                port,
+            })
+        })
+        .collect();
+    if forced.is_empty() {
+        return forced;
+    }
+    let is_trusted = checkout.is_git && !checkout.is_tracked(LOCAL_CONFIG_FILE).unwrap_or(true);
+    if !is_trusted {
+        return Vec::new();
+    }
+    forced
 }
 
 fn env_findings(

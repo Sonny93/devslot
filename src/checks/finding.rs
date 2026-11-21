@@ -83,6 +83,8 @@ pub enum Check {
     LocalConfigTracked,
     /// A forced port belongs to another instance.
     ForcedPortConflict,
+    /// A port that another instance forces lies in this slot or is forced here too.
+    ForcedPortShared,
     /// The registered range no longer matches the slot of the current settings.
     SlotGeometryChanged,
     /// The session runs under a process not named `claude`, or none is found: no lease is written.

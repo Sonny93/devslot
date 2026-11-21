@@ -366,3 +366,58 @@ fn should_exit_2_when_the_config_file_is_not_a_regular_file() {
         run.stderr
     );
 }
+
+const FORCE_SHARED_PORT: &str = "[env]\nPORT = \"3333\"\n";
+
+fn registered_checkout(machine: &std::sync::Arc<support::Machine>) -> Project {
+    let project = Project::from_scenario_on(machine, "template");
+    project.initialize_git(".env\n");
+    let run = project.run(&["run", "--", "true"]);
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    project
+}
+
+fn two_registered_checkouts() -> (Project, Project) {
+    let machine = support::Machine::with_test_slots();
+    let first = registered_checkout(&machine);
+    let second = registered_checkout(&machine);
+    (first, second)
+}
+
+#[test]
+fn should_warn_when_another_registered_checkout_forces_the_same_port() {
+    let (first, second) = two_registered_checkouts();
+    first.write("devslot.local.toml", FORCE_SHARED_PORT);
+    second.write("devslot.local.toml", FORCE_SHARED_PORT);
+
+    let run = first.doctor(&["doctor", "--json"]);
+
+    let report = json_of(&run);
+    assert_eq!(run.status, 0, "{}{}", run.stdout, run.stderr);
+    let finding = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["check"] == "forced_port_shared")
+        .unwrap();
+    assert_eq!(finding["level"], "warning");
+    assert_eq!(finding["key"], "PORT");
+    assert!(
+        finding["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("port 3333 (PORT) is also forced by instance ")
+    );
+}
+
+#[test]
+fn should_not_warn_when_the_other_checkout_tracks_its_forcing_file() {
+    let (first, second) = two_registered_checkouts();
+    first.write("devslot.local.toml", FORCE_SHARED_PORT);
+    second.write("devslot.local.toml", FORCE_SHARED_PORT);
+    second.git(&["add", "devslot.local.toml"]);
+
+    let run = first.doctor(&["doctor", "--json"]);
+
+    assert!(!finding_checks(&json_of(&run)).contains(&"forced_port_shared".to_owned()));
+}

@@ -10,10 +10,10 @@ use crate::cli::render::{render_kept_worktrees, render_list_text};
 use crate::commands::info::info_port;
 use crate::commands::machine::Machine;
 use crate::compose::runner::{ComposeRunner, DockerRunner};
-use crate::effective_port::{effective_ports, untracked_settings};
+use crate::effective_port::{effective_ports, read_forcing_settings};
 use crate::error::ToolError;
 use crate::kept_worktrees;
-use crate::project_config::{EnvSetting, ProjectConfig};
+use crate::project_config::EnvSetting;
 use crate::registry::record::{InstanceRecord, Registry};
 use crate::report::{ListReport, ListedInstance, REPORT_VERSION};
 
@@ -46,14 +46,6 @@ fn render(report: &ListReport, registry: &Registry, as_json: bool) -> Result<Str
         .map_err(|error| ToolError::WriteReport(std::io::Error::other(error)))?;
     json.push('\n');
     Ok(json)
-}
-
-/// The `[env]` entries of the `devslot.local.toml` of `instance`. A missing
-/// folder or file, an unreadable, oversized, malformed or git-tracked file gives none: the
-/// listing then shows the allocated ports.
-fn read_forcing_settings(instance: &InstanceRecord) -> Vec<EnvSetting> {
-    let settings = ProjectConfig::read_local_env(&instance.path).unwrap_or_default();
-    untracked_settings(&instance.path, instance, settings)
 }
 
 /// The report of the registry; `running` holds the names of the compose
