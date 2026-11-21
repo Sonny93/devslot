@@ -9,11 +9,14 @@ use crate::cli::exit_code;
 use crate::cli::render::render_findings;
 use crate::cli::style::Style;
 use crate::commands::machine::Machine;
+use crate::compose::selection::{DevComposeSelection, select_dev_compose};
 use crate::deadline::Deadline;
 use crate::docker::{DOCKER_TIMEOUT, DockerCompose, docker_program};
+use crate::ensure_cache::{Fingerprint, discovery_stamp_path, write_discovery_stamp};
 use crate::error::ToolError;
 use crate::global_config::GlobalConfig;
 use crate::port_probe::SystemPortProbe;
+use crate::project_config::ProjectConfig;
 use crate::registration::{
     Intent, Refusal, Registration, RegistrationContext, RegistrationOutcome, register,
 };
@@ -33,7 +36,10 @@ pub fn register_checkout(
 }
 
 /// Like [`register_checkout`], with `probe_timeout` for each compose probe,
-/// both clamped to the `deadline` when there is one.
+/// both clamped to the `deadline` when there is one. A successful registration
+/// stamps what port discovery read, so `ds ensure` knows the registry is not
+/// behind those files; the stamp is taken before the registration, so a file
+/// edited during the probe triggers another refresh instead of being missed.
 pub fn register_checkout_within(
     checkout: &Checkout,
     machine: &Machine,
@@ -41,9 +47,10 @@ pub fn register_checkout_within(
     intent: Intent,
     (probe_timeout, deadline): (Duration, Option<Deadline>),
 ) -> Result<RegistrationOutcome, ToolError> {
+    let stamp = discovery_fingerprint_of(checkout);
     let compose =
         DockerCompose::new(docker_program(), &checkout.root, probe_timeout).with_deadline(deadline);
-    register(&RegistrationContext {
+    let outcome = register(&RegistrationContext {
         checkout,
         compose: &compose,
         store: &machine.store,
@@ -52,7 +59,25 @@ pub fn register_checkout_within(
         lock_timeout: LOCK_TIMEOUT,
         deadline,
         intent,
-    })
+    })?;
+    if let (RegistrationOutcome::Registered(_), Some(stamp)) = (&outcome, &stamp) {
+        let file = discovery_stamp_path(machine.paths.state_directory(), &checkout.root);
+        let _ = write_discovery_stamp(&file, stamp);
+    }
+    Ok(outcome)
+}
+
+/// What port discovery reads in `checkout`, or `None` when it has no dev
+/// compose file or its configuration cannot be read (registration refuses
+/// then, and nothing is stamped).
+fn discovery_fingerprint_of(checkout: &Checkout) -> Option<Fingerprint> {
+    let config = ProjectConfig::load(&checkout.root).ok()?;
+    let DevComposeSelection::Selected(dev_file) =
+        select_dev_compose(&checkout.root, config.compose_file.as_deref())
+    else {
+        return None;
+    };
+    Some(Fingerprint::of_discovery(&checkout.root, &dev_file))
 }
 
 /// The registration, or the exit code to return: a refusal is told to the

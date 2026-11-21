@@ -1275,3 +1275,225 @@ fn should_refuse_to_write_the_block_and_stay_silent_on_repeat_when_git_tracks_a_
     assert_eq!((second.status, second.stderr.as_str()), (0, ""));
     assert_eq!(project.read(".env"), env_before);
 }
+
+fn fixtures_with_new_compose_port() -> tempfile::TempDir {
+    let fixtures = tempfile::tempdir().unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/template/docker");
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), fixtures.path().join(entry.file_name())).unwrap();
+    }
+    let variables_file = fixtures.path().join("dev.compose.yml.variables.json");
+    let mut variables: Value =
+        serde_json::from_str(&std::fs::read_to_string(&variables_file).unwrap()).unwrap();
+    variables["NEW_PORT"] = serde_json::json!({
+        "Name": "NEW_PORT",
+        "DefaultValue": "6000",
+        "PresenceValue": "6000",
+        "Required": false
+    });
+    std::fs::write(&variables_file, variables.to_string()).unwrap();
+    let config_file = fixtures.path().join("dev.compose.yml.config.json");
+    let mut config: Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_file).unwrap()).unwrap();
+    config["services"]["cache"] = serde_json::json!({
+        "image": "redis:8",
+        "ports": [{ "mode": "ingress", "target": 6000, "published": "61001", "protocol": "tcp" }]
+    });
+    std::fs::write(&config_file, config.to_string()).unwrap();
+    fixtures
+}
+
+fn gain_new_compose_port(project: &Project) -> tempfile::TempDir {
+    let compose = project.read("dev.compose.yml");
+    project.write("dev.compose.yml", &format!("{compose}# NEW_PORT\n"));
+    fixtures_with_new_compose_port()
+}
+
+fn with_fixtures(fixtures: &tempfile::TempDir) -> [(&'static str, &str); 1] {
+    [("DOCKER_FAKE_FIXTURES", fixtures.path().to_str().unwrap())]
+}
+
+fn block_value(project: &Project, name: &str) -> Option<String> {
+    project
+        .read(".env")
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{name}=")).map(str::to_owned))
+}
+
+fn touch(project: &Project, relative: &str) {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(project.path().join(relative))
+        .unwrap();
+    file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+        .unwrap();
+}
+
+fn ensure_without_docker(project: &Project, fixtures: &tempfile::TempDir) -> support::Run {
+    project.run_with(
+        &["ensure"],
+        &[
+            ("DEVSLOT_DOCKER", "/does/not/exist"),
+            ("DOCKER_FAKE_FIXTURES", fixtures.path().to_str().unwrap()),
+        ],
+    )
+}
+
+#[test]
+fn should_allocate_the_new_compose_port_inside_the_slot_when_ensure_runs_after_the_compose_gained_it()
+ {
+    let project = git_project();
+    project.run(&["ensure"]);
+    let ports_before = environment_of(&project);
+    let fixtures = gain_new_compose_port(&project);
+
+    let run = project.run_with(&["ensure"], &with_fixtures(&fixtures));
+
+    let environment = environment_of(&project);
+    let new_port: u16 = block_value(&project, "NEW_PORT").unwrap().parse().unwrap();
+    let slot_first_port = 14000 + 10 * environment["DEVSLOT_SLOT"].parse::<u16>().unwrap();
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!((slot_first_port..slot_first_port + 10).contains(&new_port));
+    for (name, value) in ports_before
+        .iter()
+        .filter(|(name, _)| name.ends_with("PORT"))
+    {
+        assert_eq!(&environment[name], value);
+    }
+}
+
+#[test]
+fn should_make_no_docker_call_on_the_ensure_after_the_one_that_allocated_the_new_compose_port() {
+    let project = git_project();
+    project.run(&["ensure"]);
+    let fixtures = gain_new_compose_port(&project);
+    project.run_with(&["ensure"], &with_fixtures(&fixtures));
+    project.machine().clear_docker_log();
+
+    let second = ensure_without_docker(&project, &fixtures);
+
+    assert_eq!(second.status, 0, "{}", second.stderr);
+    assert_eq!(second.stderr, "");
+    assert_eq!(project.machine().docker_log(), Vec::<String>::new());
+}
+
+#[test]
+fn should_make_no_docker_call_in_ensure_when_a_run_registered_the_new_compose_port() {
+    let project = git_project();
+    project.run(&["ensure"]);
+    let fixtures = gain_new_compose_port(&project);
+    let run = project.run_with(&["run", "--", "true"], &with_fixtures(&fixtures));
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    project.machine().clear_docker_log();
+
+    let ensure = ensure_without_docker(&project, &fixtures);
+
+    assert_eq!(ensure.status, 0, "{}", ensure.stderr);
+    assert_eq!(ensure.stderr, "");
+    assert_eq!(project.machine().docker_log(), Vec::<String>::new());
+}
+
+#[test]
+fn should_leave_the_neighbour_entry_untouched_when_ensure_allocates_a_new_compose_port() {
+    let machine = Machine::with_test_slots();
+    let project = Project::from_scenario_on(&machine, "template");
+    let neighbour = Project::from_scenario_on(&machine, "template");
+    project.initialize_git(".env\n");
+    neighbour.initialize_git(".env\n");
+    project.run(&["ensure"]);
+    neighbour.run(&["ensure"]);
+    let before = machine.read_registry();
+    let fixtures = gain_new_compose_port(&project);
+
+    let run = project.run_with(&["ensure"], &with_fixtures(&fixtures));
+
+    let after = machine.read_registry();
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_ne!(
+        entry_of(&after, &canonical(&project)),
+        entry_of(&before, &canonical(&project))
+    );
+    assert_eq!(
+        entry_of(&after, &canonical(&neighbour)),
+        entry_of(&before, &canonical(&neighbour))
+    );
+}
+
+#[test]
+fn should_allocate_port_when_ensure_runs_after_the_env_example_gained_it() {
+    let project = git_project();
+    project.write(
+        ".env",
+        "DB_HOST=localhost\nDB_PORT=5432\nDB_USER=root\nDB_PASSWORD=FAKE\nDB_DATABASE=app\n",
+    );
+    project.run(&["ensure"]);
+    assert_eq!(block_value(&project, "PORT"), None);
+    project.write(".env.example", "PORT=3000\n");
+
+    let run = project.run(&["ensure"]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(block_value(&project, "PORT").is_some());
+}
+
+#[test]
+fn should_probe_once_then_stay_silent_when_the_discovery_stamp_is_missing() {
+    let project = git_project();
+    project.run(&["ensure"]);
+    let stamp = devslot::ensure_cache::discovery_stamp_path(
+        &project.machine().state_directory(),
+        &canonical(&project),
+    );
+    assert!(stamp.exists());
+    std::fs::remove_file(&stamp).unwrap();
+
+    let first = project.run(&["ensure"]);
+    project.machine().clear_docker_log();
+    let second = project.run_with(&["ensure"], &[("DEVSLOT_DOCKER", "/does/not/exist")]);
+
+    assert_eq!(first.status, 0, "{}", first.stderr);
+    assert!(stamp.exists());
+    assert_eq!(second.status, 0, "{}", second.stderr);
+    assert_eq!(second.stderr, "");
+    assert_eq!(project.machine().docker_log(), Vec::<String>::new());
+}
+
+#[test]
+fn should_stay_silent_when_the_refresh_changes_nothing_on_a_project_with_a_standing_warning() {
+    let project = git_project();
+    project.write(".env.example", "DEVSLOT_HOST=example.test\n");
+    let first = project.run(&["ensure"]);
+    assert!(first.stderr.contains("report warnings"), "{}", first.stderr);
+    touch(&project, "dev.compose.yml");
+
+    let second = project.run(&["ensure"]);
+
+    assert_eq!(second.status, 0, "{}", second.stderr);
+    assert_eq!(second.stderr, "");
+}
+
+#[test]
+fn should_rewrite_the_block_and_report_the_refusal_once_when_the_refresh_is_refused() {
+    let project = git_project();
+    project.run(&["ensure"]);
+    let fixtures = fixtures_with_container_name();
+    let compose = project.read("dev.compose.yml");
+    project.write("dev.compose.yml", &format!("{compose}# container_name\n"));
+    project.write(".env", FAKE_ENV);
+
+    let first = project.run_with(&["ensure"], &with_fixtures(&fixtures));
+    let second = project.run_with(&["ensure"], &with_fixtures(&fixtures));
+
+    assert_eq!(first.status, 1, "{}", first.stderr);
+    assert!(first.stderr.contains("container_name"));
+    assert!(
+        first
+            .stderr
+            .contains("did not refresh the registration of this checkout")
+    );
+    assert!(!first.stderr.contains("did not register this checkout"));
+    assert!(project.read(".env").contains("COMPOSE_PROJECT_NAME="));
+    assert_eq!(second.status, 0, "{}", second.stderr);
+    assert_eq!(second.stderr, "");
+}

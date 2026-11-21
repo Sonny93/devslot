@@ -21,8 +21,9 @@ use crate::commands::registering::{
 use crate::compose::selection::{DevComposeSelection, select_dev_compose};
 use crate::deadline::{BudgetExhausted, Deadline};
 use crate::ensure_cache::{
-    CacheEntry, Fingerprint, Flight, entry_path, locate_entry_path, read_entry,
-    remove_budget_entry, remove_entry, try_take_flight, write_entry,
+    CacheEntry, Fingerprint, Flight, discovery_stamp_path, entry_path, locate_entry_path,
+    read_discovery_stamp, read_entry, remove_budget_entry, remove_entry, try_take_flight,
+    write_entry,
 };
 use crate::env_sync::{BlockTarget, EnvSyncError, expected_text, write_block, write_blockers};
 use crate::environment::EnvironmentError;
@@ -30,7 +31,9 @@ use crate::error::ToolError;
 use crate::global_config::{GlobalConfig, effective_write_enabled, home_from_environment};
 use crate::project::env_file::{EnvContent, read_env, remove_temp_files_older_than};
 use crate::project_config::ProjectConfig;
-use crate::registration::{Intent, Refusal, RegistrationOutcome, lock_wait};
+use crate::registration::{
+    Intent, Refusal, Registration, RegistrationChange, RegistrationOutcome, lock_wait,
+};
 use crate::registry::RegistryError;
 use crate::registry::record::InstanceRecord;
 use crate::registry::store::RegistryStore;
@@ -42,6 +45,8 @@ const UNREGISTERED_CLOSING_LINE: &str =
     "ds ensure did not register this checkout until the errors are fixed";
 const REGISTERED_CLOSING_LINE: &str =
     "ds ensure did not write the devslot block until the errors are fixed";
+const REFRESH_CLOSING_LINE: &str =
+    "ds ensure did not refresh the registration of this checkout until the errors are fixed";
 
 /// What the locked write of a registered checkout did.
 #[derive(Debug)]
@@ -232,6 +237,10 @@ fn is_required_main_checkout(
     Ok(!is_local_switch_effective(&checkout.root, None)?)
 }
 
+/// A registered checkout: refreshes the registration when the files port
+/// discovery reads changed since the last registration, then repairs the
+/// block from the registry. A refresh that cannot finish does not stop the
+/// repair: its outcome is reported once the block is written.
 fn ensure_registered(
     (checkout, machine, global): (&Checkout, &Machine, &GlobalConfig),
     (instance, dev_file): (&InstanceRecord, &str),
@@ -239,21 +248,70 @@ fn ensure_registered(
 ) -> Result<EnsureResult, ToolError> {
     remove_temp_files_older_than(&checkout.root, STALE_TEMP_AGE).map_err(EnvSyncError::from)?;
     let config = ProjectConfig::load(&checkout.root)?;
-    let state = if effective_write_enabled(&config, global) {
+    let is_writing = effective_write_enabled(&config, global);
+    let step = if is_writing {
+        refresh_discovery((checkout, machine, global), dev_file, (style, deadline))
+    } else {
+        DiscoveryStep::Skipped
+    };
+    let failure = match step {
+        DiscoveryStep::Finished(result) => return Ok(result),
+        DiscoveryStep::Failed(failure) => Some(failure),
+        DiscoveryStep::Skipped => None,
+    };
+    let state = if is_writing {
         env_state(checkout, instance, &config)?
     } else {
         EnvState::Current
     };
     if state == EnvState::Current {
+        return finish_current(failure, machine, checkout);
+    }
+    let repaired = repair_block(
+        (checkout, machine, global),
+        (instance, dev_file),
+        (style, deadline),
+        (state, failure.as_ref()),
+    );
+    settle(failure, repaired, (machine, checkout, dev_file))
+}
+
+/// The block is current: silent, unless a refresh failed in this call.
+fn finish_current(
+    failure: Option<FailedRefresh>,
+    machine: &Machine,
+    checkout: &Checkout,
+) -> Result<EnsureResult, ToolError> {
+    let Some(failure) = failure else {
         remove_budget_entry(&entry_path(machine.paths.state_directory(), &checkout.root));
         return Ok(EnsureResult::Silent);
-    }
+    };
+    failure.report
+}
+
+/// Rewrites the block of a registered checkout from the registry. After a
+/// failed refresh in the same call, the refusal cache is not consulted: the
+/// entry that would silence the write is the one that refresh just saved.
+fn repair_block(
+    (checkout, machine, global): (&Checkout, &Machine, &GlobalConfig),
+    (instance, dev_file): (&InstanceRecord, &str),
+    (style, deadline): (Style, Option<Deadline>),
+    (state, failure): (EnvState, Option<&FailedRefresh>),
+) -> Result<EnsureResult, ToolError> {
     let cache = RefusalCache::of(machine, checkout, dev_file);
-    if cache.is_silent() {
+    if failure.is_none() && cache.is_silent() {
         return Ok(EnsureResult::Silent);
     }
     if state == EnvState::RegistryBehind {
-        return refresh_registration((checkout, machine, global), &cache, (style, deadline));
+        if failure.is_some() {
+            return Ok(EnsureResult::Silent);
+        }
+        return refresh_registration(
+            (checkout, machine, global),
+            &cache,
+            (style, deadline),
+            REFRESH_CLOSING_LINE,
+        );
     }
     let flight = try_take_flight(machine.paths.state_directory(), &checkout.root);
     if matches!(flight, Flight::Busy) {
@@ -265,6 +323,123 @@ fn ensure_registered(
         (style, deadline),
     );
     cache.absorb_budget(result)
+}
+
+/// What the refresh of the registration for changed discovery inputs did.
+enum DiscoveryStep {
+    /// Nothing to refresh, or it could not start (silenced by the refusal
+    /// cache, or another `ds ensure` is registering): go on with the block.
+    Skipped,
+    /// The registration was refreshed: this is the answer of the whole call.
+    Finished(EnsureResult),
+    /// The refresh did not finish: go on with the block, then report it.
+    Failed(FailedRefresh),
+}
+
+/// A refresh that did not finish, held while the block is repaired.
+struct FailedRefresh {
+    /// What to tell the caller once the block is repaired.
+    report: Result<EnsureResult, ToolError>,
+    /// What the refresh left in the refusal cache, to keep it valid after the
+    /// block write changed `.env`.
+    entry: Option<CacheEntry>,
+}
+
+/// Refreshes the registration when the files port discovery reads differ from
+/// the stamp of the last registration (or there is none), so a port the
+/// compose file gained is allocated before `ds up`. Under the single flight
+/// of the checkout, with the compose probe inside the hook budget. Without a
+/// usable state directory nothing could be remembered, so no refresh runs.
+fn refresh_discovery(
+    (checkout, machine, global): (&Checkout, &Machine, &GlobalConfig),
+    dev_file: &str,
+    (style, deadline): (Style, Option<Deadline>),
+) -> DiscoveryStep {
+    let state_directory = machine.paths.state_directory();
+    let current = Fingerprint::of_discovery(&checkout.root, dev_file);
+    let stamp = read_discovery_stamp(&discovery_stamp_path(state_directory, &checkout.root));
+    if stamp.as_ref() == Some(&current) {
+        return DiscoveryStep::Skipped;
+    }
+    let cache = RefusalCache::of(machine, checkout, dev_file);
+    if cache.is_silent() {
+        return DiscoveryStep::Skipped;
+    }
+    let flight = try_take_flight(state_directory, &checkout.root);
+    if matches!(flight, Flight::Busy | Flight::Unavailable) {
+        return DiscoveryStep::Skipped;
+    }
+    let outcome = register_within_budget((checkout, machine, global), deadline);
+    discovery_step_of(outcome, &cache, (machine, style))
+}
+
+fn discovery_step_of(
+    outcome: Result<RegistrationOutcome, ToolError>,
+    cache: &RefusalCache,
+    (machine, style): (&Machine, Style),
+) -> DiscoveryStep {
+    if let Ok(RegistrationOutcome::Registered(registration)) = outcome {
+        cache.clear();
+        return DiscoveryStep::Finished(refreshed_result(registration, style));
+    }
+    let report = cache.absorb_budget(registration_result(
+        outcome,
+        cache,
+        (machine, style),
+        REFRESH_CLOSING_LINE,
+    ));
+    if report.is_err() {
+        cache.remember_failure();
+    }
+    DiscoveryStep::Failed(FailedRefresh {
+        report,
+        entry: read_entry(&cache.file),
+    })
+}
+
+/// A refresh that changed nothing in `.env` is silent, the warnings of the
+/// checks included: they were reported when the checkout was registered.
+fn refreshed_result(registration: Registration, style: Style) -> EnsureResult {
+    let is_unchanged =
+        registration.env_lines.is_empty() && registration.change != RegistrationChange::Created;
+    if is_unchanged {
+        return EnsureResult::Silent;
+    }
+    EnsureResult::Done {
+        lines: announcement_lines(&registration, style),
+        instance: registration.instance,
+    }
+}
+
+/// Reports a refresh that failed once the block is repaired, and keeps what it
+/// left in the refusal cache valid for the new `.env`, so the next call is
+/// silent. A refused write wins over the refresh: its own cache entry stays.
+fn settle(
+    failure: Option<FailedRefresh>,
+    repaired: Result<EnsureResult, ToolError>,
+    (machine, checkout, dev_file): (&Machine, &Checkout, &str),
+) -> Result<EnsureResult, ToolError> {
+    let Some(failure) = failure else {
+        return repaired;
+    };
+    let repaired = repaired?;
+    if !matches!(repaired, EnsureResult::Refused { .. })
+        && let Some(entry) = &failure.entry
+    {
+        RefusalCache::of(machine, checkout, dev_file).keep(entry);
+    }
+    Ok(merge_reports(failure.report?, repaired))
+}
+
+fn merge_reports(reported: EnsureResult, repaired: EnsureResult) -> EnsureResult {
+    let EnsureResult::Refused { mut lines } = reported else {
+        return repaired;
+    };
+    lines.extend(match repaired {
+        EnsureResult::Silent => Vec::new(),
+        EnsureResult::Done { lines, .. } | EnsureResult::Refused { lines } => lines,
+    });
+    EnsureResult::Refused { lines }
 }
 
 /// How the `.env` block of a registered checkout compares with what its
@@ -427,7 +602,12 @@ fn ensure_unregistered(
     if cache.is_silent() {
         return Ok(EnsureResult::Silent);
     }
-    refresh_registration((checkout, machine, global), &cache, (style, deadline))
+    refresh_registration(
+        (checkout, machine, global),
+        &cache,
+        (style, deadline),
+        UNREGISTERED_CLOSING_LINE,
+    )
 }
 
 /// Registers the checkout again (or for the first time) under the single
@@ -437,26 +617,40 @@ fn refresh_registration(
     (checkout, machine, global): (&Checkout, &Machine, &GlobalConfig),
     cache: &RefusalCache,
     (style, deadline): (Style, Option<Deadline>),
+    closing_line: &str,
 ) -> Result<EnsureResult, ToolError> {
     let flight = try_take_flight(machine.paths.state_directory(), &checkout.root);
     if matches!(flight, Flight::Busy) {
         return Ok(EnsureResult::Silent);
     }
-    let outcome = register_checkout_within(
+    let outcome = register_within_budget((checkout, machine, global), deadline);
+    cache.absorb_budget(registration_result(
+        outcome,
+        cache,
+        (machine, style),
+        closing_line,
+    ))
+}
+
+fn register_within_budget(
+    (checkout, machine, global): (&Checkout, &Machine, &GlobalConfig),
+    deadline: Option<Deadline>,
+) -> Result<RegistrationOutcome, ToolError> {
+    register_checkout_within(
         checkout,
         machine,
         global,
         Intent::Automatic,
         (PROBE_TIMEOUT, deadline),
     )
-    .map_err(|error| lock_timeout_as_budget(error, deadline));
-    cache.absorb_budget(registration_result(outcome, cache, (machine, style)))
+    .map_err(|error| lock_timeout_as_budget(error, deadline))
 }
 
 fn registration_result(
     outcome: Result<RegistrationOutcome, ToolError>,
     cache: &RefusalCache,
     (machine, style): (&Machine, Style),
+    closing_line: &str,
 ) -> Result<EnsureResult, ToolError> {
     match outcome {
         Ok(RegistrationOutcome::Registered(registration)) => {
@@ -472,10 +666,10 @@ fn registration_result(
         }
         Ok(RegistrationOutcome::SkippedOptedOut) => Ok(EnsureResult::Silent),
         Ok(RegistrationOutcome::Refused(refusal)) => {
-            Ok(cache.refuse(&refusal, machine, style, UNREGISTERED_CLOSING_LINE))
+            Ok(cache.refuse(&refusal, machine, style, closing_line))
         }
         Err(error @ ToolError::Docker(_)) if !error.is_budget_exhausted() => {
-            cache.remember_docker_failure();
+            cache.remember_failure();
             Err(error)
         }
         Err(error) => refuse_or_fail(&error, cache, (machine, style)).ok_or(error),
@@ -556,6 +750,14 @@ impl RefusalCache {
         }
     }
 
+    /// Saves `entry` again under the fingerprint taken now.
+    fn keep(&self, entry: &CacheEntry) {
+        self.save(&CacheEntry {
+            fingerprint: self.fingerprint.clone(),
+            ..entry.clone()
+        });
+    }
+
     fn remember_budget_exhaustion(&self) {
         let previous = read_entry(&self.file);
         self.save(&CacheEntry::budget_exhaustion(
@@ -580,7 +782,7 @@ impl RefusalCache {
         }
     }
 
-    fn remember_docker_failure(&self) {
+    fn remember_failure(&self) {
         self.save(&CacheEntry::docker_failure(
             self.fingerprint.clone(),
             SystemTime::now(),
@@ -705,6 +907,11 @@ mod tests {
             })
             .unwrap();
             assert!(matches!(outcome, RegistrationOutcome::Registered(_)));
+            crate::ensure_cache::write_discovery_stamp(
+                &discovery_stamp_path(self.paths().state_directory(), &checkout.root),
+                &Fingerprint::of_discovery(&checkout.root, "dev.compose.yml"),
+            )
+            .unwrap();
         }
 
         fn ensure(&self) -> EnsureOutcome {
@@ -903,6 +1110,28 @@ mod tests {
         fixture.ensure_registered_within(Deadline::starting_now(exhausted));
 
         assert_eq!(fixture.budget_streak(), Some(2));
+    }
+
+    #[test]
+    fn should_silence_the_next_calls_and_keep_the_error_when_the_refresh_fails_for_another_reason()
+    {
+        let fixture = Fixture::new();
+        fixture.register();
+        let machine = Machine {
+            paths: fixture.paths(),
+            store: fixture.store(),
+        };
+        let checkout = fixture.checkout();
+        let cache = RefusalCache::of(&machine, &checkout, "dev.compose.yml");
+        let failure = ToolError::CurrentDirectory(std::io::Error::other("unreadable"));
+
+        let step = discovery_step_of(Err(failure), &cache, (&machine, Style { color: false }));
+
+        assert!(matches!(
+            step,
+            DiscoveryStep::Failed(FailedRefresh { report: Err(_), .. })
+        ));
+        assert!(RefusalCache::of(&machine, &checkout, "dev.compose.yml").is_silent());
     }
 
     #[test]

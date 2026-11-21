@@ -48,6 +48,7 @@ const KEY_BYTES: usize = 8;
 const EXPIRY_PREFIX: &str = "expires_at=";
 const STREAK_PREFIX: &str = "budget_streak=";
 const MISSING_STAMP: &str = "missing";
+const DISCOVERED_EXTENSION: &str = "discovered";
 const WATCHED_FILES: [&str; 5] = [
     ".env",
     ".env.example",
@@ -55,6 +56,8 @@ const WATCHED_FILES: [&str; 5] = [
     LOCAL_CONFIG_FILE,
     ".gitignore",
 ];
+
+const DISCOVERY_FILES: [&str; 3] = [CONFIG_FILE, LOCAL_CONFIG_FILE, ".env.example"];
 
 /// The state of the files a registration depends on: for each, its name, size
 /// and modification time in nanoseconds, or "missing".
@@ -83,10 +86,34 @@ impl Fingerprint {
         }
     }
 
+    /// The files the discovery of the ports reads: the dev compose file, its
+    /// overrides, the two configuration files and `.env.example`. `.env` is
+    /// left out (the block writes rewrite it) and so is `.gitignore`.
+    pub fn of_discovery(root: &Path, dev_compose: &str) -> Self {
+        let names = std::iter::once(dev_compose.to_owned())
+            .chain(existing_overrides(root))
+            .chain(DISCOVERY_FILES.iter().map(|name| (*name).to_owned()));
+        Self {
+            lines: names
+                .map(|name| format!("{name} {}", stamp_of(&root.join(&name))))
+                .collect(),
+        }
+    }
+
     /// The fingerprint of an entry that depends on no file, such as the one of
     /// a folder whose checkout could not even be located.
     pub const fn none() -> Self {
         Self { lines: Vec::new() }
+    }
+
+    fn to_text(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    fn from_text(text: &str) -> Self {
+        Self {
+            lines: text.lines().map(str::to_owned).collect(),
+        }
     }
 
     #[cfg(test)]
@@ -132,7 +159,7 @@ impl CacheEntry {
         }
     }
 
-    /// A Docker failure at `now`.
+    /// A Docker failure, or another failure that is not a refusal, at `now`.
     pub fn docker_failure(fingerprint: Fingerprint, now: SystemTime) -> Self {
         Self::expiring(fingerprint, now, DOCKER_FAILURE_LIFETIME)
     }
@@ -309,13 +336,42 @@ pub fn read_entry(path: &Path) -> Option<CacheEntry> {
 
 /// Writes the entry atomically: a temporary file, then a rename.
 pub fn write_entry(path: &Path, entry: &CacheEntry) -> std::io::Result<()> {
+    write_text_atomically(path, &entry.to_text())
+}
+
+fn write_text_atomically(path: &Path, text: &str) -> std::io::Result<()> {
     let directory = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(directory)?;
-    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut temp_name = path.as_os_str().to_owned();
+    temp_name.push(format!(".{TEMP_EXTENSION_PREFIX}{}", std::process::id()));
+    let temp = PathBuf::from(temp_name);
     let mut file = std::fs::File::create(&temp)?;
-    file.write_all(entry.to_text().as_bytes())?;
+    file.write_all(text.as_bytes())?;
     file.sync_all()?;
     std::fs::rename(&temp, path)
+}
+
+/// Where the discovery stamp of the checkout at `root` lives: the
+/// [`Fingerprint::of_discovery`] it had when it was last registered.
+pub fn discovery_stamp_path(state_directory: &Path, root: &Path) -> PathBuf {
+    entry_path(state_directory, root).with_extension(DISCOVERED_EXTENSION)
+}
+
+/// The discovery stamp at `path`; `None` when it is missing or cannot be read.
+pub fn read_discovery_stamp(path: &Path) -> Option<Fingerprint> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| Fingerprint::from_text(&text))
+}
+
+/// Writes the discovery stamp atomically.
+///
+/// The stamp and the registry are written by different steps, so two
+/// concurrent registrations can leave a stamp that does not match the last
+/// registry write. That is harmless: `allocate_known` never drops a port, so
+/// the worst case is one more refresh, never a lost allocation.
+pub fn write_discovery_stamp(path: &Path, stamp: &Fingerprint) -> std::io::Result<()> {
+    write_text_atomically(path, &stamp.to_text())
 }
 
 /// Deletes the entry; a missing one is fine.
@@ -331,11 +387,12 @@ pub fn remove_budget_entry(path: &Path) {
     }
 }
 
-/// Deletes the entry and the lock file of the checkout at `root`, for a
-/// checkout whose instance is gone. Best effort: a failure is ignored.
+/// Deletes the entry, the lock file and the discovery stamp of the checkout at
+/// `root`, for a checkout whose instance is gone. Best effort: a failure is ignored.
 pub fn remove_checkout_entries(state_directory: &Path, root: &Path) {
     let entry = entry_path(state_directory, root);
     remove_entry(&entry.with_extension(LOCK_EXTENSION));
+    remove_entry(&entry.with_extension(DISCOVERED_EXTENSION));
     remove_entry(&entry);
 }
 
@@ -567,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn should_remove_the_entry_and_the_lock_of_a_checkout_and_keep_its_neighbour() {
+    fn should_remove_the_entry_the_lock_and_the_stamp_of_a_checkout_and_keep_its_neighbour() {
         let state = tempfile::tempdir().unwrap();
         let gone = Path::new("/work/gone");
         let neighbour = Path::new("/work/neighbour");
@@ -577,6 +634,8 @@ mod tests {
                 &CacheEntry::refusal(fingerprint()),
             )
             .unwrap();
+            write_discovery_stamp(&discovery_stamp_path(state.path(), root), &fingerprint())
+                .unwrap();
             drop(try_take_flight(state.path(), root));
         }
 
@@ -586,8 +645,52 @@ mod tests {
         let neighbour_entry = entry_path(state.path(), neighbour);
         assert!(!gone_entry.exists());
         assert!(!gone_entry.with_extension("lock").exists());
+        assert!(!discovery_stamp_path(state.path(), gone).exists());
         assert!(neighbour_entry.exists());
         assert!(neighbour_entry.with_extension("lock").exists());
+        assert!(discovery_stamp_path(state.path(), neighbour).exists());
+    }
+
+    #[test]
+    fn should_read_back_the_stamp_that_was_written() {
+        let state = tempfile::tempdir().unwrap();
+        let file = discovery_stamp_path(state.path(), Path::new("/work/one"));
+
+        write_discovery_stamp(&file, &fingerprint()).unwrap();
+
+        assert_eq!(read_discovery_stamp(&file), Some(fingerprint()));
+    }
+
+    #[test]
+    fn should_not_see_the_env_or_the_gitignore_in_the_discovery_fingerprint() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("dev.compose.yml"), "a").unwrap();
+        let before = Fingerprint::of_discovery(root.path(), "dev.compose.yml");
+
+        std::fs::write(root.path().join(".env"), "A=1\n").unwrap();
+        std::fs::write(root.path().join(".gitignore"), ".env\n").unwrap();
+
+        assert_eq!(
+            before,
+            Fingerprint::of_discovery(root.path(), "dev.compose.yml")
+        );
+    }
+
+    #[test]
+    fn should_see_an_example_a_local_config_and_an_override_in_the_discovery_fingerprint() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("dev.compose.yml"), "a").unwrap();
+        for name in [".env.example", "devslot.local.toml", "compose.override.yml"] {
+            let before = Fingerprint::of_discovery(root.path(), "dev.compose.yml");
+
+            std::fs::write(root.path().join(name), "A=1\n").unwrap();
+
+            assert_ne!(
+                before,
+                Fingerprint::of_discovery(root.path(), "dev.compose.yml"),
+                "{name}"
+            );
+        }
     }
 
     #[test]
