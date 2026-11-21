@@ -20,7 +20,7 @@ v1 is in development and nothing is released.
 
 **Non-goals.**
 - Production or remote deployment: devslot is a dev tool.
-- Services shared between instances, background processes and the Tunneler integration (planned after v1). A host per instance (`<name>.localhost`) exists, opt-in through `[web] port`; named URLs through a proxy do not.
+- Services shared between instances and background processes. A host per instance (`<name>.localhost`) exists, opt-in through `[web] port`; named URLs through a proxy do not.
 - Remapping ports written as literals in a compose file: they are reported, not managed.
 - Windows and macOS: the code stays portable, nothing is tested there.
 

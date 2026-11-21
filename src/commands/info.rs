@@ -167,6 +167,7 @@ mod tests {
             ],
             host: "app-3f2a.localhost".to_owned(),
             web_port_variable: web_port_variable.map(str::to_owned),
+            origin: None,
             is_host_unsaved: false,
         }
     }

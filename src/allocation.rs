@@ -157,6 +157,7 @@ pub fn allocate_new(
             range,
             ports,
             web_port_variable: None,
+            origin: None,
             is_host_unsaved: false,
         });
     }
@@ -250,6 +251,7 @@ mod tests {
                 .collect(),
             host: format!("name-{slot}-{}.localhost", path.len()),
             web_port_variable: None,
+            origin: None,
             is_host_unsaved: false,
         }
     }

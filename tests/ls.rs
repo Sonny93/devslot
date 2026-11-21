@@ -369,3 +369,73 @@ fn should_list_the_allocated_port_when_git_tracks_the_local_file() {
 
     assert_eq!(listed(&report, &first_name), listed(&before, &first_name));
 }
+
+fn listed_instance(project: &Project, report: &Value) -> Value {
+    let path = project.path().canonicalize().unwrap();
+    report["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|instance| instance["path"] == path.to_str().unwrap())
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn should_give_the_project_and_the_worktree_flag_when_listing_a_main_checkout_and_a_linked_worktree()
+ {
+    let machine = Machine::with_test_slots();
+    let main = Project::from_scenario_on(&machine, "template");
+    main.initialize_git_and_commit(".env\n");
+    let linked = main.add_worktree("feature");
+    for project in [&main, &linked] {
+        let run = project.run(&["run", "--", "true"]);
+        assert_eq!(run.status, 0, "{}", run.stderr);
+    }
+
+    let run = main.run(&["ls", "--json"]);
+
+    let report: Value = serde_json::from_str(&run.stdout).unwrap();
+    let project_name = main
+        .path()
+        .canonicalize()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let main_entry = listed_instance(&main, &report);
+    let linked_entry = listed_instance(&linked, &report);
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(
+        (
+            main_entry["project"].as_str(),
+            main_entry["worktree"].as_bool(),
+            linked_entry["project"].as_str(),
+            linked_entry["worktree"].as_bool()
+        ),
+        (
+            Some(project_name.as_str()),
+            Some(false),
+            Some(project_name.as_str()),
+            Some(true)
+        )
+    );
+}
+
+#[test]
+fn should_give_null_project_and_worktree_when_the_entry_has_no_origin_keys() {
+    let machines = two_instances();
+    machines.machine.strip_origin_from_registry();
+
+    let run = listing(&machines.first, &["ls", "--json"], &[]);
+
+    let report: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    for instance in report["instances"].as_array().unwrap() {
+        assert_eq!(instance["project"], Value::Null);
+        assert_eq!(instance["worktree"], Value::Null);
+        assert_eq!(instance["app_url"], Value::Null);
+    }
+}

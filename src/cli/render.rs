@@ -492,9 +492,12 @@ mod tests {
     fn listed(name: &str, services_running: Option<bool>) -> crate::report::ListedInstance {
         crate::report::ListedInstance {
             name: name.to_owned(),
+            project: None,
             path: format!("/work/{name}"),
+            worktree: None,
             slot: 1,
             host: format!("{name}.localhost"),
+            app_url: None,
             services_running,
             ports: registered_info().ports,
         }

@@ -274,6 +274,7 @@ mod tests {
             ports: vec![port("PORT", 20050), port("DB_PORT", 20052)],
             host: "app.localhost".to_owned(),
             web_port_variable: None,
+            origin: None,
             is_host_unsaved: false,
         }
     }

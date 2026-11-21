@@ -112,17 +112,31 @@ pub enum InfoReport {
     Unregistered(UnregisteredInfo),
 }
 
+/// A service shared between instances. v1 has none, so no value exists; a
+/// later version adds objects to the `shared` array, and a client ignores the
+/// keys it does not know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum SharedService {}
+
 /// One instance in the shape `ds ls --json` prints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ListedInstance {
     /// The instance name, also the compose project name.
     pub name: String,
+    /// The raw repository name, the same for every worktree of a repository;
+    /// `null` for an entry saved before devslot stored it.
+    pub project: Option<String>,
     /// The checkout root.
     pub path: String,
+    /// Whether git counts the checkout as a linked worktree; `null` for an
+    /// entry saved before devslot stored it.
+    pub worktree: Option<bool>,
     /// The slot number.
     pub slot: u32,
     /// The local host name of the instance, `<label>.localhost`.
     pub host: String,
+    /// Where the app opens, as in `ds info --json`; `null` without `[web] port`.
+    pub app_url: Option<String>,
     /// Whether a container of the compose project runs; `null` when Docker
     /// could not tell.
     pub services_running: Option<bool>,
@@ -136,7 +150,7 @@ pub struct ListReport {
     /// The version of this contract.
     pub version: u8,
     /// Services shared between instances: always empty in v1.
-    pub shared: Vec<String>,
+    pub shared: Vec<SharedService>,
     /// Every instance of the machine.
     pub instances: Vec<ListedInstance>,
 }

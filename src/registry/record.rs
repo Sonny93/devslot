@@ -37,6 +37,15 @@ pub struct AssignedPort {
     pub detail: PortDetail,
 }
 
+/// Where a checkout comes from, as git sees it when the checkout is registered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutOrigin {
+    /// The raw repository name, the same for every worktree of a repository.
+    pub project: String,
+    /// Whether git counts the checkout as a linked worktree.
+    pub is_worktree: bool,
+}
+
 /// A registered checkout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceRecord {
@@ -56,6 +65,9 @@ pub struct InstanceRecord {
     /// The variable `[web] port` named when the entry was last saved: the web
     /// port that is opened on `host` instead of `localhost`.
     pub web_port_variable: Option<String>,
+    /// Where the checkout comes from; `None` for an entry saved before devslot
+    /// stored it, or whose keys are unreadable.
+    pub origin: Option<CheckoutOrigin>,
     /// Whether the entry has no host in the file: `host` was computed on
     /// read, and the next registration saves it.
     pub is_host_unsaved: bool,

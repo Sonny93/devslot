@@ -250,7 +250,11 @@ fn ensure_registered(
     let config = ProjectConfig::load(&checkout.root)?;
     let is_writing = effective_write_enabled(&config, global);
     let step = if is_writing {
-        refresh_discovery((checkout, machine, global), dev_file, (style, deadline))
+        refresh_discovery(
+            (checkout, machine, global),
+            (instance, dev_file),
+            (style, deadline),
+        )
     } else {
         DiscoveryStep::Skipped
     };
@@ -347,18 +351,20 @@ struct FailedRefresh {
 
 /// Refreshes the registration when the files port discovery reads differ from
 /// the stamp of the last registration (or there is none), so a port the
-/// compose file gained is allocated before `ds up`. Under the single flight
+/// compose file gained is allocated before `ds up`. An entry saved before
+/// devslot stored where the checkout comes from is refreshed too, whatever
+/// the stamp says, so it learns its origin. Under the single flight
 /// of the checkout, with the compose probe inside the hook budget. Without a
 /// usable state directory nothing could be remembered, so no refresh runs.
 fn refresh_discovery(
     (checkout, machine, global): (&Checkout, &Machine, &GlobalConfig),
-    dev_file: &str,
+    (instance, dev_file): (&InstanceRecord, &str),
     (style, deadline): (Style, Option<Deadline>),
 ) -> DiscoveryStep {
     let state_directory = machine.paths.state_directory();
     let current = Fingerprint::of_discovery(&checkout.root, dev_file);
     let stamp = read_discovery_stamp(&discovery_stamp_path(state_directory, &checkout.root));
-    if stamp.as_ref() == Some(&current) {
+    if stamp.as_ref() == Some(&current) && instance.origin.is_some() {
         return DiscoveryStep::Skipped;
     }
     let cache = RefusalCache::of(machine, checkout, dev_file);

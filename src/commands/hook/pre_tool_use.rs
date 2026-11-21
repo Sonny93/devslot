@@ -210,6 +210,7 @@ mod tests {
             name: "app-3f2a".to_owned(),
             host: "app.localhost".to_owned(),
             web_port_variable: None,
+            origin: None,
             is_host_unsaved: false,
             slot: 1,
             range: PortRange {

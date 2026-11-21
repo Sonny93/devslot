@@ -1460,6 +1460,21 @@ fn should_probe_once_then_stay_silent_when_the_discovery_stamp_is_missing() {
 }
 
 #[test]
+fn should_fill_the_origin_of_an_old_entry_when_ensure_runs_with_a_matching_discovery_stamp() {
+    let project = git_project();
+    project.run(&["ensure"]);
+    project.machine().strip_origin_from_registry();
+
+    let run = project.run(&["ensure"]);
+
+    let registry = project.machine().read_registry();
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(run.stderr, "");
+    assert_eq!(registry.matches("project = ").count(), 1, "{registry}");
+    assert!(registry.contains("worktree = false\n"), "{registry}");
+}
+
+#[test]
 fn should_stay_silent_when_the_refresh_changes_nothing_on_a_project_with_a_standing_warning() {
     let project = git_project();
     project.write(".env.example", "DEVSLOT_HOST=example.test\n");

@@ -12,6 +12,7 @@ use thiserror::Error;
 use crate::deadline::{BudgetExhausted, Deadline, timeout_within};
 use crate::instance_name::repository_name_from_common_dir;
 use crate::process::{CaptureFailure, CapturedOutput, capture_with_timeout};
+use crate::registry::record::CheckoutOrigin;
 
 const GIT_PROGRAM: &str = "git";
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -119,6 +120,43 @@ impl Checkout {
         Ok(repository_name_from_common_dir(Path::new(
             text.trim_end_matches('\n'),
         )))
+    }
+
+    /// Where the checkout comes from: the repository name and whether git
+    /// counts it as a linked worktree, from one git call. Outside git, the
+    /// name of the folder and not a worktree.
+    pub fn origin(&self) -> Result<CheckoutOrigin, CheckoutError> {
+        if !self.is_git {
+            return Ok(CheckoutOrigin {
+                project: folder_name(&self.root),
+                is_worktree: false,
+            });
+        }
+        let output = run_git(
+            &self.root,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-dir",
+                "--git-common-dir",
+            ],
+            self.deadline,
+        )?;
+        if !output.status.success() {
+            return Err(git_failure("rev-parse", &output));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut lines = text.lines();
+        let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
+            return Err(CheckoutError::GitFailed {
+                command: "rev-parse",
+                reason: "no git directory in its output".to_owned(),
+            });
+        };
+        Ok(CheckoutOrigin {
+            project: repository_name_from_common_dir(Path::new(common_dir)),
+            is_worktree: git_dir != common_dir,
+        })
     }
 
     /// Whether git tracks `file`, given relative to the root. Only meaningful
@@ -437,6 +475,67 @@ mod tests {
         assert_eq!(
             checkout.repository_name().unwrap(),
             folder_name(&repository.path().canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn should_give_the_folder_name_and_no_worktree_when_the_checkout_is_not_in_git() {
+        let directory = tempfile::tempdir().unwrap();
+        let checkout = Checkout::locate(directory.path()).unwrap();
+
+        assert_eq!(
+            checkout.origin().unwrap(),
+            CheckoutOrigin {
+                project: folder_name(&directory.path().canonicalize().unwrap()),
+                is_worktree: false,
+            }
+        );
+    }
+
+    #[test]
+    fn should_give_the_repository_name_and_no_worktree_when_the_checkout_is_the_main_one() {
+        let repository = initialized_repository();
+        let checkout = Checkout::locate(repository.path()).unwrap();
+
+        assert_eq!(
+            checkout.origin().unwrap(),
+            CheckoutOrigin {
+                project: folder_name(&repository.path().canonicalize().unwrap()),
+                is_worktree: false,
+            }
+        );
+    }
+
+    #[test]
+    fn should_give_the_repository_name_and_a_worktree_when_the_checkout_is_a_linked_worktree() {
+        let repository = initialized_repository();
+        git(
+            repository.path(),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "init",
+            ],
+        );
+        let linked = repository.path().join("linked");
+        git(
+            repository.path(),
+            &["worktree", "add", "-q", linked.to_str().unwrap()],
+        );
+        let checkout = Checkout::locate(&linked).unwrap();
+
+        assert_eq!(
+            checkout.origin().unwrap(),
+            CheckoutOrigin {
+                project: folder_name(&repository.path().canonicalize().unwrap()),
+                is_worktree: true,
+            }
         );
     }
 

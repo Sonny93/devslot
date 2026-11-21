@@ -103,6 +103,17 @@ impl Machine {
         std::fs::read_to_string(self.registry_path()).unwrap()
     }
 
+    /// Rewrites the registry without the `project` and `worktree` keys, as an
+    /// older version wrote it.
+    pub fn strip_origin_from_registry(&self) {
+        let text = self.read_registry();
+        let kept: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.starts_with("project = ") && !line.starts_with("worktree = "))
+            .collect();
+        std::fs::write(self.registry_path(), format!("{}\n", kept.join("\n"))).unwrap();
+    }
+
     /// The names of the instances in the registry, in file order; empty when
     /// the registry does not exist.
     pub fn instance_names(&self) -> Vec<String> {

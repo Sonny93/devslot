@@ -837,6 +837,7 @@ mod tests {
             }],
             host: format!("{name}.localhost"),
             web_port_variable: None,
+            origin: None,
             is_host_unsaved: false,
         }
     }

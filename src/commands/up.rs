@@ -202,6 +202,7 @@ mod tests {
             ],
             host: "app.localhost".to_owned(),
             web_port_variable: None,
+            origin: None,
             is_host_unsaved: false,
         }
     }

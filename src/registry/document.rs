@@ -8,7 +8,8 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Tab
 
 use super::RegistryError;
 use super::record::{
-    AssignedPort, InstanceRecord, PortDetail, Registry, RegistryChange, normalize_path,
+    AssignedPort, CheckoutOrigin, InstanceRecord, PortDetail, Registry, RegistryChange,
+    normalize_path,
 };
 use crate::discovery::PortKind;
 use crate::global_config::MAX_SLOT_SIZE;
@@ -27,6 +28,8 @@ const OPTED_OUT_KEY: &str = "opted_out";
 const INSTANCE_KEY: &str = "instance";
 const HOST_KEY: &str = "host";
 const WEB_PORT_KEY: &str = "web_port";
+const PROJECT_KEY: &str = "project";
+const WORKTREE_KEY: &str = "worktree";
 
 struct Problem {
     entry: String,
@@ -137,6 +140,21 @@ fn read_instance(table: &Table, index: usize) -> Result<InstanceRecord, Problem>
         is_host_unsaved: host.is_none(),
         host: host.unwrap_or_default(),
         web_port_variable,
+        origin: read_origin(table),
+    })
+}
+
+/// Reads the origin leniently: it is cosmetic, so anything but a non-empty
+/// `project` string with a `worktree` bool reads as absent, never as malformed.
+fn read_origin(table: &Table) -> Option<CheckoutOrigin> {
+    let project = table
+        .get(PROJECT_KEY)
+        .and_then(Item::as_str)
+        .filter(|project| !project.is_empty())?;
+    let is_worktree = table.get(WORKTREE_KEY).and_then(Item::as_bool)?;
+    Some(CheckoutOrigin {
+        project: project.to_owned(),
+        is_worktree,
     })
 }
 
@@ -576,6 +594,10 @@ fn new_table(record: &InstanceRecord, path_text: &str, needs_blank_line: bool) -
     if let Some(variable) = &record.web_port_variable {
         table.insert(WEB_PORT_KEY, value(variable.as_str()));
     }
+    if let Some(origin) = &record.origin {
+        table.insert(PROJECT_KEY, value(origin.project.as_str()));
+        table.insert(WORKTREE_KEY, value(origin.is_worktree));
+    }
     table
 }
 
@@ -608,6 +630,17 @@ fn update_table(table: &mut Table, record: &InstanceRecord) {
         table.insert(HOST_KEY, value(record.host.as_str()));
     }
     set_web_port_variable(table, record.web_port_variable.as_deref());
+    if let Some(origin) = &record.origin {
+        set_origin(table, origin);
+    }
+}
+
+fn set_origin(table: &mut Table, origin: &CheckoutOrigin) {
+    if read_origin(table).as_ref() == Some(origin) {
+        return;
+    }
+    table.insert(PROJECT_KEY, value(origin.project.as_str()));
+    table.insert(WORKTREE_KEY, value(origin.is_worktree));
 }
 
 fn set_web_port_variable(table: &mut Table, variable: Option<&str>) {
@@ -729,7 +762,15 @@ details = { PORT = { kind = "web" }, VITE_HMR_PORT = { kind = "web" }, DB_PORT =
             ports,
             host: format!("{name}.localhost"),
             web_port_variable: None,
+            origin: None,
             is_host_unsaved: false,
+        }
+    }
+
+    fn origin(project: &str, is_worktree: bool) -> CheckoutOrigin {
+        CheckoutOrigin {
+            project: project.to_owned(),
+            is_worktree,
         }
     }
 
@@ -1239,5 +1280,105 @@ details = { PORT = { kind = "web" }, VITE_HMR_PORT = { kind = "web" }, DB_PORT =
             .collect();
 
         assert_eq!(hosts, ["app-3f2a.localhost", "app-3f2a-1.localhost"]);
+    }
+
+    #[test]
+    fn should_round_trip_the_project_and_the_worktree_flag_of_an_entry() {
+        let mut record = record(
+            "/work/a",
+            "a",
+            (20050, 20099),
+            vec![web_port("PORT", 20050)],
+        );
+        record.origin = Some(origin("my-links", true));
+
+        let text = apply(EMPTY_REGISTRY, &record);
+
+        assert_eq!(parse(&text).unwrap().instances, vec![record]);
+    }
+
+    #[test]
+    fn should_read_no_origin_when_the_entry_predates_the_keys() {
+        assert_eq!(parse(SPEC_EXAMPLE).unwrap().instances[0].origin, None);
+    }
+
+    #[test]
+    fn should_read_no_origin_and_stay_valid_when_an_origin_key_is_missing_or_unusable() {
+        let cases = [
+            "project = \"my-links\"\n",
+            "worktree = true\n",
+            "project = 3\nworktree = true\n",
+            "project = \"my-links\"\nworktree = \"yes\"\n",
+            "project = \"\"\nworktree = true\n",
+        ];
+
+        let origins: Vec<Option<CheckoutOrigin>> = cases
+            .iter()
+            .map(|keys| {
+                let text = SPEC_EXAMPLE.replace("slot = 1\n", &format!("slot = 1\n{keys}"));
+                parse(&text).unwrap().instances[0].origin.clone()
+            })
+            .collect();
+
+        assert_eq!(origins, vec![None; cases.len()]);
+    }
+
+    #[test]
+    fn should_leave_exactly_one_project_and_one_worktree_key_when_an_unusable_entry_is_saved() {
+        let before =
+            SPEC_EXAMPLE.replace("slot = 1\n", "slot = 1\nproject = 3\nworktree = \"yes\"\n");
+        let mut saved = parse(&before).unwrap().instances[0].clone();
+        saved.origin = Some(origin("my-links", false));
+
+        let after = apply(&before, &saved);
+
+        assert_eq!(
+            (
+                after.matches("project =").count(),
+                after.matches("worktree =").count(),
+                parse(&after).unwrap().instances[0].origin.clone()
+            ),
+            (1, 1, Some(origin("my-links", false)))
+        );
+    }
+
+    #[test]
+    fn should_replace_the_origin_in_place_when_it_changes() {
+        let mut saved = record(
+            "/work/a",
+            "a",
+            (20050, 20099),
+            vec![web_port("PORT", 20050)],
+        );
+        saved.origin = Some(origin("my-links", false));
+        let before = apply(EMPTY_REGISTRY, &saved);
+        saved.origin = Some(origin("other", true));
+
+        let after = apply(&before, &saved);
+
+        assert_eq!(
+            after,
+            before
+                .replace("project = \"my-links\"", "project = \"other\"")
+                .replace("worktree = false", "worktree = true")
+        );
+    }
+
+    #[test]
+    fn should_leave_the_other_instances_and_comments_byte_for_byte_when_a_save_only_adds_the_origin()
+     {
+        let first = entry("/work/a", "a", (20050, 20099), 20050);
+        let second = entry("/work/b", "b", (20100, 20149), 20100);
+        let before = format!("# header\nversion = 1\n{first}# between a and b\n{second}# tail\n");
+        let mut updated = parse(&before).unwrap().instances[1].clone();
+        updated.origin = Some(origin("my-links", true));
+
+        let after = apply(&before, &updated);
+
+        let expected_second = format!("{second}project = \"my-links\"\nworktree = true\n");
+        assert_eq!(
+            after,
+            format!("# header\nversion = 1\n{first}# between a and b\n{expected_second}# tail\n")
+        );
     }
 }

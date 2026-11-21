@@ -151,12 +151,14 @@ name = "my-links-feat-auth-3f2a"
 slot = 1
 host = "my-links-feat-auth-3f2a.localhost"
 web_port = "PORT"   # only when [web] port is set
+project = "my-links"
+worktree = true
 range = [20050, 20099]
 ports = { PORT = 20050, VITE_HMR_PORT = 20051, DB_PORT = 20052 }
 details = { PORT = { kind = "web" }, VITE_HMR_PORT = { kind = "web" }, DB_PORT = { kind = "service", service = "postgres", target = 5432 } }
 ```
 
-`range` is the block the slot covered when assigned, so an instance keeps its ports after a change of slot size. `details` gives the kind of each port, and for a service port its compose service and container port, so `ds info` and `ds ls` need no Docker call. `host` is the instance's `DEVSLOT_HOST`, chosen at registration from the label of the instance name (`_` to `-`, at most 63 characters keeping the hash; `-<slot>`, then `-<slot>-<n>`, appended while another instance has the host) and stored: it is never recomputed. `web_port` is the variable `[web] port` named when the entry was last saved. An entry without `host` (written by an older version) gets one when it is read and saved at the next registration refresh; an invalid host, or one used by two entries, makes the registry malformed. A top-level `opted_out` list holds the paths of checkouts removed by `ds rm`.
+`range` is the block the slot covered when assigned, so an instance keeps its ports after a change of slot size. `details` gives the kind of each port, and for a service port its compose service and container port, so `ds info` and `ds ls` need no Docker call. `host` is the instance's `DEVSLOT_HOST`, chosen at registration from the label of the instance name (`_` to `-`, at most 63 characters keeping the hash; `-<slot>`, then `-<slot>-<n>`, appended while another instance has the host) and stored: it is never recomputed. `web_port` is the variable `[web] port` named when the entry was last saved. `project` (the raw repository name) and `worktree` (whether git counts the checkout as a linked worktree) come from one git call at registration, are always written together, and are read leniently: an entry without them, with one missing, of the wrong type or with an empty `project` reads as having no origin (`null` in `ds ls --json`) and never makes the registry malformed; the next registration fills them, and so does `ds ensure` except for non-git checkouts, main checkouts under the `require` guard and checkouts with writing disabled, which wait for the next `ds up` or `ds run`. An entry without `host` (written by an older version) gets one when it is read and saved at the next registration refresh; an invalid host, or one used by two entries, makes the registry malformed. A top-level `opted_out` list holds the paths of checkouts removed by `ds rm`.
 
 ## Environment and the `.env` block
 
@@ -252,7 +254,7 @@ require_exclude = []           # wins over require
 
 ## JSON output
 
-`ds ls --json`, `ds info --json` and `ds doctor --json` are versioned (`"version": 1`). Optional fields are omitted when empty.
+`ds ls --json`, `ds info --json` and `ds doctor --json` are versioned (`"version": 1`). One rule for absent values: a key is omitted when it does not apply (the per-port `service`, `target`, `url` and `forced`), and is `null` when the value is unknown or not set (`services_running`, `app_url`, `project`, `worktree`). A client ignores the keys it does not know: a later version only adds keys.
 
 `ds ls --json`:
 
@@ -263,9 +265,12 @@ require_exclude = []           # wins over require
   "instances": [
     {
       "name": "my-links-feat-auth-3f2a",
+      "project": "my-links",
       "path": "/home/me/dev/my-links.feat-auth",
+      "worktree": true,
       "slot": 1,
       "host": "my-links-feat-auth-3f2a.localhost",
+      "app_url": "http://my-links-feat-auth-3f2a.localhost:20050",
       "services_running": true,
       "ports": [
         { "var": "PORT", "port": 20050, "kind": "web", "url": "http://my-links-feat-auth-3f2a.localhost:20050" },
@@ -277,9 +282,9 @@ require_exclude = []           # wins over require
 }
 ```
 
-`shared` is always empty. `services_running` is `null` when Docker could not tell. Only web ports have a `url`. `port` is the effective port: the one allocated in the slot, or the value `devslot.local.toml` forces for that variable when it is canonical (1 to 65535, no sign or leading zero). `"forced": true` marks a forced port, absent otherwise; it lies outside the slot `range` and may be shared with another instance, so a consumer must not key on the port alone. `ds ls` reads only the `devslot.local.toml` of each instance, and lists the allocated ports when that file is missing or malformed.
+`shared` is an array of objects, always empty in v1; a client ignores keys it does not know. `project` is the raw repository name (the folder name outside git): the same for every worktree of a repository and not unique across repositories, so a client must not key on it. `worktree` is `true` for a linked git worktree, `false` for the main checkout or outside git, and `null` when the entry predates the field. Both are stored in the registry at registration, so `ds ls` runs no git. `app_url` is the one of `ds info --json`, `null` without `[web] port`. `services_running` is `null` when Docker could not tell. Only web ports have a `url`. `port` is the effective port: the one allocated in the slot, or the value `devslot.local.toml` forces for that variable when it is canonical (1 to 65535, no sign or leading zero). `"forced": true` marks a forced port, absent otherwise; it lies outside the slot `range` and may be shared with another instance, so a consumer must not key on the port alone. `ds ls` reads only the `devslot.local.toml` of each instance, and lists the allocated ports when that file is missing or malformed.
 
-`ds info --json` of a registered checkout has `version`, `registered: true`, `name`, `path`, `slot`, `host`, `app_url` (only when `[web] port` names a managed web port: `http://<host>:<port>`), `range` (`[first, last]`), `compose_file`, `compose_file_origin`, `ports` (same shape as above) and `services` (`running`, `stopped`, `none` or `unknown`). An unregistered checkout gives `version`, `registered: false`, `path` and `opted_out`.
+`ds info --json` of a registered checkout has `version`, `registered: true`, `name`, `path`, `slot`, `host`, `app_url` (`http://<host>:<port>` when `[web] port` names a managed web port, `null` otherwise), `range` (`[first, last]`), `compose_file`, `compose_file_origin`, `ports` (same shape as above) and `services` (`running`, `stopped`, `none` or `unknown`). An unregistered checkout gives `version`, `registered: false`, `path` and `opted_out`.
 
 `ds doctor --json` has `version`, `checkout`, `compose_file`, `ports` (`var`, `kind`, `default`, `source`, `file`, `service`, `target`), `findings` (`level`, `check`, `file`, `service`, `key`, `message`) and `summary` (`errors`, `warnings`).
 

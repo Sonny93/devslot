@@ -21,7 +21,7 @@ use crate::global_config::{GlobalConfig, effective_write_enabled};
 use crate::instance_name::{DEFAULT_HASH_LENGTH, FULL_HASH_LENGTH, HASH_LENGTH_STEP, derive_name};
 use crate::project::env_file::env_source;
 use crate::project_config::ProjectConfig;
-use crate::registry::record::{InstanceRecord, Registry, RegistryChange};
+use crate::registry::record::{CheckoutOrigin, InstanceRecord, Registry, RegistryChange};
 use crate::registry::store::{LockedRegistry, RegistryStore};
 
 /// The longest a command under a deadline waits for the registry lock.
@@ -183,7 +183,7 @@ struct Saved {
 
 struct Pending<'a> {
     context: &'a RegistrationContext<'a>,
-    repository: String,
+    origin: CheckoutOrigin,
     requests: Vec<PortRequest>,
     analysis: CheckoutAnalysis,
     is_writing: bool,
@@ -213,7 +213,7 @@ pub fn register(context: &RegistrationContext<'_>) -> Result<RegistrationOutcome
     }
     let pending = Pending {
         context,
-        repository: checkout.repository_name()?,
+        origin: checkout.origin()?,
         requests: analysis.ports.iter().map(PortRequest::from).collect(),
         analysis,
         is_writing,
@@ -267,7 +267,10 @@ fn register_locked(
     }
     let existing = locked.registry().find(root).cloned();
     let record = match allocate(pending, locked.registry(), existing.as_ref()) {
-        Ok(record) => with_web_port(record, &pending.analysis.config),
+        Ok(record) => with_origin(
+            with_web_port(record, &pending.analysis.config),
+            &pending.origin,
+        ),
         Err(error) => return Ok(Allocated::NoRoom(error)),
     };
     let change = change_of(existing.as_ref(), &record);
@@ -293,7 +296,7 @@ fn allocate(
     }
     let identity = NewInstanceIdentity {
         path: root.clone(),
-        name: unique_name(registry, &pending.repository, root),
+        name: unique_name(registry, &pending.origin.project, root),
     };
     allocate_new(
         identity,
@@ -307,6 +310,13 @@ fn allocate(
 fn with_web_port(record: InstanceRecord, config: &ProjectConfig) -> InstanceRecord {
     InstanceRecord {
         web_port_variable: config.web_port.clone(),
+        ..record
+    }
+}
+
+fn with_origin(record: InstanceRecord, origin: &CheckoutOrigin) -> InstanceRecord {
+    InstanceRecord {
+        origin: Some(origin.clone()),
         ..record
     }
 }
@@ -786,6 +796,7 @@ mod tests {
                     ports: vec![],
                     host: "app.localhost".to_owned(),
                     web_port_variable: None,
+                    origin: None,
                     is_host_unsaved: false,
                 })
             })
