@@ -95,7 +95,7 @@ port = "WEB_PORT"
 APP_BASE_URL = "http://${DEVSLOT_HOST}:${WEB_PORT}"
 ```
 
-`ds info --json` then gives `app_url` (`http://<DEVSLOT_HOST>:<port>`), the address to open in a browser. `DEVSLOT_HOST` is `<name>.localhost`: Chrome and Firefox resolve it to loopback and treat it as secure. Tools that are not browsers need `nss-myhostname` or `systemd-resolved`, and it does not work from a remote device or through a tunnel. Details: [Configuration](configuration.md#per-instance-host-and-web-port).
+`ds info --json` then gives `app_url` (`http://<DEVSLOT_HOST>:<port>`), the address to open in a browser. `DEVSLOT_HOST` is `<name>.localhost`: Chrome and Firefox resolve it to loopback and treat it as secure. Tools that are not browsers need `nss-myhostname` or `systemd-resolved`, and it does not work from a device without a tunnel; through an SSH tunnel on the same port, the browser of the other computer opens `app_url` as is. Details: [Configuration](configuration.md#per-instance-host-and-web-port).
 
 ## Several processes
 
