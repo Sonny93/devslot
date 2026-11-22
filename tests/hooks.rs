@@ -819,6 +819,30 @@ fn should_tell_the_agent_the_tunneler_host_is_invalid_and_leave_the_section_out(
 }
 
 #[test]
+fn should_tell_the_agent_when_the_plugin_copy_is_not_the_commit_ds_was_built_from() {
+    let project = git_project();
+    let plugin_root = "/cache/devslot/devslot/000000000000";
+    let input = input_for("SessionStart", &json!({"cwd": project.path()}));
+
+    let run = project.run_hook(
+        "session-start",
+        &input,
+        &[("CLAUDE_PLUGIN_ROOT", plugin_root)],
+    );
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    let build_commit = option_env!("DEVSLOT_BUILD_COMMIT").unwrap_or_default();
+    if build_commit.is_empty() {
+        assert_eq!(run.stdout, "");
+        return;
+    }
+    assert!(run.stdout.starts_with(&format!(
+        "devslot is out of step: ds was built from commit {} and Claude Code runs the plugin copy of commit 000000000000;",
+        &build_commit[..12]
+    )));
+}
+
+#[test]
 fn should_print_nothing_when_the_checkout_is_not_registered() {
     let project = git_project();
 

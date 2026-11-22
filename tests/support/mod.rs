@@ -368,7 +368,8 @@ impl Project {
                 "DOCKER_FAKE_FIXTURES",
                 fixture_docker_directory(self.scenario),
             )
-            .env_remove("NO_COLOR");
+            .env_remove("NO_COLOR")
+            .env_remove("CLAUDE_PLUGIN_ROOT");
         for (name, value) in environment {
             command.env(name, value);
         }
