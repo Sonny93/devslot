@@ -49,6 +49,7 @@ mod agent_rules_tests {
     const LANDING_COMMAND: &str = "ds worktree land";
     const EXITING_TOOL: &str = "ExitWorktree";
     const TUNNELER_COMMAND: &str = "tunneler";
+    const DISCARD_FLAG: &str = "discard_changes";
 
     fn readme_rules() -> &'static str {
         let from_heading = README
@@ -102,6 +103,14 @@ mod agent_rules_tests {
                 ("GUIDANCE", GUIDANCE),
             ],
             &[TUNNELER_COMMAND],
+        ));
+        problems.extend(missing(
+            &[
+                ("SKILL.md", SKILL),
+                ("the README rules for agents", readme_rules()),
+                ("GUIDANCE", GUIDANCE),
+            ],
+            &[DISCARD_FLAG],
         ));
 
         assert_eq!(problems, Vec::<String>::new());

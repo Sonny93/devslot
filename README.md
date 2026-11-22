@@ -47,6 +47,8 @@ Run the same command again after updating the clone: the hooks run the installed
 /plugin install devslot@devslot
 ```
 
+After pulling, update the plugin too: Claude Code keeps its own copy of it and refreshes it only when the version in `plugin/.claude-plugin/plugin.json` changes. Run `claude plugin marketplace update devslot` then `claude plugin update devslot@devslot`, and restart your Claude Code sessions.
+
 The plugin adds a `devslot` skill, a `/devslot:finish` command that closes a worktree task in one step (lands the work on the base branch, removes the worktree and so stops its environment), and four hooks (`WorktreeCreate`, `WorktreeRemove`, `PreToolUse` on `Bash` and on the file-writing tools, `SessionStart`). The `WorktreeCreate` hook replaces Claude Code's own worktree creation, and sessions started with `claude --worktree` need extra setup: see [Worktrees](docs/worktrees.md).
 
 ## Quick start
@@ -107,7 +109,7 @@ This repository runs several instances of its dev stack on one machine, one per 
 - Never run `ds rm`, `ds prune`, `ds worktree rm`, `docker compose down -v`, `docker volume rm` or remove containers by hand: it can delete another agent's data. Ask the user.
 - When the devslot worktree guard is on (the session start says so), the main checkout is for reading and searching only: before editing files or running `ds up`, `ds run` or `ds reset`, enter a worktree with the EnterWorktree tool, with a short name taken from the task, and never work around a refusal through Bash. Run `ds worktree land` only after the user's explicit go-ahead on the committed work (the yes to the closing question below, or `/devslot:finish`): it is fast-forward only, so when the base moved, run `git rebase <base>` in the worktree, resolve the conflicts, commit, and run `ds worktree land` again. Never push.
 - To remove this session's worktree when the user asks, leave it with the ExitWorktree tool, action `remove` and `discard_changes: true` (devslot's hook keeps a worktree that holds unsaved work or that another session uses); never leave with `keep` and then hand the user a removal command. When ExitWorktree says it was kept, run `ds ls`, which says why, and tell the user.
-- When the work is committed and verified, offer to close it in one question: land it on the base branch and remove the session's worktree (removing it also stops the app and deletes the instance's containers and volumes, so no `ds down` first). A yes covers both: run `ds worktree land`, then, once it succeeded, leave with ExitWorktree, action `remove`. The user can also type `/devslot:finish`, which is the go-ahead. Never land or remove without one of the two.
+- When the work is committed and verified, offer to close it in one question: land it on the base branch and remove the session's worktree (removing it also stops the app and deletes the instance's containers and volumes, so no `ds down` first). A yes covers both: run `ds worktree land`, then, once it succeeded, leave with ExitWorktree, action `remove` and `discard_changes: true`. The user can also type `/devslot:finish`, which is the go-ahead. Never land or remove without one of the two.
 - If `ds info` says this checkout is opted out, do not run `ds up` without asking the user.
 - `DEVSLOT_INSTANCE` names this instance; show it in logs or on a health endpoint when useful.
 - `ds doctor` explains why a checkout cannot be isolated.

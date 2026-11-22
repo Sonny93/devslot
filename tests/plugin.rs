@@ -40,7 +40,7 @@ fn should_name_the_plugin_the_same_in_the_marketplace_and_the_manifest() {
     assert_eq!(marketplace["owner"]["name"], "Sonny");
     assert_eq!(listed["name"], manifest["name"]);
     assert_eq!(listed["source"], "./plugin");
-    assert_eq!(manifest["version"], "0.1.0");
+    assert_eq!(manifest["version"], "0.2.0");
     assert_ne!(manifest["description"].as_str().unwrap_or_default(), "");
 }
 
