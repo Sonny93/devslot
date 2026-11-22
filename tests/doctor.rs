@@ -421,3 +421,30 @@ fn should_not_warn_when_the_other_checkout_tracks_its_forcing_file() {
 
     assert!(!finding_checks(&json_of(&run)).contains(&"forced_port_shared".to_owned()));
 }
+
+#[test]
+fn should_report_an_error_finding_when_the_tunneler_host_is_invalid() {
+    let project = Project::from_scenario("template");
+    project
+        .machine()
+        .write_global_config(&format!("{}[tunneler]\nhost = \"\"\n", support::TEST_SLOTS));
+
+    let run = project.doctor(&["doctor", "--json"]);
+
+    let report = json_of(&run);
+    let finding = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["check"] == "tunneler_host_invalid")
+        .unwrap();
+    assert_eq!(run.status, 1, "{}{}", run.stdout, run.stderr);
+    assert_eq!(finding["level"], "error");
+    assert_eq!(finding["key"], "tunneler.host");
+    assert!(
+        finding["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid [tunneler] host in ")
+    );
+}

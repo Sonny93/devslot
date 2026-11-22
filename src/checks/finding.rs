@@ -99,6 +99,8 @@ pub enum Check {
     WebPortUnmanaged,
     /// A `DEVSLOT_*` key in `.env` or `.env.example` outside the devslot block.
     EnvDevslotKeyOutsideBlock,
+    /// `[tunneler] host` in the global configuration cannot be used.
+    TunnelerHostInvalid,
 }
 
 /// One problem found in the project.

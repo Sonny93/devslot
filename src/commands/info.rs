@@ -1,5 +1,7 @@
 //! `ds info`: the name, slot and ports of the instance of this checkout.
 
+use std::path::Path;
+
 use crate::checkout::Checkout;
 use crate::cli::exit_code;
 use crate::cli::output::write_stdout;
@@ -10,10 +12,12 @@ use crate::compose::selection::{DevComposeSelection, select_dev_compose};
 use crate::effective_port::{EffectivePort, app_url, effective_ports, untracked_settings, url_of};
 use crate::environment::{build_environment, compose_file_paths};
 use crate::error::ToolError;
+use crate::global_config::GlobalConfig;
 use crate::project_config::ProjectConfig;
 use crate::registry::record::InstanceRecord;
 use crate::report::{InfoPort, InfoReport, REPORT_VERSION, RegisteredInfo, UnregisteredInfo};
 use crate::services_state::ServicesState;
+use crate::tunneler::{TunnelerHost, TunnelerSetting, tunneler_hint};
 
 const DETECTED_ORIGIN: &str = "detected";
 
@@ -23,11 +27,12 @@ pub fn run_info(as_json: bool) -> Result<u8, ToolError> {
     let machine = Machine::from_process()?;
     let registry = machine.store.read()?;
     let report = match registry.find(&checkout.root) {
-        Some(instance) => InfoReport::Registered(registered_info(
+        Some(instance) => InfoReport::Registered(Box::new(registered_info(
             &checkout,
             instance,
+            tunneler_host_of(&machine.paths.config_file).as_ref(),
             &DockerRunner::from_environment(),
-        )?),
+        )?)),
         None => InfoReport::Unregistered(UnregisteredInfo {
             version: REPORT_VERSION,
             registered: false,
@@ -49,22 +54,48 @@ fn render(report: &InfoReport, as_json: bool) -> Result<String, ToolError> {
     Ok(json)
 }
 
+/// The host `[tunneler] host` names. A global configuration that cannot be
+/// read or a bad value is told on stderr and costs the hint only.
+fn tunneler_host_of(config_file: &Path) -> Option<TunnelerHost> {
+    let global = match GlobalConfig::load(config_file) {
+        Ok(global) => global,
+        Err(error) => {
+            eprintln!("ds: warning: the Tunneler hint is left out: {error}");
+            return None;
+        }
+    };
+    match global.tunneler {
+        TunnelerSetting::NotSet => None,
+        TunnelerSetting::Host(host) => Some(host),
+        TunnelerSetting::Invalid { reason } => {
+            eprintln!(
+                "ds: error: invalid [tunneler] host in {}: {reason}; the Tunneler hint is left out",
+                config_file.display()
+            );
+            None
+        }
+    }
+}
+
 fn registered_info(
     checkout: &Checkout,
     instance: &InstanceRecord,
+    tunneler_host: Option<&TunnelerHost>,
     runner: &dyn ComposeRunner,
 ) -> Result<RegisteredInfo, ToolError> {
     let config = ProjectConfig::load(&checkout.root)?;
     let services =
         ServicesState::of(&runner.containers(&status_target(checkout, instance, &config)?));
-    describe_registered(checkout, instance, &config, services)
+    describe_registered(checkout, instance, &config, tunneler_host, services)
 }
 
-/// What is known about a registered checkout, with `services` as its state.
+/// What is known about a registered checkout, with `services` as its state
+/// and a Tunneler hint when `tunneler_host` is given.
 pub fn describe_registered(
     checkout: &Checkout,
     instance: &InstanceRecord,
     config: &ProjectConfig,
+    tunneler_host: Option<&TunnelerHost>,
     services: ServicesState,
 ) -> Result<RegisteredInfo, ToolError> {
     let selection = select_dev_compose(&checkout.root, config.compose_file.as_deref());
@@ -95,6 +126,7 @@ pub fn describe_registered(
         compose_file_origin,
         ports: ports.iter().map(|port| info_port(instance, port)).collect(),
         services,
+        tunneler: tunneler_host.and_then(|host| tunneler_hint(host, &instance.name)),
     })
 }
 
@@ -246,7 +278,7 @@ mod tests {
         let checkout = Checkout::locate(checkout_root.path()).unwrap();
         let config = ProjectConfig::default();
         let describe = |instance: &InstanceRecord| {
-            describe_registered(&checkout, instance, &config, ServicesState::Unknown)
+            describe_registered(&checkout, instance, &config, None, ServicesState::Unknown)
                 .unwrap()
                 .app_url
         };
@@ -271,6 +303,7 @@ mod tests {
             &checkout,
             &record,
             &ProjectConfig::default(),
+            None,
             ServicesState::Unknown,
         )
         .unwrap();
@@ -290,6 +323,7 @@ mod tests {
             &checkout,
             &instance(None),
             &ProjectConfig::default(),
+            None,
             ServicesState::Unknown,
         )
         .unwrap();
@@ -336,6 +370,7 @@ mod tests {
             &checkout,
             &instance(Some("PORT")),
             &config,
+            None,
             ServicesState::Unknown,
         )
         .unwrap();
@@ -343,6 +378,27 @@ mod tests {
         assert_eq!(
             info.app_url.as_deref(),
             Some("http://app-3f2a.localhost:3333")
+        );
+    }
+
+    #[test]
+    fn should_report_the_tunneler_hint_when_a_host_is_given() {
+        let checkout_root = tempfile::tempdir().unwrap();
+        let checkout = Checkout::locate(checkout_root.path()).unwrap();
+        let host = TunnelerHost::parse("vega").unwrap();
+
+        let report = describe_registered(
+            &checkout,
+            &instance(None),
+            &ProjectConfig::default(),
+            Some(&host),
+            ServicesState::Unknown,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.tunneler.map(|hint| hint.command),
+            Some("tunneler devslot vega app-3f2a".to_owned())
         );
     }
 }

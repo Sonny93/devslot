@@ -10,6 +10,7 @@ use crate::checks::forced_port_shared::{
 };
 use crate::checks::session::{SessionRoot, check_session_root};
 use crate::checks::slot::{SlotCheckInput, check_slot_geometry};
+use crate::checks::tunneler::check_tunneler;
 use crate::checks::vite::check_vite;
 use crate::checks::web_port::check_web_port;
 use crate::checks::worktree_guard::{GuardCheckInput, check_worktree_guard};
@@ -61,6 +62,9 @@ pub fn run_doctor_command(color: ColorChoice, as_json: bool) -> Result<u8, ToolE
         tracked_local_key: tracked_local_key(&checkout),
     };
     report.findings.extend(check_worktree_guard(guard_input));
+    report
+        .findings
+        .extend(check_tunneler(&global.tunneler, &machine.paths.config_file));
     report.summary = Summary::of(&report.findings);
     let text = if as_json {
         let mut json = serde_json::to_string_pretty(&report)

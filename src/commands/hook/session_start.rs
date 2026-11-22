@@ -22,11 +22,12 @@ use crate::kept_worktrees;
 use crate::project_config::ProjectConfig;
 use crate::report::RegisteredInfo;
 use crate::services_state::ServicesState;
+use crate::tunneler::{TunnelerHost, TunnelerSetting};
 use crate::worktree_guard::{GuardStatus, guard_status};
 
 const GUARD_BUDGET: Duration = Duration::from_secs(5);
 
-pub(super) const GUIDANCE: &str = "Use ds info --json for ports and URLs (open app_url when it has one); ds up --no-run starts the services (plain ds up then runs the app in the foreground and does not return); ds reset resets the data; ds down stops the app and the services, including processes started earlier; devslot never changes the project: when the app hardcodes a port or a URL or needs several processes, the project declares it in devslot.toml (run, [ports] extra, [env], [web] port), ds doctor says what to change, and you never run on the default ports instead; a service's own CLI runs with ds run -- docker compose -f <dev compose> exec <service> <cli>; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand. When the devslot worktree guard is on, enter a worktree with the EnterWorktree tool before writing code or starting an environment, and run ds worktree land only after the user's explicit go-ahead (the yes to the closing question, or /devslot:finish; fast-forward only: when the base moved, git rebase it in the worktree, resolve, commit, run ds worktree land again; never push); when the work is committed and verified, offer to close it in one question: land it on the base branch and remove the session's worktree (removing it also stops the app and deletes the instance's containers and volumes, so no ds down first); a yes covers both: run ds worktree land, then, once it succeeded, leave with ExitWorktree, action remove; the user can also type /devslot:finish, which is the go-ahead; never land or remove without one of the two. To remove this session's worktree when the user asks, leave it with the ExitWorktree tool, action remove and discard_changes true, never keep followed by a removal command; if it says the worktree was kept, ds ls says why.";
+pub(super) const GUIDANCE: &str = "Use ds info --json for ports and URLs (open app_url when it has one; when you give the user a URL of this instance, also give the tunneler command and link that ds info --json gives, when it has them: they open the instance from the user's computer); ds up --no-run starts the services (plain ds up then runs the app in the foreground and does not return); ds reset resets the data; ds down stops the app and the services, including processes started earlier; devslot never changes the project: when the app hardcodes a port or a URL or needs several processes, the project declares it in devslot.toml (run, [ports] extra, [env], [web] port), ds doctor says what to change, and you never run on the default ports instead; a service's own CLI runs with ds run -- docker compose -f <dev compose> exec <service> <cli>; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand. When the devslot worktree guard is on, enter a worktree with the EnterWorktree tool before writing code or starting an environment, and run ds worktree land only after the user's explicit go-ahead (the yes to the closing question, or /devslot:finish; fast-forward only: when the base moved, git rebase it in the worktree, resolve, commit, run ds worktree land again; never push); when the work is committed and verified, offer to close it in one question: land it on the base branch and remove the session's worktree (removing it also stops the app and deletes the instance's containers and volumes, so no ds down first); a yes covers both: run ds worktree land, then, once it succeeded, leave with ExitWorktree, action remove; the user can also type /devslot:finish, which is the go-ahead; never land or remove without one of the two. To remove this session's worktree when the user asks, leave it with the ExitWorktree tool, action remove and discard_changes true, never keep followed by a removal command; if it says the worktree was kept, ds ls says why.";
 const MAIN_CHECKOUT_LINE: &str = "devslot worktree guard is on: this is the main checkout, read and search here; before editing files or starting an environment (ds up, ds run, ds reset) enter a worktree with the EnterWorktree tool, with a short name taken from the task; when the user approves the committed work, run ds worktree land.";
 const LINKED_WORKTREE_LINE: &str = "devslot worktree guard is on: this is a linked worktree, work here; when the user approves the committed work, run ds worktree land.";
 const DISABLED_LINE: &str = "devslot worktree guard is off for this checkout: devslot.local.toml sets [worktrees] require = false.";
@@ -39,18 +40,64 @@ struct SessionStartInput {
 /// Reads the hook input from stdin and prints what the agent should know.
 pub fn run_session_start() -> Result<u8, HookFailure> {
     let input: SessionStartInput = read_input(std::io::stdin())?;
-    let guard = guard_line_of(&input.cwd);
-    let info = registered_info_of(&input.cwd);
-    if let Some(text) = session_text(guard.as_deref(), info.as_ref()) {
+    let machine = Machine::from_process().map_err(|error| error.to_string());
+    let global = load_global_config(&machine);
+    let notices = notice_lines(
+        guard_line_of(&input.cwd, &machine, &global),
+        tunneler_line_of(&global),
+    );
+    let tunneler_host = tunneler_host_of(&global);
+    let info = machine
+        .as_ref()
+        .ok()
+        .and_then(|machine| registered_info_of(&input.cwd, machine, tunneler_host.as_ref()));
+    if let Some(text) = session_text(notices.as_deref(), info.as_ref()) {
         write_stdout(&text)?;
     }
     Ok(exit_code::SUCCESS)
 }
 
+fn load_global_config(machine: &Result<Machine, String>) -> Result<GlobalConfig, String> {
+    let machine = machine.as_ref().map_err(Clone::clone)?;
+    GlobalConfig::load(&machine.paths.config_file).map_err(|error| error.to_string())
+}
+
+fn notice_lines(guard: Option<String>, tunneler: Option<String>) -> Option<String> {
+    let lines: Vec<String> = [guard, tunneler].into_iter().flatten().collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.join("\n"))
+}
+
+fn tunneler_line_of(global: &Result<GlobalConfig, String>) -> Option<String> {
+    match &global.as_ref().ok()?.tunneler {
+        TunnelerSetting::Invalid { reason } => Some(format!(
+            "the [tunneler] host in the devslot config is invalid ({reason}); tell the user"
+        )),
+        TunnelerSetting::NotSet | TunnelerSetting::Host(_) => None,
+    }
+}
+
+fn tunneler_host_of(global: &Result<GlobalConfig, String>) -> Option<TunnelerHost> {
+    match &global.as_ref().ok()?.tunneler {
+        TunnelerSetting::Host(host) => Some(host.clone()),
+        TunnelerSetting::NotSet | TunnelerSetting::Invalid { .. } => None,
+    }
+}
+
 /// The line about the worktree guard for the checkout of `directory`; `None`
 /// when the guard is not on for it. A failure to find out is a line too.
-fn guard_line_of(directory: &Path) -> Option<String> {
-    match guard_line_within(directory) {
+fn guard_line_of(
+    directory: &Path,
+    machine: &Result<Machine, String>,
+    global: &Result<GlobalConfig, String>,
+) -> Option<String> {
+    let outcome = match (machine, global) {
+        (Ok(machine), Ok(global)) => guard_line_within(directory, machine, global),
+        (Err(message), _) | (_, Err(message)) => Err(message.clone()),
+    };
+    match outcome {
         Ok(line) => line,
         Err(message) => Some(format!(
             "the devslot worktree guard could not be checked ({message}); tell the user"
@@ -58,10 +105,11 @@ fn guard_line_of(directory: &Path) -> Option<String> {
     }
 }
 
-fn guard_line_within(directory: &Path) -> Result<Option<String>, String> {
-    let machine = Machine::from_process().map_err(|error| error.to_string())?;
-    let global =
-        GlobalConfig::load(&machine.paths.config_file).map_err(|error| error.to_string())?;
+fn guard_line_within(
+    directory: &Path,
+    machine: &Machine,
+    global: &GlobalConfig,
+) -> Result<Option<String>, String> {
     if global.require.is_empty() {
         return Ok(None);
     }
@@ -106,19 +154,29 @@ fn kept_worktree_count(checkout: &Checkout, state_directory: &Path) -> Option<us
     Some(count)
 }
 
-fn registered_info_of(directory: &Path) -> Option<RegisteredInfo> {
+fn registered_info_of(
+    directory: &Path,
+    machine: &Machine,
+    tunneler_host: Option<&TunnelerHost>,
+) -> Option<RegisteredInfo> {
     let checkout = Checkout::locate(directory).ok()?;
-    let machine = Machine::from_process().ok()?;
     let registry = machine.store.read().ok()?;
     let instance = registry.find(&checkout.root)?;
     let config = ProjectConfig::load(&checkout.root).ok()?;
-    describe_registered(&checkout, instance, &config, ServicesState::Unknown).ok()
+    describe_registered(
+        &checkout,
+        instance,
+        &config,
+        tunneler_host,
+        ServicesState::Unknown,
+    )
+    .ok()
 }
 
-fn session_text(guard: Option<&str>, info: Option<&RegisteredInfo>) -> Option<String> {
+fn session_text(notices: Option<&str>, info: Option<&RegisteredInfo>) -> Option<String> {
     let mut text = String::new();
-    if let Some(guard) = guard {
-        text.push_str(guard);
+    if let Some(notices) = notices {
+        text.push_str(notices);
         text.push('\n');
     }
     if let Some(info) = info {
@@ -151,6 +209,7 @@ mod tests {
             compose_file_origin: None,
             ports: Vec::new(),
             services: ServicesState::Unknown,
+            tunneler: None,
         };
 
         let text = session_text(None, Some(&info)).unwrap();
@@ -169,6 +228,18 @@ mod tests {
     #[test]
     fn should_print_nothing_when_there_is_no_guard_line_and_no_instance() {
         assert_eq!(session_text(None, None), None);
+    }
+
+    #[test]
+    fn should_put_the_tunneler_line_after_the_guard_line() {
+        let notices = notice_lines(Some("guard".to_owned()), Some("tunneler".to_owned()));
+
+        assert_eq!(notices.as_deref(), Some("guard\ntunneler"));
+    }
+
+    #[test]
+    fn should_give_no_notice_when_there_is_neither_guard_nor_tunneler_line() {
+        assert_eq!(notice_lines(None, None), None);
     }
 
     #[test]

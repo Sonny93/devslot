@@ -256,6 +256,103 @@ fn should_give_the_project_and_the_worktree_flag_in_info_json_for_a_main_checkou
     );
 }
 
+fn registered_project_with_global_config(extra: &str) -> Project {
+    let project = Project::from_scenario("template");
+    project.run_with(&["run", "--", "true"], &[]);
+    project
+        .machine()
+        .write_global_config(&format!("{}{extra}", support::TEST_SLOTS));
+    project
+}
+
+#[test]
+fn should_give_no_tunneler_key_in_info_json_when_the_host_is_not_configured() {
+    let project = registered_project_with_global_config("");
+
+    let run = project.run_with(&["info", "--json"], &[]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(json_of(&run).get("tunneler").is_none());
+    assert_eq!(run.stderr, "");
+}
+
+#[test]
+fn should_give_the_tunneler_command_and_link_in_info_json_when_the_host_is_configured() {
+    let project = registered_project_with_global_config("[tunneler]\nhost = \"vega\"\n");
+
+    let run = project.run_with(&["info", "--json"], &[]);
+
+    let info = json_of(&run);
+    let name = info["name"].as_str().unwrap();
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(
+        info["tunneler"],
+        serde_json::json!({
+            "command": format!("tunneler devslot vega {name}"),
+            "url": format!("tunneler://devslot/vega/{name}"),
+        })
+    );
+}
+
+#[test]
+fn should_print_the_tunneler_section_in_info_text_when_the_host_is_configured() {
+    let project = registered_project_with_global_config("[tunneler]\nhost = \"vega\"\n");
+
+    let run = project.run_with(&["info"], &[]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(
+        run.stdout
+            .contains("\nOpen from your computer (Tunneler)\n  tunneler devslot vega ")
+    );
+    assert!(run.stdout.contains("\n  tunneler://devslot/vega/"));
+}
+
+#[test]
+fn should_print_no_tunneler_section_in_info_text_when_the_host_is_not_configured() {
+    let project = registered_project_with_global_config("");
+
+    let run = project.run_with(&["info"], &[]);
+
+    assert!(!run.stdout.contains("Tunneler"));
+}
+
+#[test]
+fn should_report_the_invalid_host_on_stderr_and_still_print_the_report_in_info() {
+    let project = registered_project_with_global_config("[tunneler]\nhost = \"-vega\"\n");
+
+    let run = project.run_with(&["info", "--json"], &[]);
+
+    let info = json_of(&run);
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(info.get("tunneler").is_none());
+    assert_eq!(info["registered"], true);
+    assert!(
+        run.stderr
+            .contains("ds: error: invalid [tunneler] host in ")
+    );
+    assert!(run.stderr.contains("config.toml"));
+    assert!(run.stderr.contains("must start with a letter or a digit"));
+}
+
+#[test]
+fn should_print_the_report_and_warn_on_stderr_when_the_global_config_is_broken_in_info() {
+    let project = registered_project_with_global_config("");
+    project
+        .machine()
+        .write_global_config("[slots]\nsize = 500\n");
+
+    let run = project.run_with(&["info", "--json"], &[]);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert_eq!(json_of(&run)["registered"], true);
+    assert!(
+        run.stderr
+            .contains("ds: warning: the Tunneler hint is left out")
+    );
+    assert!(run.stderr.contains("[slots] size"));
+}
+
 #[test]
 fn should_print_the_instance_as_text_in_info() {
     let project = Project::from_scenario("template");

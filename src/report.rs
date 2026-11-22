@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::checks::finding::{Finding, Summary};
 use crate::discovery::{ManagedPort, PortKind};
 use crate::services_state::ServicesState;
+use crate::tunneler::TunnelerHint;
 
 /// The version of the `--json` contract.
 pub const REPORT_VERSION: u8 = 1;
@@ -93,6 +94,11 @@ pub struct RegisteredInfo {
     pub ports: Vec<InfoPort>,
     /// Whether the compose services are up.
     pub services: ServicesState,
+    /// The command and the link that open the instance from the user's
+    /// computer through Tunneler. Absent, not `null`, when `[tunneler] host`
+    /// is not configured or invalid, or the name is outside the bounds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunneler: Option<TunnelerHint>,
 }
 
 /// What `ds info` says about a checkout that is not registered.
@@ -113,7 +119,7 @@ pub struct UnregisteredInfo {
 #[serde(untagged)]
 pub enum InfoReport {
     /// The checkout is registered.
-    Registered(RegisteredInfo),
+    Registered(Box<RegisteredInfo>),
     /// The checkout is not registered.
     Unregistered(UnregisteredInfo),
 }

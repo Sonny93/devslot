@@ -1,12 +1,13 @@
 //! The global configuration, `config.toml` in the devslot config folder.
 //!
-//! Only `[slots]`, `[auto]`, `[write]` and `[worktrees]` are modeled; other
+//! Only `[slots]`, `[auto]`, `[write]`, `[worktrees]` and `[tunneler]` are modeled; other
 //! keys and tables are accepted and ignored.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 use thiserror::Error;
 
 use crate::auto_scope::AutoScope;
@@ -14,6 +15,7 @@ use crate::port_range::PortRange;
 use crate::project::bounded_read::{BoundedRead, Unreadable, read_bounded};
 use crate::project_config::ProjectConfig;
 use crate::require_scope::RequireScope;
+use crate::tunneler::{TunnelerHost, TunnelerSetting};
 
 /// The largest slot size a configuration may ask for.
 pub const MAX_SLOT_SIZE: u16 = 100;
@@ -78,6 +80,26 @@ struct RawGlobalConfig {
     write: RawWrite,
     #[serde(default)]
     worktrees: RawWorktrees,
+    tunneler: Option<RawTunneler>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawTunneler {
+    Table(RawTunnelerTable),
+    Other(IgnoredAny),
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawTunnelerTable {
+    host: Option<RawTunnelerHost>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawTunnelerHost {
+    Text(String),
+    Other(IgnoredAny),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -162,6 +184,8 @@ pub struct GlobalConfig {
     /// `[worktrees] require` and `require_exclude`: where agents must work in
     /// a linked worktree. Empty covers nothing.
     pub require: RequireScope,
+    /// `[tunneler] host`, read leniently: a bad value never fails the load.
+    pub tunneler: TunnelerSetting,
 }
 
 impl Default for GlobalConfig {
@@ -172,6 +196,7 @@ impl Default for GlobalConfig {
             write_enabled: true,
             worktrees_root: None,
             require: RequireScope::default(),
+            tunneler: TunnelerSetting::NotSet,
         }
     }
 }
@@ -237,6 +262,7 @@ impl GlobalConfig {
             write_enabled: raw.write.enabled.unwrap_or(true),
             worktrees_root: worktrees_root_from(raw.worktrees.root, home).map_err(invalid)?,
             require,
+            tunneler: tunneler_from(raw.tunneler),
         })
     }
 
@@ -287,6 +313,28 @@ fn require_scope_from(
     check_patterns("[worktrees] require", &require)?;
     check_patterns("[worktrees] require_exclude", &exclude)?;
     Ok(RequireScope::new(require, exclude))
+}
+
+fn tunneler_from(raw: Option<RawTunneler>) -> TunnelerSetting {
+    let table = match raw {
+        None => return TunnelerSetting::NotSet,
+        Some(RawTunneler::Table(table)) => table,
+        Some(RawTunneler::Other(_)) => {
+            return TunnelerSetting::Invalid {
+                reason: "[tunneler] must be a table, not a single value".to_owned(),
+            };
+        }
+    };
+    match table.host {
+        None => TunnelerSetting::NotSet,
+        Some(RawTunnelerHost::Other(_)) => TunnelerSetting::Invalid {
+            reason: "must be a string".to_owned(),
+        },
+        Some(RawTunnelerHost::Text(text)) => match TunnelerHost::parse(&text) {
+            Ok(host) => TunnelerSetting::Host(host),
+            Err(reason) => TunnelerSetting::Invalid { reason },
+        },
+    }
 }
 
 fn check_patterns(key: &'static str, patterns: &[String]) -> Result<(), Violation> {
@@ -391,6 +439,80 @@ mod tests {
             GlobalConfigError::Invalid { key, .. } => key,
             other => panic!("unexpected error {other}"),
         }
+    }
+
+    fn tunneler_of(text: &str) -> TunnelerSetting {
+        parse(text).unwrap().tunneler
+    }
+
+    fn tunneler_reason(text: &str) -> String {
+        match tunneler_of(text) {
+            TunnelerSetting::Invalid { reason } => reason,
+            other => panic!("unexpected setting {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_not_set_the_tunneler_when_the_table_is_absent() {
+        assert_eq!(tunneler_of(""), TunnelerSetting::NotSet);
+    }
+
+    #[test]
+    fn should_not_set_the_tunneler_when_the_table_has_no_host() {
+        assert_eq!(tunneler_of("[tunneler]\n"), TunnelerSetting::NotSet);
+    }
+
+    #[test]
+    fn should_read_the_tunneler_host_when_it_is_a_valid_alias() {
+        assert_eq!(
+            tunneler_of("[tunneler]\nhost = \"vega\"\n"),
+            TunnelerSetting::Host(TunnelerHost::parse("vega").unwrap())
+        );
+    }
+
+    #[test]
+    fn should_flag_the_tunneler_host_invalid_when_it_is_outside_the_bounds() {
+        let too_long = "a".repeat(65);
+        let values = [
+            "",
+            too_long.as_str(),
+            "-vega",
+            ".vega",
+            "ve ga",
+            "ve/ga",
+            "me@vega",
+        ];
+
+        for value in values {
+            let text = format!("[tunneler]\nhost = \"{value}\"\n");
+            assert!(
+                matches!(tunneler_of(&text), TunnelerSetting::Invalid { .. }),
+                "{value:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn should_flag_the_tunneler_host_invalid_when_it_is_not_a_string() {
+        assert_eq!(
+            tunneler_reason("[tunneler]\nhost = 3\n"),
+            "must be a string"
+        );
+    }
+
+    #[test]
+    fn should_flag_the_tunneler_invalid_when_it_is_not_a_table() {
+        assert_eq!(
+            tunneler_reason("tunneler = \"x\"\n"),
+            "[tunneler] must be a table, not a single value"
+        );
+    }
+
+    #[test]
+    fn should_keep_reading_the_rest_of_the_file_when_the_tunneler_value_is_invalid() {
+        let config = parse("tunneler = \"x\"\n[worktrees]\nrequire = [\"/work/*\"]\n").unwrap();
+
+        assert!(!config.require.is_empty());
     }
 
     #[test]

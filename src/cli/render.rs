@@ -10,6 +10,7 @@ use crate::report::{
     DoctorReport, InfoPort, InfoReport, ListReport, RegisteredInfo, UnregisteredInfo,
 };
 use crate::shell_quote::shell_quote;
+use crate::tunneler::TunnelerHint;
 
 const LEVEL_WORD_WIDTH: usize = 7;
 const NO_VALUE: &str = "-";
@@ -263,9 +264,19 @@ fn render_registered_info_with(info: &RegisteredInfo, services: &str) -> String 
     }
     let _ = writeln!(output, "Compose file:  {compose}");
     let _ = writeln!(output, "Services:      {services}");
+    if let Some(hint) = &info.tunneler {
+        output.push_str(&render_tunneler_hint(hint));
+    }
     output.push_str("\nPorts\n");
     output.push_str(&render_info_ports(&info.ports));
     output
+}
+
+fn render_tunneler_hint(hint: &TunnelerHint) -> String {
+    format!(
+        "\nOpen from your computer (Tunneler)\n  {}\n  {}\n",
+        hint.command, hint.url
+    )
 }
 
 fn port_text(port: &InfoPort) -> String {
@@ -412,6 +423,7 @@ mod tests {
             range: [20050, 20099],
             compose_file: Some("dev.compose.yml".to_owned()),
             compose_file_origin: Some("detected".to_owned()),
+            tunneler: None,
             ports: vec![
                 crate::report::InfoPort {
                     variable: "PORT".to_owned(),
@@ -438,7 +450,7 @@ mod tests {
 
     #[test]
     fn should_render_the_registered_info_when_the_instance_has_ports() {
-        let text = render_info_text(&InfoReport::Registered(registered_info()));
+        let text = render_info_text(&InfoReport::Registered(Box::new(registered_info())));
 
         assert_eq!(
             text,
@@ -462,7 +474,7 @@ mod tests {
         info.ports[0].port = 3333;
         info.ports[0].forced = true;
 
-        let text = render_info_text(&InfoReport::Registered(info));
+        let text = render_info_text(&InfoReport::Registered(Box::new(info)));
 
         assert!(
             text.contains("PORT      3333 (forced in devslot.local.toml)"),
@@ -476,11 +488,33 @@ mod tests {
         let mut info = registered_info();
         info.app_url = Some("http://app-3f2a.localhost:20050".to_owned());
 
-        let text = render_info_text(&InfoReport::Registered(info));
+        let text = render_info_text(&InfoReport::Registered(Box::new(info)));
 
         assert!(text.contains(
             "Host:          app-3f2a.localhost\nApp URL:       http://app-3f2a.localhost:20050\nCompose file:"
         ));
+    }
+
+    #[test]
+    fn should_render_the_tunneler_section_between_the_header_and_the_ports_when_there_is_a_hint() {
+        let mut info = registered_info();
+        info.tunneler = Some(TunnelerHint {
+            command: "tunneler devslot vega app-3f2a".to_owned(),
+            url: "tunneler://devslot/vega/app-3f2a".to_owned(),
+        });
+
+        let text = render_info_text(&InfoReport::Registered(Box::new(info)));
+
+        assert!(text.contains(
+            "Services:      running\n\nOpen from your computer (Tunneler)\n  tunneler devslot vega app-3f2a\n  tunneler://devslot/vega/app-3f2a\n\nPorts\n"
+        ));
+    }
+
+    #[test]
+    fn should_render_no_tunneler_section_when_there_is_no_hint() {
+        let text = render_info_text(&InfoReport::Registered(Box::new(registered_info())));
+
+        assert!(!text.contains("Tunneler"));
     }
 
     #[test]
@@ -593,7 +627,7 @@ mod tests {
         info.compose_file_origin = None;
         info.ports.clear();
 
-        let text = render_info_text(&InfoReport::Registered(info));
+        let text = render_info_text(&InfoReport::Registered(Box::new(info)));
 
         assert!(text.contains("Compose file:  none\n"));
         assert!(text.ends_with("Ports\n  none\n"));

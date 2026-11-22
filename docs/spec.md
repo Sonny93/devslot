@@ -110,6 +110,7 @@ The same checks serve `ds up`, `ds run`, `ds ensure` and `ds doctor`. An error b
 | `compose_skipped`: a scanned compose file that Compose rejects on its own | warning | Override files and fragments fail alone; they are merged into the dev compose instead. |
 | `slot_geometry_changed`: the registered range no longer matches the slot settings | warning | The instance keeps its ports; a change of slot settings does not move it. |
 | `session_process_name`: `CLAUDE_PID` is set (a Claude Code session) and the session process is not named `claude`, or none is found (Linux only) | warning | No session lease is written, so a worktree removal by another session will not see this session's worktrees in use. |
+| `tunneler_host_invalid`: `[tunneler] host` in the global config is empty, longer than 64 characters, has a character outside `[A-Za-z0-9._-]`, does not start with a letter or a digit, or is not a string | error | Only `ds doctor` fails on it: `ds info` and the SessionStart context say it and leave the Tunneler hint out, every other command ignores it. |
 | `worktree_require_ignored`: `devslot.toml`, or a tracked `devslot.local.toml`, sets `[worktrees] require` | warning | Only an untracked `devslot.local.toml` can switch the worktree guard off for a checkout. |
 | `worktree_guard`: `[worktrees] require` is set | info | Says whether the guard is active, covers a linked worktree, is switched off locally, or does not cover the checkout. |
 | `worktree_guard_registered`: a covered main checkout is registered | info | `ds ensure` leaves its slot and `.env` block as they are and no longer updates them. |
@@ -248,13 +249,16 @@ enabled = true
 root = "~/dev/.worktrees"
 require = []                   # path globs of the main checkouts agents must not work in; empty means off
 require_exclude = []           # wins over require
+
+[tunneler]
+host = "vega"                  # SSH alias of this server on your computer; absent means off
 ```
 
 `[env]` keys match `[A-Za-z_][A-Za-z0-9_]*`, values are strings or integers, and `${NAME}` is replaced by an instance variable (an unknown name is an error; `${DEVSLOT_HOST}` is the instance's host). Reserved names and a denylist of names that make programs run code are refused. The committed `devslot.toml` may only set keys already declared in `.env` or `.env.example`; a managed port may be forced only in `devslot.local.toml`. `ds info` shows where the compose file choice comes from: `devslot.toml`, `devslot.local.toml` or `detected`.
 
 ## JSON output
 
-`ds ls --json`, `ds info --json` and `ds doctor --json` are versioned (`"version": 1`). One rule for absent values: a key is omitted when it does not apply (the per-port `service`, `target`, `url` and `forced`), and is `null` when the value is unknown or not set (`services_running`, `app_url`, `project`, `worktree`). A client ignores the keys it does not know: a later version only adds keys.
+`ds ls --json`, `ds info --json` and `ds doctor --json` are versioned (`"version": 1`). One rule for absent values: a key is omitted when it does not apply (the per-port `service`, `target`, `url` and `forced`), and is `null` when the value is unknown or not set (`services_running`, `app_url`, `project`, `worktree`). One exception to the `null` half: `tunneler` in `ds info --json` is omitted, never `null`, when it is not configured, invalid, or the instance name is outside its bounds. Absent means the integration is off, and a `null` would make agents mention it. A client ignores the keys it does not know: a later version only adds keys.
 
 `ds ls --json`:
 
@@ -284,7 +288,7 @@ require_exclude = []           # wins over require
 
 `shared` is an array of objects, always empty in v1; a client ignores keys it does not know. `project` is the raw repository name (the folder name outside git): the same for every worktree of a repository and not unique across repositories, so a client must not key on it. `worktree` is `true` for a linked git worktree, `false` for the main checkout or outside git, and `null` when the entry predates the field. Both are stored in the registry at registration, so `ds ls` runs no git. `app_url` is the one of `ds info --json`, `null` without `[web] port`. `services_running` is `null` when Docker could not tell. Only web ports have a `url`. `port` is the effective port: the one allocated in the slot, or the value `devslot.local.toml` forces for that variable when it is canonical (1 to 65535, no sign or leading zero). `"forced": true` marks a forced port, absent otherwise; it lies outside the slot `range` and may be shared with another instance, so a consumer must not key on the port alone. `ds ls` reads only the `devslot.local.toml` of each instance, and lists the allocated ports when that file is missing or malformed.
 
-`ds info --json` of a registered checkout has `version`, `registered: true`, `name`, `project` and `worktree` (as in `ds ls --json`), `path`, `slot`, `host`, `app_url` (`http://<host>:<port>` when `[web] port` names a managed web port, `null` otherwise), `range` (`[first, last]`), `compose_file`, `compose_file_origin`, `ports` (same shape as above) and `services` (`running`, `stopped`, `none` or `unknown`). An unregistered checkout gives `version`, `registered: false`, `path` and `opted_out`.
+`ds info --json` of a registered checkout has `version`, `registered: true`, `name`, `project` and `worktree` (as in `ds ls --json`), `path`, `slot`, `host`, `app_url` (`http://<host>:<port>` when `[web] port` names a managed web port, `null` otherwise), `range` (`[first, last]`), `compose_file`, `compose_file_origin`, `ports` (same shape as above), `services` (`running`, `stopped`, `none` or `unknown`) and, only when `[tunneler] host` is valid in the global config, `tunneler` (`{"command": "tunneler devslot <host> <instance>", "url": "tunneler://devslot/<host>/<instance>"}`, both segments percent-encoded). `ds ls --json` has no `tunneler`. An unregistered checkout gives `version`, `registered: false`, `path` and `opted_out`.
 
 `ds doctor --json` has `version`, `checkout`, `compose_file`, `ports` (`var`, `kind`, `default`, `source`, `file`, `service`, `target`), `findings` (`level`, `check`, `file`, `service`, `key`, `message`) and `summary` (`errors`, `warnings`).
 

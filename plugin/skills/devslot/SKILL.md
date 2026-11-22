@@ -25,6 +25,6 @@ devslot gives each checkout or worktree of a project its own slot of ports and i
 
 ## Good to know
 
-- `ds info --json` gives the `url` of each web port: use it instead of building `http://localhost:<port>` yourself. When it has `app_url`, open that one: it uses the instance's own host, so the cookies of other instances do not mix with yours.
+- `ds info --json` gives the `url` of each web port: use it instead of building `http://localhost:<port>` yourself. When it has `app_url`, open that one: it uses the instance's own host, so the cookies of other instances do not mix with yours. When you give the user a URL of this instance, also give the `tunneler` command and link that `ds info --json` gives, when it has them: they open the instance from the user's computer.
 - A service's own CLI (psql, redis-cli) runs with `ds run -- docker compose -f <dev compose> exec <service> <cli>`: `ds run` pins the instance's Compose project.
 - The block at the end of `.env` already gives the instance's ports to commands that read `.env` (the app, its tests, Compose), so plain commands work without `ds run`. Never edit the block by hand: ds rewrites it.

@@ -779,9 +779,43 @@ fn should_print_the_info_and_the_guidance_when_the_checkout_is_registered() {
     assert!(run.stdout.contains("Services:      run ds info to check\n"));
     assert!(run.stdout.contains("DB_PORT"));
     assert!(run.stdout.ends_with(
-        "Use ds info --json for ports and URLs (open app_url when it has one); ds up --no-run starts the services (plain ds up then runs the app in the foreground and does not return); ds reset resets the data; ds down stops the app and the services, including processes started earlier; devslot never changes the project: when the app hardcodes a port or a URL or needs several processes, the project declares it in devslot.toml (run, [ports] extra, [env], [web] port), ds doctor says what to change, and you never run on the default ports instead; a service's own CLI runs with ds run -- docker compose -f <dev compose> exec <service> <cli>; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand. When the devslot worktree guard is on, enter a worktree with the EnterWorktree tool before writing code or starting an environment, and run ds worktree land only after the user's explicit go-ahead (the yes to the closing question, or /devslot:finish; fast-forward only: when the base moved, git rebase it in the worktree, resolve, commit, run ds worktree land again; never push); when the work is committed and verified, offer to close it in one question: land it on the base branch and remove the session's worktree (removing it also stops the app and deletes the instance's containers and volumes, so no ds down first); a yes covers both: run ds worktree land, then, once it succeeded, leave with ExitWorktree, action remove; the user can also type /devslot:finish, which is the go-ahead; never land or remove without one of the two. To remove this session's worktree when the user asks, leave it with the ExitWorktree tool, action remove and discard_changes true, never keep followed by a removal command; if it says the worktree was kept, ds ls says why.\n"
+        "Use ds info --json for ports and URLs (open app_url when it has one; when you give the user a URL of this instance, also give the tunneler command and link that ds info --json gives, when it has them: they open the instance from the user's computer); ds up --no-run starts the services (plain ds up then runs the app in the foreground and does not return); ds reset resets the data; ds down stops the app and the services, including processes started earlier; devslot never changes the project: when the app hardcodes a port or a URL or needs several processes, the project declares it in devslot.toml (run, [ports] extra, [env], [web] port), ds doctor says what to change, and you never run on the default ports instead; a service's own CLI runs with ds run -- docker compose -f <dev compose> exec <service> <cli>; never run ds rm, ds prune, ds worktree rm or delete containers or volumes by hand. When the devslot worktree guard is on, enter a worktree with the EnterWorktree tool before writing code or starting an environment, and run ds worktree land only after the user's explicit go-ahead (the yes to the closing question, or /devslot:finish; fast-forward only: when the base moved, git rebase it in the worktree, resolve, commit, run ds worktree land again; never push); when the work is committed and verified, offer to close it in one question: land it on the base branch and remove the session's worktree (removing it also stops the app and deletes the instance's containers and volumes, so no ds down first); a yes covers both: run ds worktree land, then, once it succeeded, leave with ExitWorktree, action remove; the user can also type /devslot:finish, which is the go-ahead; never land or remove without one of the two. To remove this session's worktree when the user asks, leave it with the ExitWorktree tool, action remove and discard_changes true, never keep followed by a removal command; if it says the worktree was kept, ds ls says why.\n"
     ));
     assert_eq!(project.machine().docker_log(), Vec::<String>::new());
+}
+
+#[test]
+fn should_print_the_tunneler_section_in_the_session_context_when_the_host_is_configured() {
+    let project = git_project();
+    project.run(&["run", "--", "true"]);
+    project
+        .machine()
+        .write_global_config(&format!("{TEST_SLOTS}[tunneler]\nhost = \"vega\"\n"));
+
+    let run = session_start(&project);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(
+        run.stdout
+            .contains("\nOpen from your computer (Tunneler)\n  tunneler devslot vega ")
+    );
+}
+
+#[test]
+fn should_tell_the_agent_the_tunneler_host_is_invalid_and_leave_the_section_out() {
+    let project = git_project();
+    project.run(&["run", "--", "true"]);
+    project
+        .machine()
+        .write_global_config(&format!("{TEST_SLOTS}[tunneler]\nhost = 3\n"));
+
+    let run = session_start(&project);
+
+    assert_eq!(run.status, 0, "{}", run.stderr);
+    assert!(run.stdout.starts_with(
+        "the [tunneler] host in the devslot config is invalid (must be a string); tell the user\n"
+    ));
+    assert!(!run.stdout.contains("Open from your computer"));
 }
 
 #[test]
