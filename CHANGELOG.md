@@ -4,6 +4,8 @@ All notable changes to devslot are written here for the people who use it. The f
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-22
+
 ### Added
 
 - Port slots and a compose project per checkout: each checkout or worktree of a project gets its own block of ports and its own compose project, so two instances never share containers, volumes or ports. A machine-wide registry keeps every instance apart.
@@ -16,3 +18,6 @@ All notable changes to devslot are written here for the people who use it. The f
 - `ds ls --json` and `ds info --json` give scripts and other tools a stable, versioned description of the instances.
 - Tunneler integration: with a `[tunneler] host` in the global config, `ds info` and the session start give the command and the link that open the instance from your computer.
 - Packages for Debian and Ubuntu (`.deb`), Arch Linux (`.pkg.tar.zst`) and other Linux x86_64 distributions (archive with an install script), with checksums.
+
+[Unreleased]: https://github.com/Sonny93/devslot/compare/v0.1.0...main
+[0.1.0]: https://github.com/Sonny93/devslot/releases/tag/v0.1.0
