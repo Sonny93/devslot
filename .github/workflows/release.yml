@@ -3,13 +3,16 @@
 # Order matters. The checks and a static musl smoke build run first, so a
 # broken build never gets a tag. The reusable release workflow then bumps
 # Cargo.toml, Cargo.lock and package.json, updates CHANGELOG.md, tags and
-# creates the GitHub release. release-it runs without the deploy key; the
+# creates the GitHub release as a draft. release-it runs without the deploy key; the
 # reusable workflow verifies the release commit, rebuilds it with the bot
 # identity, creates the annotated tag itself and pushes with the deploy key.
 # The packages are built last, from the release commit SHA the workflow
-# outputs (the build checks the tag points at it), and attached to that
-# release: a package build failure leaves a release without packages, which
-# `gh release upload --clobber` fixes by re-running the failed jobs.
+# outputs (the build checks the tag points at it), attached to the draft
+# release, and only then is the release published. Once immutable releases are
+# on, the assets and the tag of a published release can no longer change. A
+# failed build leaves a draft release, which users do not see; re-running the
+# failed jobs fixes it (`gh release upload --clobber` only matters while the
+# release is a draft).
 #
 # The build job has no write permission and no cache (a poisoned cache must
 # not reach a released binary); only the upload job can write to the release.
@@ -63,9 +66,10 @@ jobs:
     needs: [checks, musl-check]
     permissions:
       contents: write
-    uses: minimalstuff/tooling/.github/workflows/release.yml@d14b617c700f4c1a8e8d0f38e62a867b52c2d57e # v0.12.0
+    uses: minimalstuff/tooling/.github/workflows/release.yml@d181376184823bf5043059ef4f9f3f17f8e98ef0 # v0.13.0
     with:
       increment: ${{ inputs.increment }}
+      draft: true
       check-release-command: node scripts/check-release.mjs
       node-version-file: .node-version
       version-files: package.json Cargo.toml Cargo.lock
@@ -246,7 +250,7 @@ jobs:
             exit 1
           fi
 
-      - name: Attach the packages to the GitHub release
+      - name: Attach the packages to the draft release and publish it
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release.outputs.tag }}
@@ -254,3 +258,4 @@ jobs:
         run: |
           set -euo pipefail
           gh release upload "$TAG" "$PACKAGES_DIRECTORY"/* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
