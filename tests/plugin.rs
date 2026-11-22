@@ -40,8 +40,16 @@ fn should_name_the_plugin_the_same_in_the_marketplace_and_the_manifest() {
     assert_eq!(marketplace["owner"]["name"], "Sonny");
     assert_eq!(listed["name"], manifest["name"]);
     assert_eq!(listed["source"], "./plugin");
-    assert_eq!(manifest["version"], "0.2.0");
     assert_ne!(manifest["description"].as_str().unwrap_or_default(), "");
+}
+
+#[test]
+fn should_leave_the_version_out_so_claude_code_refreshes_its_copy_at_every_commit() {
+    let marketplace = read_json(".claude-plugin/marketplace.json");
+    let manifest = read_json("plugin/.claude-plugin/plugin.json");
+
+    assert!(manifest.get("version").is_none());
+    assert!(marketplace["plugins"][0].get("version").is_none());
 }
 
 #[test]
