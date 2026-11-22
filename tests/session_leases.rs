@@ -8,12 +8,15 @@ mod support;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use devslot::worktree_lock::WorktreeKey;
 use serde_json::json;
 use support::{Project, Run, TEST_SLOTS};
 
-const SLEEP_PROGRAM: &str = "/bin/sleep";
+const SESSION_SCRIPT: &str = "while :; do sleep 1; done";
+const COMM_WAIT_LIMIT: Duration = Duration::from_secs(5);
+const COMM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SHELL_PROGRAM: &str = "/bin/sh";
 const START_TIME_TOKEN_AFTER_NAME: usize = 19;
 const DEAD_SESSION: (i32, u64) = (2_000_000_000, 1);
@@ -76,15 +79,20 @@ impl Sandbox {
         program
     }
 
+    /// A shell named `claude` looping over short sleeps: it never depends on
+    /// how a multicall coreutils handles argv[0], and a killed session leaves
+    /// at most a one second sleep behind.
     fn spawn_session(&self) -> Child {
-        Command::new(self.fake_program(SLEEP_PROGRAM))
-            .arg("60")
+        let session = Command::new(self.fake_program(SHELL_PROGRAM))
+            .args(["-c", SESSION_SCRIPT])
             .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .unwrap()
+            .unwrap();
+        assert_comm_is_claude(session.id());
+        session
     }
 
     fn lease_folder(&self, worktree: &Path) -> PathBuf {
@@ -124,6 +132,19 @@ fn start_time_of(pid: u32) -> u64 {
         .unwrap()
         .parse()
         .unwrap()
+}
+
+fn assert_comm_is_claude(pid: u32) {
+    let started = Instant::now();
+    let mut comm = String::new();
+    while started.elapsed() < COMM_WAIT_LIMIT {
+        comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        if comm.trim() == "claude" {
+            return;
+        }
+        std::thread::sleep(COMM_POLL_INTERVAL);
+    }
+    panic!("the fake session {pid} is not a live process named claude (comm: {comm:?})");
 }
 
 fn kill(mut session: Child) {
