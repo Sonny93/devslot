@@ -1,11 +1,16 @@
 //! Exposes the commit `ds` is built from as `DEVSLOT_BUILD_COMMIT` (empty
 //! when it cannot be told), so the session-start hook can compare it with
-//! the plugin copy Claude Code runs. A failure here never fails the build.
+//! the plugin copy Claude Code runs. It also exposes `DEVSLOT_BUILD_KIND`:
+//! `release` when HEAD is exactly the tag `v<version>`, `clone` otherwise, so
+//! the hook words its advice for the way `ds` was installed. A failure here
+//! never fails the build.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const COMMIT_LENGTH: usize = 40;
+const RELEASE_KIND: &str = "release";
+const CLONE_KIND: &str = "clone";
 
 fn main() {
     let manifest_directory = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
@@ -14,8 +19,21 @@ fn main() {
         .filter(|commit| is_full_commit(commit))
         .unwrap_or_default();
     println!("cargo:rustc-env=DEVSLOT_BUILD_COMMIT={commit}");
+    println!(
+        "cargo:rustc-env=DEVSLOT_BUILD_KIND={}",
+        build_kind(manifest_directory)
+    );
     if !commit.is_empty() {
         watch_head(manifest_directory);
+    }
+}
+
+fn build_kind(directory: &Path) -> &'static str {
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let tag = git_output(directory, &["describe", "--exact-match", "--tags", "HEAD"]);
+    match tag {
+        Some(tag) if !version.is_empty() && tag == format!("v{version}") => RELEASE_KIND,
+        _ => CLONE_KIND,
     }
 }
 

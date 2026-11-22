@@ -4,7 +4,7 @@ Run several instances of the same dev stack on one machine: each checkout or wor
 
 ## Status
 
-v1 is in development and nothing is released.
+0.1 is the first public version and it is not stable yet: commands, `devslot.toml` and the rules the plugin gives agents may change between 0.x versions. See the [changelog](CHANGELOG.md).
 
 ## Why
 
@@ -34,7 +34,30 @@ v1 is in development and nothing is released.
 
 ## Install
 
-Requires Linux, Docker with the Compose plugin, git and rustup (the toolchain is pinned in `rust-toolchain.toml`). From a clone of this repository, on `main`:
+Requires Linux x86_64, Docker with the Compose plugin and git. Download the package for your distribution from the [releases page](https://github.com/Sonny93/devslot/releases) (`<v>` is the version):
+
+```sh
+sudo apt install ./devslot_<v>_amd64.deb                  # Debian, Ubuntu
+sudo pacman -U devslot-<v>-1-x86_64.pkg.tar.zst           # Arch Linux, CachyOS
+```
+
+Both install `ds` in `/usr/bin`. Then add the Claude Code plugin: `setup-plugin.sh` points it at the release of the installed `ds`, so the two match exactly.
+
+```sh
+/usr/share/devslot/setup-plugin.sh
+```
+
+On another distribution, unpack `devslot-<v>-x86_64-linux.tar.gz` and run `./install.sh`: it copies `ds` to `~/.local/bin` (or `$DEVSLOT_BIN_DIR`; the directory must be on your `PATH` because the plugin hooks call `ds` by name) and runs `setup-plugin.sh`. To verify a download, put it next to `SHA256SUMS` and run:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+After an upgrade, run `setup-plugin.sh` again and restart your Claude Code sessions: the session start tells the agent when `ds` and the plugin come from different releases.
+
+### From source
+
+Requires rustup too (the toolchain is pinned in `rust-toolchain.toml`). From a clone of this repository, on `main`:
 
 ```sh
 scripts/install.sh
@@ -148,6 +171,8 @@ cargo test --locked
 - [Worktrees](docs/worktrees.md): creation, lifecycle, worktrees in use, stopped processes
 - [Specification](docs/spec.md)
 - [Decisions](docs/decisions.md)
+- [Releasing](docs/releasing.md): how a maintainer cuts a release
+- [Changelog](CHANGELOG.md)
 
 ## License
 

@@ -1,0 +1,52 @@
+# Built by .github/workflows/release.yml: VERSION is the release version, and
+# the static binary and the files below are laid out as in the repository.
+name: devslot
+arch: amd64
+platform: linux
+version: ${VERSION}
+section: devel
+priority: optional
+maintainer: Sonny
+description: Run several instances of the same dev stack on one machine
+homepage: https://github.com/Sonny93/devslot
+license: MIT
+
+depends:
+  - git
+
+contents:
+  - src: target/x86_64-unknown-linux-musl/release/ds
+    dst: /usr/bin/ds
+    file_info:
+      mode: 0755
+  - src: packaging/setup-plugin.sh
+    dst: /usr/share/devslot/setup-plugin.sh
+    file_info:
+      mode: 0755
+  - src: README.md
+    dst: /usr/share/doc/devslot/README.md
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/devslot/copyright
+    packager: deb
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/licenses/devslot/LICENSE
+    packager: archlinux
+    file_info:
+      mode: 0644
+
+archlinux:
+  packager: Sonny
+
+overrides:
+  deb:
+    recommends:
+      - docker-ce-cli | docker.io
+      - docker-compose-plugin
+  archlinux:
+    recommends:
+      - docker
+      - docker-compose

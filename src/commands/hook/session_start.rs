@@ -30,6 +30,10 @@ const BUILD_COMMIT: &str = match option_env!("DEVSLOT_BUILD_COMMIT") {
     Some(commit) => commit,
     None => "",
 };
+const BUILD_KIND: &str = match option_env!("DEVSLOT_BUILD_KIND") {
+    Some(kind) => kind,
+    None => "",
+};
 const PLUGIN_ROOT_VARIABLE: &str = "CLAUDE_PLUGIN_ROOT";
 const SHORT_COMMIT_LENGTH: usize = 12;
 const FULL_COMMIT_LENGTH: usize = 40;
@@ -38,6 +42,35 @@ pub(super) const GUIDANCE: &str = "Use ds info --json for ports and URLs (open a
 const MAIN_CHECKOUT_LINE: &str = "devslot worktree guard is on: this is the main checkout, read and search here; before editing files or starting an environment (ds up, ds run, ds reset) enter a worktree with the EnterWorktree tool, with a short name taken from the task; when the user approves the committed work, run ds worktree land.";
 const LINKED_WORKTREE_LINE: &str = "devslot worktree guard is on: this is a linked worktree, work here; when the user approves the committed work, run ds worktree land.";
 const DISABLED_LINE: &str = "devslot worktree guard is off for this checkout: devslot.local.toml sets [worktrees] require = false.";
+
+/// How the running `ds` was installed, which decides the advice of the drift
+/// line: a release is fixed by the release's own script, a clone by the
+/// clone's installer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildKind {
+    Release,
+    Clone,
+}
+
+impl BuildKind {
+    fn from_build_value(value: &str) -> Self {
+        if value == "release" {
+            return Self::Release;
+        }
+        Self::Clone
+    }
+
+    fn advice(self) -> &'static str {
+        match self {
+            Self::Clone => {
+                "tell the user to run scripts/install.sh in the devslot clone on main, then restart the Claude Code sessions."
+            }
+            Self::Release => {
+                "tell the user to run /usr/share/devslot/setup-plugin.sh (or setup-plugin.sh from the release archive), which points the plugin at the release of this ds, then restart the Claude Code sessions."
+            }
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct SessionStartInput {
@@ -53,6 +86,7 @@ pub fn run_session_start() -> Result<u8, HookFailure> {
         guard_line_of(&input.cwd, &machine, &global),
         tunneler_line_of(&global),
         drift_line_of(
+            BuildKind::from_build_value(BUILD_KIND),
             BUILD_COMMIT,
             std::env::var_os(PLUGIN_ROOT_VARIABLE)
                 .as_deref()
@@ -92,7 +126,11 @@ fn notice_lines(
 /// plugin has no version, so Claude Code names its copy after the first 12
 /// characters of the commit, and the last component of the plugin root is
 /// that name. Only the environment is read: no file, no git call.
-fn drift_line_of(build_commit: &str, plugin_root: Option<&Path>) -> Option<String> {
+fn drift_line_of(
+    kind: BuildKind,
+    build_commit: &str,
+    plugin_root: Option<&Path>,
+) -> Option<String> {
     let plugin_commit = plugin_root?.file_name()?.to_str()?;
     if !is_short_commit(plugin_commit) || !is_full_commit(build_commit) {
         return None;
@@ -101,8 +139,9 @@ fn drift_line_of(build_commit: &str, plugin_root: Option<&Path>) -> Option<Strin
         return None;
     }
     let build_short = &build_commit[..SHORT_COMMIT_LENGTH];
+    let advice = kind.advice();
     Some(format!(
-        "devslot is out of step: ds was built from commit {build_short} and Claude Code runs the plugin copy of commit {plugin_commit}; tell the user to run scripts/install.sh in the devslot clone on main, then restart the Claude Code sessions."
+        "devslot is out of step: ds was built from commit {build_short} and Claude Code runs the plugin copy of commit {plugin_commit}; {advice}"
     ))
 }
 
@@ -304,7 +343,7 @@ mod tests {
     const BUILD: &str = "36294cdd320a1111111111111111111111111111";
 
     fn drift_for(build: &str, root: &str) -> Option<String> {
-        drift_line_of(build, Some(Path::new(root)))
+        drift_line_of(BuildKind::Clone, build, Some(Path::new(root)))
     }
 
     #[test]
@@ -330,6 +369,29 @@ mod tests {
     }
 
     #[test]
+    fn should_advise_the_release_script_when_ds_is_a_release_build() {
+        let line = drift_line_of(
+            BuildKind::Release,
+            BUILD,
+            Some(Path::new("/cache/devslot/devslot/cc52b387482e")),
+        );
+
+        assert_eq!(
+            line.as_deref(),
+            Some(
+                "devslot is out of step: ds was built from commit 36294cdd320a and Claude Code runs the plugin copy of commit cc52b387482e; tell the user to run /usr/share/devslot/setup-plugin.sh (or setup-plugin.sh from the release archive), which points the plugin at the release of this ds, then restart the Claude Code sessions."
+            )
+        );
+    }
+
+    #[test]
+    fn should_read_the_build_kind_and_default_to_clone() {
+        assert_eq!(BuildKind::from_build_value("release"), BuildKind::Release);
+        assert_eq!(BuildKind::from_build_value("clone"), BuildKind::Clone);
+        assert_eq!(BuildKind::from_build_value(""), BuildKind::Clone);
+    }
+
+    #[test]
     fn should_give_no_drift_line_when_the_build_commit_starts_with_the_plugin_copy_name() {
         assert_eq!(
             drift_for(BUILD, "/cache/devslot/devslot/36294cdd320a"),
@@ -348,7 +410,7 @@ mod tests {
 
     #[test]
     fn should_give_no_drift_line_when_the_plugin_root_is_unknown() {
-        assert_eq!(drift_line_of(BUILD, None), None);
+        assert_eq!(drift_line_of(BuildKind::Clone, BUILD, None), None);
         assert_eq!(drift_for(BUILD, ""), None);
     }
 

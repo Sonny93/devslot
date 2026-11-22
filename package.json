@@ -1,0 +1,15 @@
+{
+  "name": "devslot",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Release tooling only: devslot itself is a Rust crate (Cargo.toml).",
+  "packageManager": "pnpm@12.21.0",
+  "scripts": {
+    "release": "release-it"
+  },
+  "devDependencies": {
+    "@release-it/keep-a-changelog": "^8.0.1",
+    "release-it": "^21.1.2"
+  }
+}
