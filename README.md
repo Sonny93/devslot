@@ -47,7 +47,7 @@ Run the same command again after updating the clone: the hooks run the installed
 /plugin install devslot@devslot
 ```
 
-After pulling, update the plugin too: Claude Code keeps its own copy of it and refreshes it only when the version in `plugin/.claude-plugin/plugin.json` changes. Run `claude plugin marketplace update devslot` then `claude plugin update devslot@devslot`, and restart your Claude Code sessions.
+After pulling, update the plugin too: Claude Code keeps its own copy of it, named after the commit of the clone, and refreshes it only on request. Run `claude plugin marketplace update devslot` then `claude plugin update devslot@devslot`, and restart your Claude Code sessions.
 
 The plugin adds a `devslot` skill, a `/devslot:finish` command that closes a worktree task in one step (lands the work on the base branch, removes the worktree and so stops its environment), and four hooks (`WorktreeCreate`, `WorktreeRemove`, `PreToolUse` on `Bash` and on the file-writing tools, `SessionStart`). The `WorktreeCreate` hook replaces Claude Code's own worktree creation, and sessions started with `claude --worktree` need extra setup: see [Worktrees](docs/worktrees.md).
 
