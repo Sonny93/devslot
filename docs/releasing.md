@@ -21,8 +21,9 @@ While devslot is in 0.x, use `minor` for a breaking change and `patch` for the r
 In order:
 
 1. CI runs (format, clippy, tests).
-2. The reusable release workflow of minimalstuff/tooling runs release-it with keep-a-changelog: it turns `## [Unreleased]` into the version section, bumps `package.json`, `Cargo.toml` and `Cargo.lock`, commits `chore(release): vX.Y.Z`, tags, pushes with the deploy key, and creates the GitHub release from the CHANGELOG section.
-3. A static musl `ds` is built from the tag, then packaged and attached to the release: `devslot_<v>_amd64.deb`, `devslot-<v>-1-x86_64.pkg.tar.zst`, `devslot-<v>-x86_64-linux.tar.gz` and `SHA256SUMS`.
+2. The reusable release workflow of minimalstuff/tooling (0.12.0) runs release-it with keep-a-changelog, without the deploy key: it turns `## [Unreleased]` into the version section and bumps `package.json`, `Cargo.toml` and `Cargo.lock`. It then verifies the release commit, rebuilds it as `chore(release): vX.Y.Z` with the bot identity, creates the annotated tag itself, pushes with the deploy key, and creates the GitHub release from the CHANGELOG section.
+3. A static musl `ds` is built from the release commit SHA the workflow outputs (the build checks that the tag points at it), then packaged: `devslot_<v>_amd64.deb`, `devslot-<v>-1-x86_64.pkg.tar.zst`, `devslot-<v>-x86_64-linux.tar.gz` and `SHA256SUMS`.
+4. The upload job downloads the artifact by id, checks the sha256 of `SHA256SUMS` against the one the build job output, runs `sha256sum --check`, checks the directory holds exactly the listed files, then attaches them to the release.
 
 The release exists a few minutes before its assets do. A musl smoke build before the tag guards the build step.
 
@@ -30,9 +31,9 @@ The release exists a few minutes before its assets do. A musl smoke build before
 
 - Environment `release`, limited to `main`, holding the secret `RELEASE_DEPLOY_KEY`.
 - Deploy key "release" with write access to the repository.
-- Tag ruleset "Release tags": only the deploy key can create, update or delete tags. A moved tag would change the hook code every user runs.
+- Tag ruleset "Release tags": only the deploy key can create, update or delete tags. A moved tag would change the hook code every user runs. Since tooling 0.12.0 the deploy key is never given to release-it, only to the job that creates the tag.
 - Ruleset "Protect main": no deletion, no force push.
 
 ## When the build fails after the tag
 
-The tag and the release already exist. Re-run the failed jobs from the Actions run: the upload uses `--clobber`, so running it again replaces the assets without error. Do not delete or move the tag.
+The tag and the release already exist (releases are not drafts). Re-run the failed jobs from the Actions run: the build runs again from the same release commit, the upload checks the new artifact and uses `--clobber`, so running it again replaces the assets without error. Do not delete or move the tag.
