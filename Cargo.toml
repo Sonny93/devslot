@@ -1,6 +1,8 @@
 [package]
 name = "devslot"
 description = "Run several instances of the same dev stack on one machine"
+license = "MIT"
+repository = "https://github.com/Sonny93/devslot"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"

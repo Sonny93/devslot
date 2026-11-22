@@ -148,3 +148,7 @@ cargo test --locked
 - [Worktrees](docs/worktrees.md): creation, lifecycle, worktrees in use, stopped processes
 - [Specification](docs/spec.md)
 - [Decisions](docs/decisions.md)
+
+## License
+
+MIT, see [LICENSE](LICENSE).
