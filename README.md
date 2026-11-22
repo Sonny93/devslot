@@ -34,20 +34,23 @@ v1 is in development and nothing is released.
 
 ## Install
 
-Requires Linux, Docker with the Compose plugin, git and rustup (the toolchain is pinned in `rust-toolchain.toml`). From a clone of this repository:
+Requires Linux, Docker with the Compose plugin, git and rustup (the toolchain is pinned in `rust-toolchain.toml`). From a clone of this repository, on `main`:
+
+```sh
+scripts/install.sh
+```
+
+Run it again after every pull. It builds and installs `ds` (the hooks run the installed `ds`, and it must be on your `PATH` because the plugin hooks call it by name), then adds the plugin on the first run or updates it on the next ones. Claude Code keeps its own copy of the plugin, named after the commit of the clone, and refreshes it only on request: that is the update step. Restart your Claude Code sessions afterwards. The script warns when the plugin comes from another clone than the one you ran it in, or when you run it from a worktree or a branch other than `main`.
+
+By hand, the same steps are:
 
 ```sh
 cargo install --path . --locked
+claude plugin marketplace add <path to the clone, or Sonny93/devslot>   # first install
+claude plugin install devslot@devslot                                   # first install
+claude plugin marketplace update devslot                                # after a pull
+claude plugin update devslot@devslot                                    # after a pull
 ```
-
-Run the same command again after updating the clone: the hooks run the installed `ds`. `ds` must be on your `PATH`: the plugin hooks call it by name. Then, in Claude Code:
-
-```
-/plugin marketplace add <path to the clone, or Sonny93/devslot>
-/plugin install devslot@devslot
-```
-
-After pulling, update the plugin too: Claude Code keeps its own copy of it, named after the commit of the clone, and refreshes it only on request. Run `claude plugin marketplace update devslot` then `claude plugin update devslot@devslot`, and restart your Claude Code sessions.
 
 The plugin adds a `devslot` skill, a `/devslot:finish` command that closes a worktree task in one step (lands the work on the base branch, removes the worktree and so stops its environment), and four hooks (`WorktreeCreate`, `WorktreeRemove`, `PreToolUse` on `Bash` and on the file-writing tools, `SessionStart`). The `WorktreeCreate` hook replaces Claude Code's own worktree creation, and sessions started with `claude --worktree` need extra setup: see [Worktrees](docs/worktrees.md).
 
